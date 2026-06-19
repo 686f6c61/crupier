@@ -1,0 +1,33 @@
+{
+  "name": "example-routing",
+  "cases": [
+    {
+      "id": "fast_small_task",
+      "task": "Answer a short support question in one sentence.",
+      "mode": "fast",
+      "expect": {
+        "strategy": "single",
+        "max_models": 1
+      }
+    },
+    {
+      "id": "research_architecture",
+      "task": "Compare two agent architectures, identify risks, and recommend one.",
+      "mode": "research",
+      "expect": {
+        "strategy": "fusion",
+        "min_models": 2,
+        "max_models": 4
+      }
+    },
+    {
+      "id": "private_local_first",
+      "task": "Route a confidential internal planning request.",
+      "mode": "private",
+      "expect": {
+        "strategy": "local_first",
+        "roles_include": ["primary"]
+      }
+    }
+  ]
+}

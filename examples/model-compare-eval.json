@@ -1,0 +1,18 @@
+{
+  "name": "model-compare-smoke",
+  "cases": [
+    {
+      "id": "fast_support_answer",
+      "task": "Answer a support question in one concise sentence.",
+      "mode": "fast"
+    },
+    {
+      "id": "agentic_code_plan",
+      "task": "Plan a code-changing agent step and mention rollback risk.",
+      "mode": "agentic",
+      "constraints": {
+        "risk_level": "high"
+      }
+    }
+  ]
+}
