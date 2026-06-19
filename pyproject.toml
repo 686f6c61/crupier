@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crupier"
+version = "0.1.0"
+description = "Python orchestration SDK for routing, combining, and auditing AI model calls."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+  { name = "Crupier contributors" }
+]
+keywords = ["ai", "agents", "llm", "routing", "orchestration", "model-selection"]
+classifiers = [
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/686f6c61/crupier"
+Changelog = "https://github.com/686f6c61/crupier/blob/main/CHANGELOG.md"
+Issues = "https://github.com/686f6c61/crupier/issues"
+
+[project.optional-dependencies]
+openai = ["openai>=1"]
+anthropic = ["anthropic>=0.40"]
+google = ["google-genai>=1"]
+ollama = []
+openrouter = ["openai>=1"]
+pdf = ["pypdf>=5"]
+all = [
+  "openai>=1",
+  "anthropic>=0.40",
+  "google-genai>=1",
+  "pypdf>=5",
+]
+dev = ["pytest>=8", "build>=1", "twine>=5", "pip-audit>=2", "ruff>=0.14", "trove-classifiers>=2026.6.1.19", "PyYAML>=6"]
+
+[project.scripts]
+crupier = "crupier.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+crupier = ["py.typed"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

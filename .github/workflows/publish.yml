@@ -1,0 +1,116 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Package version to publish, for example 0.1.0."
+        required: true
+        type: string
+      confirm_publish:
+        description: "Confirm this manual run should publish to PyPI."
+        required: true
+        default: false
+        type: boolean
+
+concurrency:
+  group: pypi-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/crupier
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+      - name: Verify publish event matches package version
+        env:
+          REQUESTED_VERSION: ${{ github.event.inputs.version }}
+          CONFIRM_PUBLISH: ${{ github.event.inputs.confirm_publish }}
+          RELEASE_IS_DRAFT: ${{ github.event.release.draft }}
+          RELEASE_IS_PRERELEASE: ${{ github.event.release.prerelease }}
+          RELEASE_TARGET_COMMITISH: ${{ github.event.release.target_commitish }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import subprocess
+          import tomllib
+
+          version = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          event = os.environ["GITHUB_EVENT_NAME"]
+          allowed = {version, f"v{version}"}
+          subprocess.run(["git", "fetch", "--quiet", "origin", "main:refs/remotes/origin/main", "--tags"], check=True)
+          head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+          main_head = subprocess.check_output(["git", "rev-parse", "origin/main"], text=True).strip()
+          if head != main_head:
+              raise SystemExit("Publish commit does not match origin/main.")
+          if event == "release":
+              tag = os.environ["GITHUB_REF_NAME"]
+              if os.environ.get("RELEASE_IS_DRAFT", "").lower() == "true":
+                  raise SystemExit("Publishing from draft GitHub Releases is not allowed.")
+              if os.environ.get("RELEASE_IS_PRERELEASE", "").lower() == "true":
+                  raise SystemExit("Publishing from prerelease GitHub Releases is not allowed.")
+              target = os.environ.get("RELEASE_TARGET_COMMITISH", "")
+              if target != "main":
+                  raise SystemExit(f"Release target {target!r} is not the main branch.")
+              if tag not in allowed:
+                  raise SystemExit(f"Release tag {tag!r} does not match package version {version!r}.")
+          elif event == "workflow_dispatch":
+              branch = os.environ["GITHUB_REF_NAME"]
+              if branch != "main":
+                  raise SystemExit(f"Manual publish branch {branch!r} is not main.")
+              requested = os.environ.get("REQUESTED_VERSION", "")
+              confirmed = os.environ.get("CONFIRM_PUBLISH", "").lower() == "true"
+              if requested != version:
+                  raise SystemExit(f"Manual publish version {requested!r} does not match package version {version!r}.")
+              if not confirmed:
+                  raise SystemExit("Manual publish requires confirm_publish=true.")
+          else:
+              raise SystemExit(f"Unsupported publish event {event!r}.")
+          PY
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Run critical lint
+        run: python -m ruff check src tests --select E9,F63,F7,F82
+      - name: Audit Python dependencies
+        run: python -m pip_audit --skip-editable --progress-spinner off
+      - name: Release readiness check
+        env:
+          FIRST_PUBLIC_RELEASE_VERSION: "0.1.0"
+        run: |
+          VERSION="$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])')"
+          EXTRA_ARGS=""
+          if [ "$VERSION" != "$FIRST_PUBLIC_RELEASE_VERSION" ]; then
+            EXTRA_ARGS="--allow-existing-pypi-project"
+          fi
+          crupier release check --strict-public --verify-project-urls --check-pypi-name $EXTRA_ARGS
+      - name: Build distributions
+        run: python -m build --sdist --wheel --outdir dist
+      - name: Check distributions
+        run: python -m twine check dist/*
+      - name: Upload distributions artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: crupier-distributions
+          path: dist/*
+          if-no-files-found: error
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

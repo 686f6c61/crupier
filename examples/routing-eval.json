@@ -1,0 +1,84 @@
+{
+  "name": "workplace-routing-eval",
+  "cases": [
+    {
+      "id": "support_fast_billing_reply",
+      "task": "Draft a short billing-support reply for a duplicated seat charge.",
+      "input": {
+        "ticket_priority": "normal",
+        "plan": "Team",
+        "customer_message": "We were charged twice after upgrading seats yesterday."
+      },
+      "mode": "fast",
+      "constraints": {
+        "max_latency_ms": 2500,
+        "max_cost_usd": 0.01
+      },
+      "expect": {
+        "strategy": "single",
+        "max_models": 1
+      }
+    },
+    {
+      "id": "agentic_pr_high_risk_review",
+      "task": "Review a pull request that changes payment retry logic, identify rollback risk, and recommend merge blockers.",
+      "input": {
+        "changed_files": ["src/retries.py", "src/provider_webhooks.py", "tests/test_retries.py"],
+        "risk_notes": ["idempotency", "provider timeouts", "recurring invoices"]
+      },
+      "mode": "agentic",
+      "constraints": {
+        "risk_level": "high",
+        "requires_tools": true
+      },
+      "expect": {
+        "strategy_in": ["critique_repair", "single"],
+        "min_models": 1
+      }
+    },
+    {
+      "id": "research_architecture_tradeoff",
+      "task": "Compare two agent architectures, identify reliability and cost risks, and recommend one for production.",
+      "mode": "research",
+      "expect": {
+        "strategy": "fusion",
+        "min_models": 2,
+        "max_models": 4
+      }
+    },
+    {
+      "id": "private_local_first_strategy",
+      "task": "Route a confidential internal planning request for an unreleased acquisition memo.",
+      "mode": "private",
+      "expect": {
+        "strategy": "local_first",
+        "roles_include": ["primary"]
+      }
+    },
+    {
+      "id": "structured_claim_extraction",
+      "task": "Extract claim id, repair total, missing evidence, and human-adjuster requirement from an insurance claim package.",
+      "mode": "structured",
+      "constraints": {
+        "strict_response_schema": true,
+        "risk_level": "medium"
+      },
+      "expect": {
+        "strategy_in": ["cascade", "single"],
+        "roles_include": ["primary"]
+      }
+    },
+    {
+      "id": "cheap_help_center_cleanup",
+      "task": "Summarize and normalize 200 short help-center article titles before a knowledge-base cleanup.",
+      "mode": "cheap",
+      "constraints": {
+        "max_cost_usd": 0.03
+      },
+      "expect": {
+        "strategy_in": ["cascade", "single"],
+        "max_models": 2
+      }
+    }
+  ]
+}

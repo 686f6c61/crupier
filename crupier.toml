@@ -1,0 +1,88 @@
+[project]
+name = "crupier-dev"
+default_profile = "agentic"
+
+[providers.openai]
+enabled = true
+env_key = "OPENAI_API_KEY"
+
+[providers.anthropic]
+enabled = true
+env_key = "ANTHROPIC_API_KEY"
+
+[providers.google]
+enabled = true
+env_key = "GOOGLE_API_KEY"
+
+[providers.ollama]
+enabled = true
+host = "https://ollama.com/api"
+env_key = "OLLAMA_API_KEY"
+
+[providers.openrouter]
+enabled = false
+mode = "byok"
+host = "https://openrouter.ai/api/v1"
+env_key = "OPENROUTER_API_KEY"
+
+[models]
+allow = [
+  "openai:gpt-5.5",
+  "openai:gpt-5.4-mini",
+  "anthropic:claude-sonnet-4-6",
+  "anthropic:claude-opus-4-8",
+  "google:gemini-3.5-flash",
+  "ollama:gpt-oss:120b",
+]
+deny = []
+
+[routing]
+default_strategy = "orchestrated"
+allow_fusion = true
+allow_parallel = true
+allow_latest_aliases = false
+allow_preview_models = false
+max_cost_per_request_usd = 1.00
+max_latency_ms = 30000
+max_depth = 8
+max_calls = 12
+
+[orchestrator]
+mode = "deterministic"
+model = "openai:gpt-5.4-mini"
+fallback_model = "openai:gpt-5.4-mini"
+fallback = "deterministic"
+temperature = 0
+require_validated_plan = true
+max_repairs = 1
+allow_prompt_summary_only = true
+
+[logging]
+mode = "metadata"
+store_prompts = false
+store_responses = false
+redact_secrets = true
+
+[profiles.agentic]
+prefer = ["tool_use", "coding", "long_horizon", "reliability"]
+strategy = "orchestrated"
+
+[profiles.cheap]
+prefer = ["low_cost"]
+strategy = "cascade"
+
+[profiles.fast]
+prefer = ["low_latency"]
+strategy = "single"
+
+[profiles.private]
+prefer = ["local", "zdr", "no_prompt_logging"]
+strategy = "local_first"
+
+[profiles.research]
+prefer = ["consensus", "critique"]
+strategy = "fusion"
+
+[profiles.structured]
+prefer = ["structured_output", "schema_validity"]
+strategy = "cascade"

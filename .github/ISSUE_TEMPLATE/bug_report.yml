@@ -1,0 +1,75 @@
+name: Bug report
+description: Report a reproducible Crupier problem.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please redact API keys, prompts, customer data, provider responses, and local `.crupier/` artifacts before posting.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I have removed API keys, bearer tokens, prompts, provider responses, customer data, `.env`, and `.crupier/` artifacts.
+          required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Minimal commands, config, or code needed to reproduce the issue.
+      placeholder: |
+        crupier init
+        crupier route "..."
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      options:
+        - Python SDK
+        - CLI
+        - OpenAI-compatible server
+        - Provider adapter
+        - Model discovery/update
+        - Routing/orchestrator
+        - Multimodal/file routing
+        - Release/readiness check
+        - README/examples/package metadata
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Crupier version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Python version, OS, provider extras installed, and relevant package versions.
+      placeholder: |
+        Python:
+        OS:
+        Install command:
+        Provider extras:
+    validations:
+      required: true
+  - type: textarea
+    id: provider
+    attributes:
+      label: Provider context
+      description: Provider/model names, whether this was dry-run or real execution, and sanitized error text. Do not paste keys or private outputs.
+    validations:
+      required: false

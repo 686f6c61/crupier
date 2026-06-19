@@ -1,0 +1,40 @@
+{
+  "name": "workplace-model-compare",
+  "cases": [
+    {
+      "id": "fast_support_billing_reply",
+      "task": "Answer a billing support ticket about a duplicated seat charge in a concise, non-defensive tone.",
+      "mode": "fast",
+      "constraints": {
+        "max_latency_ms": 2500,
+        "max_cost_usd": 0.01
+      }
+    },
+    {
+      "id": "agentic_payment_retry_review",
+      "task": "Review a payment-retry code change and list production risks, missing tests, and rollback concerns.",
+      "mode": "agentic",
+      "constraints": {
+        "risk_level": "high",
+        "requires_tools": true
+      }
+    },
+    {
+      "id": "structured_claim_summary",
+      "task": "Extract claim id, incident date, repair total, missing evidence, and human-adjuster requirement from a claim package.",
+      "mode": "structured",
+      "constraints": {
+        "strict_response_schema": true
+      }
+    },
+    {
+      "id": "research_vendor_decision",
+      "task": "Compare two LLM provider strategies for a workplace agent rollout and recommend the lower-risk option.",
+      "mode": "research",
+      "constraints": {
+        "risk_level": "medium",
+        "max_cost_usd": 0.12
+      }
+    }
+  ]
+}

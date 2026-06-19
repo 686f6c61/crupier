@@ -1,0 +1,53 @@
+name: Feature request
+description: Propose a capability, provider, workflow, README, example, or package metadata improvement.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the real project or agent workflow this would improve. Please do not include secrets, private prompts, or customer data.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: I have removed API keys, bearer tokens, prompts, provider responses, customer data, `.env`, and `.crupier/` artifacts.
+          required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: What are you trying to build or adopt Crupier into?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should Crupier do differently?
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Routing/orchestrator
+        - Provider adapter
+        - Drop-in adoption
+        - OpenAI-compatible server
+        - Multimodal/file handling
+        - Evals/feedback
+        - Security/privacy defaults
+        - Release/readiness
+        - README/examples/package metadata
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Cost, latency, privacy, provider, deployment, or compatibility constraints that matter.
+    validations:
+      required: false
