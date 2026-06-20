@@ -10,6 +10,7 @@ from .adapters.common import build_prompt
 from .config import CrupierConfig
 from .costs import actual_cost_from_calls
 from .errors import (
+    CrupierProviderAuthError,
     CrupierProviderRateLimitError,
     CrupierModelUnsupportedError,
     CrupierProviderUnavailableError,
@@ -462,7 +463,7 @@ class RouteExecutor:
             call_started = perf_counter()
             try:
                 response = adapter.generate(model=model, prompt=prompt, request=request)
-            except (CrupierProviderRateLimitError, CrupierProviderUnavailableError) as exc:
+            except (CrupierProviderAuthError, CrupierProviderRateLimitError, CrupierProviderUnavailableError) as exc:
                 duration_ms = int((perf_counter() - call_started) * 1000)
                 retryable = attempt <= max_retries and self._provider_error_retryable(exc)
                 last_error = exc
@@ -517,6 +518,8 @@ class RouteExecutor:
 
     @staticmethod
     def _provider_error_retryable(exc: Exception) -> bool:
+        if isinstance(exc, CrupierProviderAuthError):
+            return False
         if isinstance(exc, CrupierProviderRateLimitError):
             return True
         return bool(getattr(exc, "retryable", True))

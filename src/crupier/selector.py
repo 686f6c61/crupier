@@ -7,6 +7,8 @@ from typing import Any
 
 from .capabilities import CapabilityEvidence, capability_evidence
 from .config import CrupierConfig
+from .costs import estimate_model_cost, estimate_tokens
+from .model_profiles import classify_task_signals
 from .models import CapabilityCard, RequestEnvelope
 
 
@@ -76,6 +78,16 @@ class ModelSelector:
         if matched_task:
             self._add(terms, "task_signals", 2 * len(matched_task), "task suggests " + ", ".join(matched_task))
 
+        skill_terms = []
+        for signal in sorted(task_signals):
+            value = card.skill_scores.get(signal)
+            if isinstance(value, int | float) and float(value) >= 6.0:
+                skill_terms.append((signal, float(value)))
+        if skill_terms:
+            value = min(12.0, sum((score - 5.0) * 0.8 for _, score in skill_terms))
+            detail = ", ".join(f"{signal}={score:g}" for signal, score in skill_terms[:6])
+            self._add(terms, "skill_fit", value, "decision profile skills " + detail)
+
         if mode == "cheap":
             self._add(terms, "cheap_mode_cost", COST_WEIGHT.get(card.cost_tier, 0) * 2, f"cost={card.cost_tier}")
         if mode == "fast":
@@ -94,6 +106,10 @@ class ModelSelector:
                 QUALITY_WEIGHT.get(card.quality_tier, 0),
                 f"{mode} mode values model quality",
             )
+
+        budget_score = self._budget_fit_score(request, card)
+        if budget_score:
+            self._add(terms, budget_score[0], budget_score[1], budget_score[2])
 
         if request.tools:
             self._add_capability_term(
@@ -153,6 +169,11 @@ class ModelSelector:
 
         if card.deprecation:
             self._add(terms, "deprecation_penalty", -100, "model card marks model as deprecated")
+        routing_status = card.routing_hints.get("routing_status")
+        if routing_status in {"legacy", "unknown"}:
+            self._add(terms, "routing_status_penalty", -6, f"routing_status={routing_status}")
+        if card.routing_hints.get("requires_opt_in") and not card.routing_hints.get("production_default"):
+            self._add(terms, "opt_in_penalty", -4, "model requires explicit opt-in for default routing")
         if mode == "cheap" and card.cost_tier == "high":
             self._add(terms, "high_cost_penalty", -4, "cheap mode penalizes high-cost models")
         if mode == "fast" and card.latency_tier not in {"fast", "unknown"}:
@@ -199,25 +220,29 @@ class ModelSelector:
                 continue
         return total
 
+    def _budget_fit_score(self, request: RequestEnvelope, card: CapabilityCard) -> tuple[str, float, str] | None:
+        max_cost = request.constraints.get("max_cost_usd", self.config.routing.max_cost_per_request_usd)
+        if max_cost is None:
+            return None
+        try:
+            budget = float(max_cost)
+        except (TypeError, ValueError):
+            return None
+        if budget <= 0:
+            return None
+        input_text = f"{request.task} {request.input if isinstance(request.input, str) else ''}"
+        input_tokens = estimate_tokens(input_text)
+        output_tokens = int(request.constraints.get("max_output_tokens", request.constraints.get("max_tokens", 1024)))
+        estimate = estimate_model_cost(card, input_tokens=input_tokens, output_tokens=output_tokens)
+        if estimate > budget:
+            return ("budget_fit_penalty", -30.0, f"single-call estimate ${estimate:.4f} exceeds budget ${budget:.4f}")
+        if estimate <= budget * 0.5:
+            return ("budget_fit", 3.0, f"single-call estimate ${estimate:.4f} is comfortably under budget ${budget:.4f}")
+        return ("budget_fit", 1.0, f"single-call estimate ${estimate:.4f} is within budget ${budget:.4f}")
+
     @staticmethod
     def _task_signals(request: RequestEnvelope) -> set[str]:
-        text = f"{request.task} {request.input if isinstance(request.input, str) else ''}".lower()
-        signals: set[str] = set()
-        if any(word in text for word in ["code", "coding", "refactor", "bug", "test", "repo"]):
-            signals.update({"coding", "tool_use"})
-        if any(word in text for word in ["json", "schema", "extract", "parse", "structured"]):
-            signals.add("structured_output")
-        if any(word in text for word in ["compare", "research", "cite", "sources", "contradiction"]):
-            signals.update({"research", "critique"})
-        if any(word in text for word in ["fast", "latency", "quick"]):
-            signals.add("low_latency")
-        if any(word in text for word in ["cheap", "cost", "budget"]):
-            signals.add("low_cost")
-        if any(word in text for word in ["private", "local", "pii", "secret"]):
-            signals.update({"local", "privacy"})
-        if request.files:
-            signals.add("multimodal")
-        return signals
+        return classify_task_signals(request)
 
 
 def _declared_file_capability(card: CapabilityCard, capability: str) -> bool:

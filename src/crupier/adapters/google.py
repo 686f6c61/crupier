@@ -234,6 +234,9 @@ class GoogleAdapter:
             config["temperature"] = request.constraints["temperature"]
         if "max_output_tokens" in request.constraints:
             config["max_output_tokens"] = request.constraints["max_output_tokens"]
+        thinking_config = _google_thinking_config(request)
+        if thinking_config:
+            config["thinking_config"] = thinking_config
         if request.response_schema:
             config["response_mime_type"] = "application/json"
             config["response_json_schema"] = request.response_schema
@@ -345,6 +348,7 @@ def _tool_probe_config(*, tools: list[Any], max_output_tokens: int, temperature:
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             max_output_tokens=max_output_tokens,
             temperature=temperature,
+            thinking_config=types.ThinkingConfig(thinking_level="minimal"),
         )
     except ImportError:
         return {
@@ -352,7 +356,26 @@ def _tool_probe_config(*, tools: list[Any], max_output_tokens: int, temperature:
             "automatic_function_calling": {"disable": True},
             "max_output_tokens": max_output_tokens,
             "temperature": temperature,
+            "thinking_config": {"thinking_level": "minimal"},
         }
+
+
+def _google_thinking_config(request: RequestEnvelope) -> dict[str, Any]:
+    constraints = request.constraints
+    if isinstance(constraints.get("thinking_config"), dict):
+        return dict(constraints["thinking_config"])
+    if "thinking_level" in constraints:
+        return {"thinking_level": constraints["thinking_level"]}
+    if "thinking_budget" in constraints:
+        return {"thinking_budget": constraints["thinking_budget"]}
+    if constraints.get("disable_thinking"):
+        return {"thinking_budget": 0}
+
+    max_output = constraints.get("max_output_tokens")
+    mode = (request.mode or "").lower()
+    if mode in {"fast", "cheap", "structured"} or (isinstance(max_output, int | float) and max_output <= 256):
+        return {"thinking_level": "minimal"}
+    return {}
 
 
 def _model_id(item: Any) -> str | None:

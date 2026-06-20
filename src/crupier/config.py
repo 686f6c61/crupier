@@ -58,6 +58,7 @@ class RoutingSettings:
     max_calls: int = 40
     max_provider_retries: int = 1
     retry_backoff_seconds: float = 0.2
+    require_operational_providers: bool = True
 
 
 @dataclass(slots=True)
@@ -235,6 +236,7 @@ max_depth = 8
 max_calls = 40
 max_provider_retries = 1
 retry_backoff_seconds = 0.2
+require_operational_providers = true
 
 [orchestrator]
 mode = "deterministic"
@@ -419,3 +421,69 @@ def write_models_allow(path: str | Path, models: list[str], *, replace: bool = F
         new_lines = [*lines[:start], *section, *lines[end:]]
     toml_path.write_text("\n".join(new_lines).rstrip() + "\n", encoding="utf-8")
     return toml_path
+
+
+def write_orchestrator_settings(
+    path: str | Path,
+    *,
+    mode: str | None = None,
+    model: str | None = None,
+    fallback_model: str | None = None,
+    temperature: float | None = None,
+) -> Path:
+    from .models import ModelRef
+
+    toml_path = Path(path)
+    if toml_path.is_dir():
+        toml_path = toml_path / "crupier.toml"
+    if not toml_path.exists():
+        raise CrupierConfigError(f"No crupier.toml found at {toml_path}.")
+
+    config = CrupierConfig.from_toml(toml_path)
+    if mode is not None and mode not in {"deterministic", "model", "hybrid"}:
+        raise CrupierConfigError("orchestrator mode must be one of: deterministic, model, hybrid.")
+
+    settings = {
+        "mode": mode or config.orchestrator.mode,
+        "model": ModelRef.parse(model).key if model else config.orchestrator.model,
+        "fallback_model": ModelRef.parse(fallback_model).key if fallback_model else config.orchestrator.fallback_model,
+        "fallback": config.orchestrator.fallback,
+        "temperature": config.orchestrator.temperature if temperature is None else float(temperature),
+        "require_validated_plan": config.orchestrator.require_validated_plan,
+        "max_repairs": config.orchestrator.max_repairs,
+        "allow_prompt_summary_only": config.orchestrator.allow_prompt_summary_only,
+    }
+
+    text = toml_path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    start = None
+    end = len(lines)
+    for index, line in enumerate(lines):
+        if line.strip() == "[orchestrator]":
+            start = index
+            continue
+        if start is not None and index > start and line.strip().startswith("[") and line.strip().endswith("]"):
+            end = index
+            break
+
+    section = ["[orchestrator]"]
+    for key, value in settings.items():
+        section.append(f"{key} = {_toml_value(value)}")
+
+    if start is None:
+        new_lines = [*lines, "", *section]
+    else:
+        new_lines = [*lines[:start], *section, *lines[end:]]
+    toml_path.write_text("\n".join(new_lines).rstrip() + "\n", encoding="utf-8")
+    return toml_path
+
+
+def _toml_value(value: Any) -> str:
+    if value is None:
+        return '""'
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    escaped = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'

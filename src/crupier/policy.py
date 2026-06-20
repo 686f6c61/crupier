@@ -43,6 +43,7 @@ class PolicyEngine:
         require_zdr = bool(constraints.get("require_zdr", False))
         allow_latest = bool(constraints.get("allow_latest_aliases", self.config.routing.allow_latest_aliases))
         allow_preview = bool(constraints.get("allow_preview_models", self.config.routing.allow_preview_models))
+        allow_deprecated = bool(constraints.get("allow_deprecated_models", False))
         require_verified_capabilities = bool(constraints.get("require_verified_capabilities", False))
         has_tools = bool(request.tools)
         wants_structured = request.response_schema is not None or bool(constraints.get("response_schema"))
@@ -61,6 +62,11 @@ class PolicyEngine:
                 continue
             if provider == "openrouter" and (provider_settings is None or not provider_settings.enabled):
                 self._exclude(result, key, "OpenRouter is optional BYOK and not enabled", "openrouter_byok")
+                continue
+            lifecycle = card.routing_hints.get("lifecycle") or card.natural_profile.get("lifecycle")
+            routing_status = card.routing_hints.get("routing_status") or card.natural_profile.get("routing_status")
+            if (card.deprecation or lifecycle in {"deprecated", "shutdown"} or routing_status in {"deprecated", "shutdown"}) and not allow_deprecated:
+                self._exclude(result, key, "model is deprecated or shut down", "deprecated_models")
                 continue
             if card.model_ref.stability == "latest" and not allow_latest:
                 self._exclude(result, key, "latest aliases are disabled", "stable_models_only")

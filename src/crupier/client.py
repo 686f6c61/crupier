@@ -8,15 +8,22 @@ from typing import Any
 from uuid import uuid4
 
 from .adapters import ProviderAdapter, ProviderModel, build_default_adapters
-from .config import CrupierConfig, write_models_allow
+from .config import CrupierConfig, write_models_allow, write_orchestrator_settings
+from .errors import (
+    CrupierConfigError,
+    CrupierPolicyError,
+    CrupierProviderAuthError,
+    CrupierProviderRateLimitError,
+    CrupierProviderUnavailableError,
+)
 from .evals import RoutingEvalRunner
 from .executor import RouteExecutor
 from .feedback import HumanFeedbackStore
-from .models import CapabilityCard, CrupierResult, DecisionTrace, RequestEnvelope, StreamEvent, UpdateReport
+from .models import CapabilityCard, CrupierResult, DecisionTrace, ModelRef, RequestEnvelope, StreamEvent, UpdateReport
 from .multimodal import can_execute_native_images, normalize_files, plan_file_representations, prepare_extracted_file_context
 from .orchestrator import ModelOrchestrator
 from .planner import RoutePlanner
-from .policy import PolicyEngine
+from .policy import Exclusion, PolicyEngine
 from .project_audit import ProjectAuditRunner
 from .probes import CapabilityProbeRunner, ProbeReport, ReadinessReport
 from .registry import ModelRegistry
@@ -35,14 +42,28 @@ class ModelManager:
     def get(self, model: str) -> CapabilityCard:
         return self._registry.get(model)
 
-    def discover(self, *, provider: str | None = None) -> list[ProviderModel]:
+    def discover(
+        self,
+        *,
+        provider: str | None = None,
+        skip_unavailable: bool = False,
+        warnings: list[str] | None = None,
+    ) -> list[ProviderModel]:
         providers = [provider] if provider else sorted(self._adapters)
         models: list[ProviderModel] = []
         for provider_name in providers:
             adapter = self._adapters.get(provider_name)
             if adapter is None:
                 continue
-            models.extend(adapter.list_models())
+            try:
+                models.extend(adapter.list_models())
+            except (CrupierProviderAuthError, CrupierProviderRateLimitError, CrupierProviderUnavailableError) as exc:
+                if not skip_unavailable:
+                    raise
+                if warnings is not None:
+                    warnings.append(
+                        f"Skipped provider {provider_name!r} because its API key or endpoint is not operational: {exc}"
+                    )
         return sorted(models, key=lambda item: (item.provider, item.id))
 
     def allow(self, models: list[str], *, replace: bool = False) -> None:
@@ -98,6 +119,7 @@ class Crupier:
         self.traces = TraceStore(config.traces_dir)
         self.feedback = HumanFeedbackStore(config.feedback_dir)
         self.responses = ResponsesFacade(self)
+        self._provider_visibility_cache: dict[str, tuple[set[str] | None, str | None]] = {}
 
     def _build_orchestrator(self):
         mode = self.config.orchestrator.mode
@@ -118,6 +140,46 @@ class Crupier:
         if isinstance(config, CrupierConfig):
             return cls(config)
         return cls(CrupierConfig.from_dict(config))
+
+    def configure_orchestrator(
+        self,
+        *,
+        mode: str | None = None,
+        model: str | None = None,
+        fallback_model: str | None = None,
+        temperature: float | None = None,
+        persist: bool = False,
+    ) -> "Crupier":
+        """Configure the model-powered route orchestrator.
+
+        Set ``persist=True`` to write the change into ``crupier.toml``.
+        """
+
+        if mode is not None and mode not in {"deterministic", "model", "hybrid"}:
+            raise CrupierConfigError("orchestrator mode must be one of: deterministic, model, hybrid.")
+        if model is not None:
+            self.config.orchestrator.model = ModelRef.parse(model).key
+        if fallback_model is not None:
+            self.config.orchestrator.fallback_model = ModelRef.parse(fallback_model).key
+        if mode is not None:
+            self.config.orchestrator.mode = mode
+        if temperature is not None:
+            self.config.orchestrator.temperature = float(temperature)
+        if persist:
+            write_orchestrator_settings(
+                self.config.root,
+                mode=self.config.orchestrator.mode,
+                model=self.config.orchestrator.model,
+                fallback_model=self.config.orchestrator.fallback_model,
+                temperature=self.config.orchestrator.temperature,
+            )
+            self.config = CrupierConfig.from_toml(self.config.root)
+            self.registry.config = self.config
+            self.models._config = self.config
+            self.policy.config = self.config
+            self.executor.config = self.config
+        self.planner = RoutePlanner(self.config, orchestrator=self._build_orchestrator())
+        return self
 
     def deal(
         self,
@@ -168,7 +230,12 @@ class Crupier:
         )
 
         cards = self.registry.allowed_cards()
+        cards, provider_exclusions, provider_filters = self._filter_operational_candidates(request, cards, dry_run=dry_run)
         policy_result = self.policy.filter_candidates(request, cards)
+        policy_result.excluded.extend(provider_exclusions)
+        for filter_name in provider_filters:
+            if filter_name not in policy_result.filters_applied:
+                policy_result.filters_applied.append(filter_name)
         plan = self.planner.plan(request, policy_result.allowed, policy_result.filters_applied)
         self.policy.validate_route(plan, policy_result, request)
 
@@ -197,6 +264,75 @@ class Crupier:
             result.trace = None
         return result
 
+    def _filter_operational_candidates(
+        self,
+        request: RequestEnvelope,
+        cards: list[CapabilityCard],
+        *,
+        dry_run: bool,
+    ) -> tuple[list[CapabilityCard], list[Exclusion], list[str]]:
+        explicit = "require_operational_providers" in request.constraints
+        require_operational = bool(
+            request.constraints.get(
+                "require_operational_providers",
+                self.config.routing.require_operational_providers,
+            )
+        )
+        if dry_run and not explicit:
+            require_operational = False
+        if not require_operational:
+            return cards, [], []
+
+        allowed: list[CapabilityCard] = []
+        excluded: list[Exclusion] = []
+        filters: set[str] = set()
+        for card in cards:
+            key = card.model_ref.key
+            provider = card.model_ref.provider
+            visible_models, error = self._provider_visible_models(provider)
+            if error is not None:
+                excluded.append(Exclusion(key, error))
+                filters.add("provider_operational")
+                continue
+            if visible_models is not None and key not in visible_models:
+                excluded.append(Exclusion(key, "model is not visible to the configured provider API key"))
+                filters.add("provider_model_visibility")
+                continue
+            allowed.append(card)
+
+        if not allowed:
+            reasons = "; ".join(f"{item.model}: {item.reason}" for item in excluded)
+            raise CrupierPolicyError(f"No models remain after provider operational checks. {reasons}")
+        return allowed, excluded, sorted(filters)
+
+    def _provider_visible_models(self, provider: str) -> tuple[set[str] | None, str | None]:
+        cached = self._provider_visibility_cache.get(provider)
+        if cached is not None:
+            return cached
+        adapter = self.adapters.get(provider)
+        if adapter is None:
+            result = (None, f"provider {provider!r} has no configured adapter")
+            self._provider_visibility_cache[provider] = result
+            return result
+        list_models = getattr(adapter, "list_models", None)
+        if not callable(list_models):
+            result = (None, None)
+            self._provider_visibility_cache[provider] = result
+            return result
+        try:
+            models = list_models()
+        except (CrupierProviderAuthError, CrupierProviderRateLimitError, CrupierProviderUnavailableError) as exc:
+            result = (None, f"provider {provider!r} is not operational with the configured API key: {exc}")
+            self._provider_visibility_cache[provider] = result
+            return result
+        except Exception as exc:  # noqa: BLE001 - provider SDK boundaries vary
+            result = (None, f"provider {provider!r} model discovery failed: {exc}")
+            self._provider_visibility_cache[provider] = result
+            return result
+        result = ({ModelRef.parse(model.model_ref).key for model in models}, None)
+        self._provider_visibility_cache[provider] = result
+        return result
+
     async def adeal(self, *args: Any, **kwargs: Any) -> CrupierResult:
         return await asyncio.to_thread(self.deal, *args, **kwargs)
 
@@ -219,10 +355,19 @@ class Crupier:
             dry_run = not apply
         if not online:
             return self.registry.update(dry_run=dry_run)
+        warnings: list[str] = []
+        provider_models = self.models.discover(
+            provider=provider,
+            skip_unavailable=provider is None,
+            warnings=warnings,
+        )
+        discovered_providers = sorted({model.provider for model in provider_models})
         return self.registry.update_from_provider_models(
-            self.models.discover(provider=provider),
+            provider_models,
             dry_run=dry_run,
             provider=provider,
+            discovered_providers=discovered_providers,
+            warnings=warnings,
         )
 
     def _storage_decision(self, constraints: dict[str, Any]) -> dict[str, Any]:

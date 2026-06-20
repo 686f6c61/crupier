@@ -32,6 +32,7 @@ allow = [
   "anthropic:claude-sonnet-4-6",
   "anthropic:claude-opus-4-8",
   "google:gemini-3.5-flash",
+  "ollama:glm-5.2",
   "ollama:gpt-oss:120b",
 ]
 deny = []
@@ -46,11 +47,12 @@ max_cost_per_request_usd = 1.00
 max_latency_ms = 30000
 max_depth = 8
 max_calls = 12
+require_operational_providers = true
 
 [orchestrator]
-mode = "deterministic"
-model = "openai:gpt-5.4-mini"
-fallback_model = "openai:gpt-5.4-mini"
+mode = "model"
+model = "ollama:glm-5.2"
+fallback_model = "anthropic:claude-opus-4-8"
 fallback = "deterministic"
 temperature = 0
 require_validated_plan = true

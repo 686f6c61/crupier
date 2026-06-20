@@ -489,7 +489,7 @@ def _public_version_check(version: str | None) -> ReleaseCheck:
         if ok
         else "Package version is not a final public release version.",
         evidence={"version": version, "expected_shape": "X.Y.Z"},
-        actions=["Use a final public version such as 0.1.0; do not publish non-final, development, or local builds."]
+        actions=["Use a final public version such as 0.2.0; do not publish non-final, development, or local builds."]
         if not ok
         else [],
     )
@@ -521,7 +521,7 @@ def _public_release_language_check(root: Path) -> ReleaseCheck:
         id="public_release_language",
         status="pass" if ok else "fail",
         severity="high",
-        summary="Public package metadata and onboarding files describe a final 0.1.0 release."
+        summary="Public package metadata and onboarding files describe a final public release."
         if ok
         else "Public package metadata or onboarding files still describe a non-final release.",
         evidence={"matches": matches[:50], "match_count": len(matches)},
@@ -1373,6 +1373,8 @@ def _default_config_check() -> ReleaseCheck:
         failures.append("routing.max_provider_retries must default to 1")
     if config.routing.retry_backoff_seconds != 0.2:
         failures.append("routing.retry_backoff_seconds must default to 0.2")
+    if not config.routing.require_operational_providers:
+        failures.append("routing.require_operational_providers must default to true")
     if f"OLLAMA_HOST={OLLAMA_CLOUD_HOST}" not in DEFAULT_ENV_EXAMPLE:
         failures.append(".env.example must advertise Ollama Cloud host")
     if "OPENROUTER_API_KEY=" not in DEFAULT_ENV_EXAMPLE:
@@ -1396,6 +1398,7 @@ def _default_config_check() -> ReleaseCheck:
             "allow_preview_models": config.routing.allow_preview_models,
             "max_provider_retries": config.routing.max_provider_retries,
             "retry_backoff_seconds": config.routing.retry_backoff_seconds,
+            "require_operational_providers": config.routing.require_operational_providers,
             "openrouter_host": openrouter.host if openrouter else None,
             "openrouter_mode": openrouter.mode if openrouter else None,
             "missing_builtin_cards": missing_builtin_cards,
@@ -1716,7 +1719,7 @@ def _artifact_metadata_check(artifacts: list[Path], project: dict[str, Any]) -> 
                 "provides_extra": sorted(values["Provides-Extra"]),
             }
         )
-        for field, expected, actual in [
+        for metadata_field, expected, actual in [
             ("Name", expected_name, values["Name"]),
             ("Version", expected_version, values["Version"]),
             ("Summary", expected_summary, values["Summary"]),
@@ -1724,7 +1727,7 @@ def _artifact_metadata_check(artifacts: list[Path], project: dict[str, Any]) -> 
         ]:
             if expected and actual != expected:
                 failures.append(
-                    {"artifact": artifact.name, "field": field, "expected": expected, "actual": str(actual)}
+                    {"artifact": artifact.name, "field": metadata_field, "expected": expected, "actual": str(actual)}
                 )
         if expected_license and expected_license not in {values["License-Expression"], values["License"]}:
             failures.append(

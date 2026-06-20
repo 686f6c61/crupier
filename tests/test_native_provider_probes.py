@@ -114,12 +114,19 @@ def test_google_native_probe_payloads():
         if isinstance(tool_config, dict)
         else getattr(tool_config, "automatic_function_calling", None)
     )
+    thinking_config = tool_config["thinking_config"] if isinstance(tool_config, dict) else getattr(tool_config, "thinking_config", None)
+    thinking_level = (
+        thinking_config["thinking_level"]
+        if isinstance(thinking_config, dict)
+        else getattr(thinking_config, "thinking_level", None)
+    )
     disabled = (
         automatic_function_calling["disable"]
         if isinstance(automatic_function_calling, dict)
         else getattr(automatic_function_calling, "disable", None)
     )
     assert disabled is True
+    assert str(thinking_level).lower().endswith("minimal")
     assert streaming.metadata["probe_status"] == "verified"
     assert models.stream_calls[0]["model"] == "gemini-test"
 

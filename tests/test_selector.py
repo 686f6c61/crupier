@@ -81,3 +81,31 @@ def test_selector_scores_verified_capability_above_inferred():
     assert inferred_term.value == 2
     assert verified_term.value == 6
     assert verified_score.score > inferred_score.score
+
+
+def test_selector_uses_decision_skill_scores_for_spanish_task():
+    config = CrupierConfig.from_dict({"project": {"default_profile": "agentic"}})
+    selector = ModelSelector(config)
+    generic = CapabilityCard(
+        model_ref=ModelRef.parse("openai:gpt-5.5"),
+        last_updated="test",
+        quality_tier="strong",
+        skill_scores={"reasoning": 7.5},
+    )
+    coder = CapabilityCard(
+        model_ref=ModelRef.parse("ollama:qwen3-coder:480b"),
+        last_updated="test",
+        skill_scores={"coding": 9.0, "agentic": 8.4, "tool_use": 7.5},
+    )
+
+    ranked = selector.rank(
+        RequestEnvelope(task="Arreglar un bug del repositorio desde la consola", mode="agentic"),
+        [generic, coder],
+    )
+    score = selector.score(
+        RequestEnvelope(task="Arreglar un bug del repositorio desde la consola", mode="agentic"),
+        coder,
+    )
+
+    assert ranked[0].model_ref.key == "ollama:qwen3-coder:480b"
+    assert any(term.name == "skill_fit" for term in score.terms)

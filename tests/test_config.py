@@ -1,6 +1,14 @@
 import os
 
-from crupier.config import OLLAMA_CLOUD_HOST, OPENROUTER_DEFAULT_HOST, CrupierConfig, write_default_project, write_models_allow
+from crupier import Crupier
+from crupier.config import (
+    OLLAMA_CLOUD_HOST,
+    OPENROUTER_DEFAULT_HOST,
+    CrupierConfig,
+    write_default_project,
+    write_models_allow,
+    write_orchestrator_settings,
+)
 
 
 def test_write_default_project_creates_config_and_dirs(tmp_path):
@@ -24,6 +32,7 @@ def test_write_default_project_creates_config_and_dirs(tmp_path):
     assert config.providers["openrouter"].host == OPENROUTER_DEFAULT_HOST
     assert config.routing.max_provider_retries == 1
     assert config.routing.retry_backoff_seconds == 0.2
+    assert config.routing.require_operational_providers is True
     env_example = (tmp_path / ".env.example").read_text(encoding="utf-8")
     assert "OLLAMA_HOST=https://ollama.com/api" in env_example
     assert "OPENROUTER_API_KEY=" in env_example
@@ -62,6 +71,30 @@ def test_write_models_allow_replaces_models_section(tmp_path):
 
     config = CrupierConfig.from_toml(tmp_path)
     assert config.models.allow == ["anthropic:claude-opus-4-8", "ollama:gpt-oss:120b"]
+
+
+def test_write_orchestrator_settings_and_sdk_configuration(tmp_path):
+    write_default_project(tmp_path)
+
+    write_orchestrator_settings(
+        tmp_path,
+        mode="model",
+        model="ollama:glm-5.2",
+        fallback_model="anthropic:claude-opus-4-8",
+        temperature=0.1,
+    )
+
+    config = CrupierConfig.from_toml(tmp_path)
+    assert config.orchestrator.mode == "model"
+    assert config.orchestrator.model == "ollama:glm-5.2"
+    assert config.orchestrator.fallback_model == "anthropic:claude-opus-4-8"
+    assert config.orchestrator.temperature == 0.1
+
+    client = Crupier.from_project(tmp_path)
+    client.configure_orchestrator(mode="hybrid", model="anthropic:claude-opus-4-8")
+    assert client.config.orchestrator.mode == "hybrid"
+    assert client.config.orchestrator.model == "anthropic:claude-opus-4-8"
+    assert client.planner.config.orchestrator.model == "anthropic:claude-opus-4-8"
 
 
 def test_from_toml_loads_local_dotenv_without_overriding_existing_env(tmp_path, monkeypatch):

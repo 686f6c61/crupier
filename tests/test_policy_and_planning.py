@@ -1,7 +1,7 @@
 from crupier import Crupier
-from crupier.adapters import AdapterResponse
+from crupier.adapters import AdapterResponse, ProviderModel
 from crupier.config import CrupierConfig
-from crupier.errors import CrupierPolicyError, CrupierRouteValidationError
+from crupier.errors import CrupierPolicyError, CrupierProviderAuthError, CrupierRouteValidationError
 from crupier.models import CapabilityCard, ModelRef, RequestEnvelope
 from crupier.orchestrator import DeterministicOrchestrator, ModelOrchestrator
 from crupier.planner import RoutePlanner
@@ -37,6 +37,7 @@ def make_config(tmp_path, *, allow=None):
                 "allow_latest_aliases": False,
                 "allow_preview_models": False,
                 "max_calls": 40,
+                "require_operational_providers": False,
             },
             "profiles": {
                 "agentic": {"prefer": ["tool_use", "coding", "long_horizon", "reliability"], "strategy": "orchestrated"},
@@ -63,6 +64,24 @@ class FakeOrchestratorAdapter:
         return AdapterResponse(text=self.responses.pop(0), metadata={"model": model})
 
 
+class FakeVisibleModelsAdapter:
+    provider = "openai"
+
+    def __init__(self, models):
+        self.models = models
+
+    def list_models(self):
+        return [ProviderModel(id=model, provider="openai") for model in self.models]
+
+    def generate(self, *, model, prompt, request):
+        return AdapterResponse(text="ok", metadata={"model": model})
+
+
+class FakeBrokenListAdapter(FakeVisibleModelsAdapter):
+    def list_models(self):
+        raise CrupierProviderAuthError("bad key", provider="openai", env_key="OPENAI_API_KEY")
+
+
 def test_policy_filters_latest_aliases(tmp_path):
     config = make_config(tmp_path, allow=["openai:gpt-latest"])
     registry = ModelRegistry(config)
@@ -74,6 +93,54 @@ def test_policy_filters_latest_aliases(tmp_path):
         assert "latest aliases are disabled" in str(exc)
     else:
         raise AssertionError("latest alias should have been rejected")
+
+
+def test_client_filters_models_not_visible_to_operational_api_key(tmp_path):
+    config = make_config(tmp_path, allow=["openai:gpt-5.5", "openai:gpt-5.4-mini"])
+    config.routing.require_operational_providers = True
+    client = Crupier(config, adapters={"openai": FakeVisibleModelsAdapter(["gpt-5.4-mini"])})
+
+    result = client.deal(
+        task="Clasifica esto rapido",
+        mode="fast",
+        constraints={"require_operational_providers": True},
+        trace="summary",
+    )
+
+    assert result.route is not None
+    assert result.route.models == ["openai:gpt-5.4-mini"]
+    assert result.trace is not None
+    assert any(
+        item["model"] == "openai:gpt-5.5" and "not visible" in item["reason"]
+        for item in result.trace.excluded_models
+    )
+
+
+def test_client_blocks_provider_with_non_operational_api_key(tmp_path):
+    config = make_config(tmp_path, allow=["openai:gpt-5.5"])
+    config.routing.require_operational_providers = True
+    client = Crupier(config, adapters={"openai": FakeBrokenListAdapter(["gpt-5.5"])})
+
+    try:
+        client.deal(task="x", constraints={"require_operational_providers": True})
+    except CrupierPolicyError as exc:
+        assert "not operational" in str(exc)
+        assert "bad key" in str(exc)
+    else:
+        raise AssertionError("provider with invalid API key should be blocked before routing")
+
+
+def test_policy_rejects_deprecated_models_by_default(tmp_path):
+    config = make_config(tmp_path, allow=["openai:gpt-5.2-chat-latest"])
+    registry = ModelRegistry(config)
+    policy = PolicyEngine(config)
+
+    try:
+        policy.filter_candidates(RequestEnvelope(task="x"), registry.allowed_cards())
+    except CrupierPolicyError as exc:
+        assert "deprecated or shut down" in str(exc)
+    else:
+        raise AssertionError("deprecated model should have been rejected")
 
 
 def test_private_mode_prefers_ollama_local_first(tmp_path):
@@ -238,6 +305,8 @@ def test_model_orchestrator_accepts_valid_validated_plan(tmp_path):
     assert plan.selection_scores
     assert "Model orchestrator proposed and validated" in plan.reason
     assert "candidate_cards" in adapter.prompts[0]
+    assert "routing_status" in adapter.prompts[0]
+    assert "best_skills" in adapter.prompts[0]
 
 
 def test_model_orchestrator_rejects_illegal_model_and_falls_back(tmp_path):
@@ -265,6 +334,34 @@ def test_model_orchestrator_rejects_illegal_model_and_falls_back(tmp_path):
     assert "openai:not-allowed" not in plan.models
     assert plan.strategy == "fusion"
     assert "deterministic fallback" in plan.reason
+
+
+def test_model_orchestrator_normalizes_common_cascade_role_shape(tmp_path):
+    config = make_config(tmp_path, allow=["openai:gpt-5.4-mini", "anthropic:claude-opus-4-8"])
+    config.orchestrator.mode = "model"
+    request = RequestEnvelope(task="Extract JSON fields", mode="structured")
+    candidates = ModelRegistry(config).allowed_cards()
+    adapter = FakeOrchestratorAdapter(
+        """
+        {
+          "strategy": "cascade",
+          "steps": [{"role": "fallback", "models": ["openai:gpt-5.4-mini", "anthropic:claude-opus-4-8"]}],
+          "estimated_cost": {"estimated_usd": 0.0},
+          "estimated_latency_ms": 6000,
+          "reason": "Use a cheap first model and escalate.",
+          "risk_level": "medium",
+          "summary": "Cascade route."
+        }
+        """
+    )
+    context = RoutePlanner(config).build_context(request, candidates, ["allowlist:2"])
+
+    plan = ModelOrchestrator(config, adapters={"openai": adapter}).plan(context)
+
+    assert plan.strategy == "cascade"
+    assert [step.role for step in plan.steps] == ["primary", "escalation"]
+    assert plan.models == ["openai:gpt-5.4-mini", "anthropic:claude-opus-4-8"]
+    assert "normalized common route role shape" in plan.reason
 
 
 def test_model_orchestrator_respects_explicit_profile_strategy(tmp_path):

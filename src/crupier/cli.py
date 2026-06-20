@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .client import Crupier
-from .config import CrupierConfig, write_default_project, write_models_allow
+from .config import CrupierConfig, write_default_project, write_models_allow, write_orchestrator_settings
 from .evals import CompareVariant
 from .errors import CrupierConfigError, CrupierError
 from .feedback import (
@@ -102,8 +102,17 @@ def build_parser() -> argparse.ArgumentParser:
     model_subparsers = models.add_subparsers(dest="models_command", required=True)
     models_list = model_subparsers.add_parser("list", help="List known models")
     models_list.add_argument("--all", action="store_true", help="Show built-in models beyond the project allowlist")
+    models_list.add_argument("--recommended", action="store_true", help="Show only curated production-default routing models")
+    models_list.add_argument("--include-deprecated", action="store_true", help="Include deprecated or shut down models")
+    models_list.add_argument("--provider", choices=REAL_PROVIDER_CHOICES, help="Filter by provider")
+    models_list.add_argument("--kind", help="Filter by model kind, e.g. chat, embedding, image, audio")
+    models_list.add_argument("--status", help="Filter by routing status, e.g. recommended, specialized, legacy, deprecated")
     models_list.add_argument("--json", action="store_true", help="Print JSON")
     models_list.set_defaults(func=cmd_models_list)
+    models_show = model_subparsers.add_parser("show", help="Show one capability/decision card")
+    models_show.add_argument("model", help="Model ref, e.g. openai:gpt-5.5")
+    models_show.add_argument("--json", action="store_true", help="Print JSON")
+    models_show.set_defaults(func=cmd_models_show)
     models_discover = model_subparsers.add_parser("discover", help="List models from enabled real providers")
     models_discover.add_argument("--provider", choices=REAL_PROVIDER_CHOICES, help="Provider to query")
     models_discover.add_argument("--json", action="store_true", help="Print JSON")
@@ -112,6 +121,19 @@ def build_parser() -> argparse.ArgumentParser:
     models_allow.add_argument("models", nargs="+", help="Model refs, e.g. openai:gpt-5.5 anthropic:claude-opus-4-8")
     models_allow.add_argument("--replace", action="store_true", help="Replace the allow list instead of appending")
     models_allow.set_defaults(func=cmd_models_allow)
+
+    orchestrator = subparsers.add_parser("orchestrator", help="Route orchestrator commands")
+    orchestrator_subparsers = orchestrator.add_subparsers(dest="orchestrator_command", required=True)
+    orchestrator_show = orchestrator_subparsers.add_parser("show", help="Show configured route orchestrator")
+    orchestrator_show.add_argument("--json", action="store_true", help="Print JSON")
+    orchestrator_show.set_defaults(func=cmd_orchestrator_show)
+    orchestrator_set = orchestrator_subparsers.add_parser("set", help="Configure the route orchestrator model")
+    orchestrator_set.add_argument("--mode", choices=["deterministic", "model", "hybrid"], help="Orchestrator mode")
+    orchestrator_set.add_argument("--model", help="Orchestrator model ref, e.g. ollama:glm-5.2")
+    orchestrator_set.add_argument("--fallback-model", help="Fallback orchestrator model ref")
+    orchestrator_set.add_argument("--temperature", type=float, help="Orchestrator model temperature")
+    orchestrator_set.add_argument("--json", action="store_true", help="Print JSON")
+    orchestrator_set.set_defaults(func=cmd_orchestrator_set)
 
     registry = subparsers.add_parser("registry", help="Registry commands")
     registry_subparsers = registry.add_subparsers(dest="registry_command", required=True)
@@ -765,6 +787,7 @@ def _print_update_report(report: Any) -> None:
 def cmd_models_list(args: argparse.Namespace) -> int:
     client = Crupier.from_project(args.project)
     cards = client.models.list(allowed_only=not args.all)
+    cards = _filter_model_cards(cards, args)
     states_by_model = {item["model"]: item for item in client.registry.model_states(models=[card.model_ref.key for card in cards])}
     if args.json:
         data = []
@@ -777,11 +800,72 @@ def cmd_models_list(args: argparse.Namespace) -> int:
     for card in cards:
         state = states_by_model.get(card.model_ref.key, {})
         states = ",".join(state.get("states", [])) or "unknown"
+        routing_status = card.routing_hints.get("routing_status", "unknown")
+        lifecycle = card.routing_hints.get("lifecycle", card.model_ref.stability)
+        default = "yes" if card.routing_hints.get("production_default") else "no"
         print(
             f"{card.model_ref.key}\tprovider={card.model_ref.provider}\t"
-            f"stability={card.model_ref.stability}\tcost={card.cost_tier}\tquality={card.quality_tier}\t"
+            f"kind={card.model_kind}\tstatus={routing_status}\tlifecycle={lifecycle}\t"
+            f"default={default}\tcost={card.cost_tier}\tquality={card.quality_tier}\t"
             f"states={states}"
         )
+    return 0
+
+
+def _filter_model_cards(cards: list[Any], args: argparse.Namespace) -> list[Any]:
+    filtered = []
+    for card in cards:
+        status = str(card.routing_hints.get("routing_status", "unknown"))
+        lifecycle = str(card.routing_hints.get("lifecycle", card.model_ref.stability))
+        if args.provider and card.model_ref.provider != args.provider:
+            continue
+        if args.kind and card.model_kind != args.kind:
+            continue
+        if args.status and status != args.status:
+            continue
+        if args.recommended and not card.routing_hints.get("production_default", False):
+            continue
+        if not args.include_deprecated and (status in {"deprecated", "shutdown"} or lifecycle in {"deprecated", "shutdown"}):
+            continue
+        filtered.append(card)
+    return filtered
+
+
+def cmd_models_show(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    card = client.models.get(args.model)
+    state = client.registry.model_states(models=[card.model_ref.key])[0]
+    data = card.to_dict()
+    data["registry_state"] = state
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+    print(f"model: {card.model_ref.key}")
+    print(f"provider: {card.model_ref.provider}")
+    print(f"kind: {card.model_kind}")
+    print(f"routing_status: {card.routing_hints.get('routing_status', 'unknown')}")
+    print(f"lifecycle: {card.routing_hints.get('lifecycle', card.model_ref.stability)}")
+    print(f"production_default: {bool(card.routing_hints.get('production_default', False))}")
+    print(f"requires_opt_in: {bool(card.routing_hints.get('requires_opt_in', True))}")
+    print(f"quality: {card.quality_tier}")
+    print(f"cost: {card.cost_tier}")
+    print(f"latency: {card.latency_tier}")
+    print(f"modalities_input: {', '.join(card.modalities_input)}")
+    print(f"modalities_output: {', '.join(card.modalities_output)}")
+    if card.natural_profile.get("summary"):
+        print(f"summary: {card.natural_profile['summary']}")
+    if card.natural_profile.get("status_reason"):
+        print(f"status_reason: {card.natural_profile['status_reason']}")
+    if card.natural_profile.get("replacement"):
+        print(f"replacement: {card.natural_profile['replacement']}")
+    if card.skill_scores:
+        ranked = sorted(
+            ((key, value) for key, value in card.skill_scores.items() if isinstance(value, int | float)),
+            key=lambda item: (float(item[1]), item[0]),
+            reverse=True,
+        )
+        print("top_skills: " + ", ".join(f"{key}={value:g}" for key, value in ranked[:8]))
+    print("states: " + ",".join(state.get("states", [])))
     return 0
 
 
@@ -794,10 +878,19 @@ def cmd_models_discover(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    models = client.models.discover(provider=args.provider)
+    warnings: list[str] = []
+    models = client.models.discover(
+        provider=args.provider,
+        skip_unavailable=args.provider is None,
+        warnings=warnings,
+    )
     if args.json:
+        for warning in warnings:
+            print(f"warning: {warning}", file=sys.stderr)
         print(json.dumps([model.to_dict() for model in models], indent=2, sort_keys=True))
         return 0
+    for warning in warnings:
+        print(f"warning: {warning}")
     if not models:
         provider = args.provider or "enabled providers"
         print(f"No models discovered for {provider}. Check provider enabled flags and API keys.")
@@ -812,6 +905,54 @@ def cmd_models_allow(args: argparse.Namespace) -> int:
     path = write_models_allow(args.project, args.models, replace=args.replace)
     action = "Replaced" if args.replace else "Updated"
     print(f"{action} [models].allow in {path}")
+    return 0
+
+
+def cmd_orchestrator_show(args: argparse.Namespace) -> int:
+    config = CrupierConfig.from_toml(args.project)
+    data = {
+        "mode": config.orchestrator.mode,
+        "model": config.orchestrator.model,
+        "fallback_model": config.orchestrator.fallback_model,
+        "fallback": config.orchestrator.fallback,
+        "temperature": config.orchestrator.temperature,
+        "require_validated_plan": config.orchestrator.require_validated_plan,
+        "max_repairs": config.orchestrator.max_repairs,
+    }
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+    for key, value in data.items():
+        print(f"{key}: {value}")
+    return 0
+
+
+def cmd_orchestrator_set(args: argparse.Namespace) -> int:
+    if not any([args.mode, args.model, args.fallback_model, args.temperature is not None]):
+        raise CrupierConfigError("Pass at least one of --mode, --model, --fallback-model, or --temperature.")
+    mode = args.mode or ("model" if args.model else None)
+    path = write_orchestrator_settings(
+        args.project,
+        mode=mode,
+        model=args.model,
+        fallback_model=args.fallback_model,
+        temperature=args.temperature,
+    )
+    config = CrupierConfig.from_toml(args.project)
+    data = {
+        "path": str(path),
+        "mode": config.orchestrator.mode,
+        "model": config.orchestrator.model,
+        "fallback_model": config.orchestrator.fallback_model,
+        "temperature": config.orchestrator.temperature,
+    }
+    if args.json:
+        print(json.dumps(data, indent=2, sort_keys=True))
+        return 0
+    print(f"Updated [orchestrator] in {path}")
+    print(f"mode: {config.orchestrator.mode}")
+    print(f"model: {config.orchestrator.model}")
+    print(f"fallback_model: {config.orchestrator.fallback_model}")
     return 0
 
 

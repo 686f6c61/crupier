@@ -140,7 +140,7 @@ class DeterministicOrchestrator:
         )
 
     def _fallback(self, request: RequestEnvelope, candidates: list[CapabilityCard]) -> RoutePlan:
-        ranked = self._rank(request, candidates)[:3]
+        ranked = candidates[:3]
         return RoutePlan(
             strategy="fallback",
             steps=[RouteStep(role="fallback", models=[card.model_ref.key for card in ranked])],
@@ -428,6 +428,7 @@ class ModelOrchestrator:
         data = _extract_json_object(text)
         if isinstance(data.get("route_plan"), dict):
             data = data["route_plan"]
+        data = _normalize_common_route_shape(data)
         return RoutePlan.from_dict(data)
 
     def _validate_model_plan(self, plan: RoutePlan, context: PlanningContext) -> None:
@@ -471,9 +472,19 @@ class ModelOrchestrator:
 
 
 def _candidate_summary(card: CapabilityCard) -> dict[str, Any]:
+    best_skills = {
+        key: value
+        for key, value in sorted(
+            card.skill_scores.items(),
+            key=lambda item: (float(item[1]) if isinstance(item[1], int | float) else 0.0, item[0]),
+            reverse=True,
+        )[:8]
+        if isinstance(value, int | float)
+    }
     return {
         "model": card.model_ref.key,
         "provider": card.model_ref.provider,
+        "stability": card.model_ref.stability,
         "model_kind": card.model_kind,
         "modalities_input": card.modalities_input,
         "modalities_output": card.modalities_output,
@@ -485,6 +496,18 @@ def _candidate_summary(card: CapabilityCard) -> dict[str, Any]:
         "cost_tier": card.cost_tier,
         "latency_tier": card.latency_tier,
         "quality_tier": card.quality_tier,
+        "routing_status": card.routing_hints.get("routing_status"),
+        "lifecycle": card.routing_hints.get("lifecycle"),
+        "production_default": card.routing_hints.get("production_default"),
+        "requires_opt_in": card.routing_hints.get("requires_opt_in"),
+        "natural_summary": card.natural_profile.get("summary"),
+        "status_reason": card.natural_profile.get("status_reason"),
+        "best_skills": best_skills,
+        "routing_hints": {
+            "preferred_when": card.routing_hints.get("preferred_when", []),
+            "avoid_when": card.routing_hints.get("avoid_when", []),
+            "strategy_bias": card.routing_hints.get("strategy_bias", []),
+        },
         "strengths": card.strengths,
         "local_eval_scores": card.local_eval_scores,
         "capability_status": card.capability_status,
@@ -513,6 +536,75 @@ def _extract_json_object(text: str) -> dict[str, Any]:
             raise CrupierRouteValidationError(f"Orchestrator returned invalid JSON: {exc}") from exc
     if not isinstance(data, dict):
         raise CrupierRouteValidationError("Orchestrator response must be a JSON object.")
+    return data
+
+
+def _normalize_common_route_shape(data: dict[str, Any]) -> dict[str, Any]:
+    """Repair common role/strategy naming slips without changing model choices."""
+
+    strategy = data.get("strategy")
+    steps = data.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return data
+    normalized_steps: list[dict[str, Any]] = []
+    changed = False
+    for step in steps:
+        if not isinstance(step, dict):
+            normalized_steps.append(step)
+            continue
+        role = step.get("role")
+        models = list(step.get("models", []))
+        model = step.get("model")
+        if strategy == "cascade" and role == "fallback" and models:
+            normalized_steps.append({"role": "primary", "model": models[0]})
+            normalized_steps.extend({"role": "escalation", "model": item} for item in models[1:])
+            changed = True
+            continue
+        if strategy == "cascade" and role == "fallback" and model:
+            normalized_steps.append({"role": "primary", "model": model})
+            changed = True
+            continue
+        if strategy == "single" and role == "fallback" and models:
+            normalized_steps.append({"role": "primary", "model": models[0]})
+            changed = True
+            continue
+        if strategy == "single" and role == "fallback" and model:
+            normalized_steps.append({"role": "primary", "model": model})
+            changed = True
+            continue
+        if strategy == "fallback" and role == "primary" and models:
+            normalized_steps.append({"role": "fallback", "models": models})
+            changed = True
+            continue
+        if strategy == "cascade" and role == "escalation" and models:
+            normalized_steps.extend({"role": "escalation", "model": item} for item in models)
+            changed = True
+            continue
+        if strategy in {"single", "cascade", "local_first"} and role == "primary" and models and not model:
+            normalized_steps.append({"role": "primary", "model": models[0]})
+            changed = True
+            continue
+        normalized_steps.append(step)
+    if strategy == "cascade":
+        seen_primary = False
+        cascade_steps: list[dict[str, Any]] = []
+        for step in normalized_steps:
+            if not isinstance(step, dict):
+                cascade_steps.append(step)
+                continue
+            if step.get("role") == "primary":
+                if seen_primary:
+                    step = {**step, "role": "escalation"}
+                    changed = True
+                seen_primary = True
+            cascade_steps.append(step)
+        normalized_steps = cascade_steps
+    if changed:
+        data = dict(data)
+        data["steps"] = normalized_steps
+        reason = str(data.get("reason", ""))
+        note = " Crupier normalized common route role shape before validation."
+        data["reason"] = (reason + note).strip()
     return data
 
 

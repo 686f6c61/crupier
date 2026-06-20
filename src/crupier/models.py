@@ -118,6 +118,10 @@ class CapabilityCard:
     unsupported_params: list[str] = field(default_factory=list)
     known_edge_cases: list[str] = field(default_factory=list)
     benchmarks: dict[str, Any] = field(default_factory=dict)
+    skill_scores: dict[str, Any] = field(default_factory=dict)
+    natural_profile: dict[str, Any] = field(default_factory=dict)
+    routing_hints: dict[str, Any] = field(default_factory=dict)
+    evidence: dict[str, Any] = field(default_factory=dict)
     local_eval_scores: dict[str, Any] = field(default_factory=dict)
     capability_status: dict[str, Any] = field(default_factory=dict)
     probe_results: dict[str, Any] = field(default_factory=dict)
@@ -160,6 +164,10 @@ class CapabilityCard:
             unsupported_params=list(data.get("unsupported_params", [])),
             known_edge_cases=list(data.get("known_edge_cases", [])),
             benchmarks=dict(data.get("benchmarks", {})),
+            skill_scores=dict(data.get("skill_scores", {})),
+            natural_profile=dict(data.get("natural_profile", {})),
+            routing_hints=dict(data.get("routing_hints", {})),
+            evidence=dict(data.get("evidence", {})),
             local_eval_scores=dict(data.get("local_eval_scores", {})),
             capability_status=dict(data.get("capability_status", {})),
             probe_results=dict(data.get("probe_results", {})),

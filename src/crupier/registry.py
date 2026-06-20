@@ -11,6 +11,7 @@ from typing import Any, Iterable
 from .config import CrupierConfig, write_models_allow
 from .default_cards import BUILTIN_CAPABILITY_CARDS
 from .errors import CrupierConfigError, CrupierModelUnsupportedError
+from .model_profiles import apply_decision_profile
 from .models import CapabilityCard, ModelRef, UpdateReport
 from .adapters import ProviderModel
 
@@ -29,6 +30,17 @@ def _json_dumps(data: dict[str, Any]) -> str:
 
 def _diff_fields(left: dict[str, Any], right: dict[str, Any]) -> list[str]:
     return sorted(field for field in set(left) | set(right) if left.get(field) != right.get(field))
+
+
+def _retained_discovery_index_keys(index: dict[str, Any], *, exclude_providers: set[str]) -> set[str]:
+    if index.get("source") != "provider_discovery":
+        return set()
+    retained: set[str] = set()
+    for model_key in index.get("models", []) or []:
+        ref = ModelRef.parse(model_key)
+        if ref.provider not in exclude_providers:
+            retained.add(ref.key)
+    return retained
 
 
 def _now_iso() -> str:
@@ -64,7 +76,7 @@ def _default_card_for(model_key: str) -> CapabilityCard:
         latency_tier="unknown",
         quality_tier="unknown",
     )
-    return _apply_embedding_kind(card)
+    return apply_decision_profile(_apply_embedding_kind(card))
 
 
 def _card_from_provider_model(provider_model: ProviderModel) -> CapabilityCard:
@@ -172,7 +184,7 @@ def _card_from_provider_model(provider_model: ProviderModel) -> CapabilityCard:
     else:
         stability = model_ref.stability
 
-    return CapabilityCard(
+    card = CapabilityCard(
         model_ref=ModelRef(provider=provider, model=model_ref.model, stability=stability, source="discovered"),
         last_updated=date.today().isoformat(),
         model_kind=model_kind,
@@ -196,6 +208,7 @@ def _card_from_provider_model(provider_model: ProviderModel) -> CapabilityCard:
         latency_tier=latency_tier,
         quality_tier=quality_tier,
     )
+    return apply_decision_profile(_apply_embedding_kind(card), provider_metadata=provider_model.metadata)
 
 
 def _apply_embedding_kind(card: CapabilityCard) -> CapabilityCard:
@@ -261,7 +274,7 @@ class ModelRegistry:
 
     @classmethod
     def builtin_cards(cls) -> dict[str, CapabilityCard]:
-        cards = [CapabilityCard.from_dict(data) for data in BUILTIN_CAPABILITY_CARDS]
+        cards = [apply_decision_profile(CapabilityCard.from_dict(data)) for data in BUILTIN_CAPABILITY_CARDS]
         return {card.model_ref.key: card for card in cards}
 
     def load(self) -> dict[str, CapabilityCard]:
@@ -283,7 +296,7 @@ class ModelRegistry:
         for path in sorted(directory.glob("*.json")):
             with path.open("r", encoding="utf-8") as handle:
                 data = json.load(handle)
-            card = CapabilityCard.from_dict(data)
+            card = apply_decision_profile(CapabilityCard.from_dict(data))
             cards[card.model_ref.key] = card
         return cards
 
@@ -382,6 +395,9 @@ class ModelRegistry:
                     "provider": ref.provider,
                     "stability": ref.stability,
                     "source": ref.source,
+                    "routing_status": (card.routing_hints.get("routing_status") if card else "unknown"),
+                    "lifecycle": (card.routing_hints.get("lifecycle") if card else ref.stability),
+                    "production_default": bool(card.routing_hints.get("production_default", False)) if card else False,
                     "states": labels,
                 }
             )
@@ -476,12 +492,15 @@ class ModelRegistry:
         *,
         dry_run: bool = False,
         provider: str | None = None,
+        discovered_providers: Iterable[str] | None = None,
+        warnings: Iterable[str] | None = None,
     ) -> UpdateReport:
         self.config.ensure_project_dirs()
         report = UpdateReport(dry_run=dry_run)
         provider_models = list(provider_models)
         target_cards: dict[str, CapabilityCard] = {}
-        updated_providers = {provider} if provider else set()
+        updated_providers = {provider} if provider else set(discovered_providers or [])
+        report.warnings.extend(warnings or [])
 
         for provider_model in provider_models:
             card = _card_from_provider_model(provider_model)
@@ -490,6 +509,10 @@ class ModelRegistry:
             target_cards[normalized] = card
 
         model_keys = sorted(target_cards)
+        index_model_keys = model_keys
+        if provider is None:
+            retained = _retained_discovery_index_keys(self._read_registry_index(), exclude_providers=updated_providers)
+            index_model_keys = sorted(set(model_keys) | retained)
         previous_discovered = self._previous_discovered_keys(updated_providers)
         changed: list[dict[str, Any]] = []
 
@@ -519,7 +542,7 @@ class ModelRegistry:
         report.removed_models = sorted(previous_discovered - set(model_keys))
         report.changed_models = sorted(set(report.changed_models) | set(report.removed_models))
         index_path = self.config.registry_dir / "models.json"
-        index_data = {"models": model_keys, "source": "provider_discovery", "updated_at": date.today().isoformat()}
+        index_data = {"models": index_model_keys, "source": "provider_discovery", "updated_at": date.today().isoformat()}
         if not dry_run:
             index_path.write_text(_json_dumps(index_data), encoding="utf-8")
             report.written_files.append(str(index_path))

@@ -4,7 +4,8 @@ from crupier import Crupier
 from crupier.adapters import AdapterResponse, EmbeddingResponse, ProviderModel
 from crupier.cli import _smoke_model_refs, _verify_provider, _verify_provider_names, main
 from crupier.config import CrupierConfig, write_default_project, write_models_allow
-from crupier.models import RequestEnvelope
+from crupier.model_profiles import apply_decision_profile
+from crupier.models import CapabilityCard, ModelRef, RequestEnvelope
 
 
 def test_registry_update_writes_allowed_cards(tmp_path):
@@ -110,6 +111,79 @@ def test_registry_update_online_classifies_embedding_models(tmp_path):
     assert card["supports_embeddings"] is True
     assert card["modalities_output"] == ["embedding"]
     assert card["embedding_dimensions"] == 1536
+    assert card["routing_hints"]["routing_status"] == "specialized"
+
+
+def test_registry_update_online_enriches_decision_profiles(tmp_path):
+    config = CrupierConfig.from_dict(
+        {
+            "providers": {"openai": {"enabled": True}},
+            "models": {"allow": []},
+        }
+    )
+    config.root = tmp_path
+    client = Crupier(config, adapters={"openai": FakeDiscoveryAdapter(["gpt-5.5", "o3", "gpt-5.2-chat-latest"])})
+
+    client.update(dry_run=False, online=True, provider="openai")
+
+    recommended = client.registry.get("openai:gpt-5.5")
+    expensive = client.registry.get("openai:o3")
+    deprecated = client.registry.get("openai:gpt-5.2-chat-latest")
+
+    assert recommended.routing_hints["routing_status"] == "recommended"
+    assert recommended.routing_hints["production_default"] is True
+    assert expensive.routing_hints["routing_status"] == "opt_in"
+    assert expensive.routing_hints["production_default"] is False
+    assert deprecated.routing_hints["routing_status"] == "deprecated"
+    assert deprecated.deprecation["replacement"] == "openai:gpt-5.5"
+
+
+def test_decision_profiles_do_not_recommend_uncurated_discovered_models():
+    card = apply_decision_profile(
+        CapabilityCard(
+            model_ref=ModelRef(provider="anthropic", model="claude-fable-5", source="discovered"),
+            last_updated="2026-06-20",
+        ),
+        provider_metadata={"id": "claude-fable-5"},
+    )
+
+    assert card.routing_hints["routing_status"] == "unknown"
+    assert card.routing_hints["production_default"] is False
+    assert card.routing_hints["requires_opt_in"] is True
+
+
+def test_date_snapshot_models_require_explicit_opt_in():
+    card = apply_decision_profile(
+        CapabilityCard(
+            model_ref=ModelRef(
+                provider="anthropic",
+                model="claude-sonnet-4-5-20250929",
+                source="discovered",
+            ),
+            last_updated="2026-06-20",
+        ),
+        provider_metadata={"id": "claude-sonnet-4-5-20250929"},
+    )
+
+    assert card.routing_hints["routing_status"] == "opt_in"
+    assert card.routing_hints["lifecycle"] == "snapshot"
+    assert card.routing_hints["production_default"] is False
+
+
+def test_failed_capability_probe_overrides_inferred_model_family_support():
+    card = apply_decision_profile(
+        CapabilityCard(
+            model_ref=ModelRef(provider="ollama", model="gpt-oss:120b", source="discovered"),
+            last_updated="2026-06-20",
+            supports_tools=True,
+            strengths=["tool_use", "reasoning"],
+            capability_status={"tool_call": {"status": "failed", "source": "probe:tool_call"}},
+        )
+    )
+
+    assert card.supports_tools is False
+    assert "tool_use" not in card.strengths
+    assert "tool_use" not in card.skill_scores
 
 
 def test_registry_update_online_dry_run_reports_diff_and_states(tmp_path):
@@ -167,17 +241,17 @@ def test_registry_snapshot_create_diff_and_use(tmp_path):
 
     card_path = tmp_path / ".crupier" / "registry" / "capability-cards" / "openai__gpt-5.5.json"
     card_data = json.loads(card_path.read_text(encoding="utf-8"))
-    card_data["quality_tier"] = "unknown"
+    card_data["local_eval_scores"] = {"agentic": 1.25}
     card_path.write_text(json.dumps(card_data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     client.registry._cards = None
 
     diff = client.registry.snapshot_diff("baseline", "current")
-    assert diff["changed"] == [{"model": "openai:gpt-5.5", "fields": ["quality_tier"]}]
+    assert diff["changed"] == [{"model": "openai:gpt-5.5", "fields": ["evidence", "local_eval_scores"]}]
 
     restore = client.registry.snapshot_use("baseline")
     assert restore["restored_models"] == ["openai:gpt-5.5"]
     restored = json.loads(card_path.read_text(encoding="utf-8"))
-    assert restored["quality_tier"] == "frontier"
+    assert restored["local_eval_scores"] == {}
     states = client.registry.model_states(models=["openai:gpt-5.5"])[0]["states"]
     assert states == ["allowed", "locked"]
 
@@ -239,6 +313,66 @@ def test_cli_update_and_models_list_show_registry_states(tmp_path, capsys):
     assert "update: dry-run" in output
     assert "added:" in output
     assert "states=" in output
+
+
+def test_cli_models_list_recommended_excludes_expensive_opt_in_models(tmp_path, capsys):
+    assert main(["--project", str(tmp_path), "init"]) == 0
+    assert (
+        main(
+            [
+                "--project",
+                str(tmp_path),
+                "models",
+                "allow",
+                "openai:gpt-5.5",
+                "openai:o3",
+                "openai:o4-mini",
+                "--replace",
+            ]
+        )
+        == 0
+    )
+    assert main(["--project", str(tmp_path), "models", "list", "--recommended"]) == 0
+
+    output = capsys.readouterr().out
+    assert "openai:gpt-5.5" in output
+    assert "openai:o3" not in output
+    assert "openai:o4-mini" not in output
+
+
+def test_cli_models_show_outputs_decision_profile(tmp_path, capsys):
+    assert main(["--project", str(tmp_path), "init"]) == 0
+    assert main(["--project", str(tmp_path), "models", "allow", "openai:o3", "--replace"]) == 0
+    assert main(["--project", str(tmp_path), "models", "show", "openai:o3"]) == 0
+
+    output = capsys.readouterr().out
+    assert "routing_status: opt_in" in output
+    assert "requires_opt_in: True" in output
+
+
+def test_cli_orchestrator_set_updates_config(tmp_path, capsys):
+    assert main(["--project", str(tmp_path), "init"]) == 0
+    assert (
+        main(
+            [
+                "--project",
+                str(tmp_path),
+                "orchestrator",
+                "set",
+                "--model",
+                "ollama:glm-5.2",
+                "--fallback-model",
+                "anthropic:claude-opus-4-8",
+            ]
+        )
+        == 0
+    )
+
+    config = CrupierConfig.from_toml(tmp_path)
+    assert config.orchestrator.mode == "model"
+    assert config.orchestrator.model == "ollama:glm-5.2"
+    assert config.orchestrator.fallback_model == "anthropic:claude-opus-4-8"
+    assert "Updated [orchestrator]" in capsys.readouterr().out
 
 
 def test_smoke_model_refs_selects_one_per_enabled_provider(tmp_path):

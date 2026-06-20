@@ -431,6 +431,20 @@ def test_google_adapter_uses_generate_content():
     assert response.metadata["api"] == "models.generate_content"
 
 
+def test_google_adapter_uses_minimal_thinking_for_short_outputs():
+    adapter = GoogleAdapter(ProviderSettings(enabled=True))
+    client = FakeGoogleClient()
+    adapter._client = client
+
+    adapter.generate(
+        model="gemini-3.5-flash",
+        prompt="hello",
+        request=RequestEnvelope(task="x", constraints={"max_output_tokens": 64}),
+    )
+
+    assert client.models.generate_payload["config"]["thinking_config"] == {"thinking_level": "minimal"}
+
+
 def test_google_adapter_sends_native_image_content(tmp_path):
     image = tmp_path / "receipt.png"
     image.write_bytes(b"image-bytes")

@@ -218,7 +218,7 @@ def write_release_project(root):
         "      - run: echo 'is not the main branch; is not main'\n"
         "      - name: Release readiness check\n"
         "        env:\n"
-        "          FIRST_PUBLIC_RELEASE_VERSION: \"0.1.0\"\n"
+        "          FIRST_PUBLIC_RELEASE_VERSION: \"0.2.0\"\n"
         "        run: |\n"
         "          crupier release check --strict-public --verify-project-urls --check-pypi-name --allow-existing-pypi-project\n"
         "      - run: python -m ruff check src tests --select E9,F63,F7,F82\n"
@@ -1141,6 +1141,7 @@ def test_default_config_check_enforces_public_onboarding_defaults():
     assert check.evidence["store_responses"] is False
     assert check.evidence["max_provider_retries"] == 1
     assert check.evidence["retry_backoff_seconds"] == 0.2
+    assert check.evidence["require_operational_providers"] is True
 
 
 def test_runtime_safety_defaults_check_enforces_server_exposure_defaults():

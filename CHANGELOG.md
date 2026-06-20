@@ -2,6 +2,14 @@
 
 All notable changes to Crupier will be documented here.
 
+## 0.2.0 - 2026-06-20
+
+- Added curated model decision profiles for OpenAI, Anthropic Claude, Google Gemini, and Ollama Cloud so discovered models are separated from production-default, specialized, opt-in, legacy, and deprecated routing choices.
+- Added `models list --recommended`, `models show`, and orchestrator CLI/SDK configuration so users can choose their project allowlist and route-orchestrator model explicitly; expensive OpenAI `o3`/`o4-mini` family models now require opt-in rather than appearing in the default recommended set.
+- Tightened the production-default set so uncurated discovered models stay visible but require opt-in, and failed capability probes override inferred family support.
+- Added operational-provider filtering so runtime routing only selects models visible to the configured API key, with explicit offline simulation opt-out.
+- Tuned Google Gemini short-output calls with minimal thinking configuration, fixing false probe failures for Gemini 3.5 Flash text and JSON checks.
+
 ## 0.1.0 - 2026-06-20
 
 - Added multi-provider routing core with dry-run and real execution paths.
@@ -51,7 +59,7 @@ All notable changes to Crupier will be documented here.
 - Hardened the PyPI publish workflow so the checked-out release/manual commit must match `origin/main` before building or uploading distributions.
 - Serialized PyPI publish workflow runs per ref so duplicate release/manual triggers cannot race each other.
 - Scoped PyPI trusted-publishing permissions to the publish job and linked the `pypi` environment to the package page.
-- Hardened the PyPI publish workflow so the first `0.1.0` upload requires an available project name while later releases allow the already-owned PyPI project.
+- Hardened the PyPI publish workflow so the first public upload requires an available project name while later releases allow the already-owned PyPI project.
 - Aligned the repository development allowlist with currently verified OpenAI, Anthropic Claude, and Ollama Cloud models, and clarified the provider-readiness remediation path when real checks need capability probes.
 - Aligned the repository development provider config with the final OpenAI, Anthropic Claude, Google Gemini, and Ollama Cloud readiness gate.
 - Added public package discovery metadata for AI-oriented PyPI classification and GitHub repository topics.
@@ -82,7 +90,7 @@ All notable changes to Crupier will be documented here.
 - Added release smoke validation for installed `python -m crupier --version` module execution.
 - Added release checks and artifact inspection for CONTRIBUTING.md so public development guidance is shipped and maintained.
 - Added a PyPI publish workflow for GitHub Release based publishing.
-- Added a release-language guard so final `0.1.0` package metadata and public onboarding files do not regress into non-final release labels.
+- Added a release-language guard so final package metadata and public onboarding files do not regress into non-final release labels.
 - Added optional `crupier release check --check-pypi-name` with `--allow-existing-pypi-project` for first-upload and maintenance-release PyPI name preflights.
 - Added `crupier release check --verify-project-urls` for public package-link reachability checks before PyPI upload.
 - Added public collaboration templates and release checks for bug reports, feature requests, and pull requests.

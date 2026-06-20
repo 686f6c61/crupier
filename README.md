@@ -7,9 +7,9 @@ It is designed for two situations:
 - New projects that want one AI boundary instead of hard-coding provider/model choices throughout the codebase.
 - Existing AI projects, agents, SDK integrations, or provider-specific codebases that want to add model selection, provider fallback, audits, evals, and human review without a full rewrite.
 
-Crupier does not provide OpenRouter keys or act as a security gateway. It runs with your provider accounts across OpenAI, Anthropic Claude, Google Gemini, Ollama Cloud, optional OpenRouter BYOK, or your own integration boundary. It keeps prompts/responses out of logs by default and focuses on routing instructions toward the best available model or model family for the task, performance target, cost budget, and project policy.
+Crupier is a BYOK orchestration layer: it runs with your own provider accounts across OpenAI, Anthropic Claude, Google Gemini, Ollama Cloud, optional OpenRouter BYOK, or your own integration boundary. It keeps prompts/responses out of persistent logs by default and routes each request toward the best available model or model family for the task, quality target, latency, cost budget, and project policy.
 
-Current public package version: `0.1.0`.
+Current public package version: `0.2.0`.
 
 ## What It Does
 
@@ -230,6 +230,21 @@ crupier update --online --json
 
 Discovery does not automatically enable every model. Production projects should keep an explicit `[models].allow` list and use registry snapshots for repeatability.
 
+Online discovery, online updates, probes, readiness checks, and real runtime routing only treat a provider/model as operational when the configured API key can actually query that provider. If a provider is enabled but the key is missing, invalid, rate-limited, or cannot see a selected model, Crupier reports that boundary and excludes those models from automatic routing. Explicit single-provider commands fail clearly; multi-provider discovery can skip non-operational providers with warnings so one bad key does not pollute the operational catalog. Dry-run planning remains offline by default; set `constraints={"require_operational_providers": True}` when a dry-run should also preflight live keys.
+
+Model listings separate what the provider exposes from what Crupier recommends for default routing:
+
+```bash
+crupier models list --all
+crupier models list --all --recommended
+crupier models list --all --status specialized
+crupier models show ollama:glm-5.2
+```
+
+Every capability card carries a decision profile with `routing_status`, `lifecycle`, `production_default`, `requires_opt_in`, task skills, modality support, and source evidence. Expensive or narrow models can remain visible without being selected by default. For example, OpenAI `o3`, `o3-pro`, and `o4-mini` are treated as explicit opt-in models rather than Crupier production-default choices.
+
+For `0.2.0`, Crupier treats the provider catalog and the automatic routing set as different things. Provider discovery may produce hundreds of cards, but the production-default set stays intentionally small and source-backed: current OpenAI GPT defaults, current Claude Opus/Sonnet defaults, current Gemini Flash/Pro defaults, and selected Ollama Cloud defaults such as `ollama:glm-5.2` and `ollama:gpt-oss:120b`. Everything else remains selectable by the project owner through `[models].allow`, but is classified as `unknown`, `opt_in`, `specialized`, `legacy`, `deprecated`, or `shutdown` until there is enough evidence to promote it.
+
 ## How Model Selection Works
 
 Crupier selection is intentionally layered:
@@ -247,14 +262,36 @@ The default orchestrator is deterministic. You can opt into a model orchestrator
 ```toml
 [orchestrator]
 mode = "model"
-model = "openai:gpt-5.4-mini"
-fallback_model = "openai:gpt-5.4-mini"
+model = "ollama:glm-5.2"
+fallback_model = "anthropic:claude-opus-4-8"
 fallback = "deterministic"
 temperature = 0
 require_validated_plan = true
 max_repairs = 1
 allow_prompt_summary_only = true
 ```
+
+Configure it from the CLI or SDK:
+
+```bash
+crupier orchestrator show
+crupier orchestrator set --model ollama:glm-5.2 --fallback-model anthropic:claude-opus-4-8
+crupier orchestrator set --model openai:gpt-5.4-mini
+```
+
+```python
+from crupier import Crupier
+
+crupier = Crupier.from_project()
+crupier.configure_orchestrator(
+    mode="model",
+    model="ollama:glm-5.2",
+    fallback_model="anthropic:claude-opus-4-8",
+    persist=True,
+)
+```
+
+`ollama:glm-5.2` is a strong preset when Ollama Cloud is enabled for the project, not a lock-in. Any model visible to your enabled provider accounts can be used as the orchestrator model by setting `provider:model`.
 
 Sensitive agentic/tool routes include guardrails so an orchestrator cannot silently downgrade into an unsafe or unsupported model path.
 
@@ -318,6 +355,8 @@ crupier capabilities probe --provider openai --apply
 crupier capabilities probe --provider openai --probe structured_output --probe tool_call --probe streaming --apply
 crupier capabilities probe --model openai:text-embedding-3-small --probe embeddings --apply
 ```
+
+Verified probe evidence wins over family inference. If a model family looks tool-capable but `tool_call` fails for the configured account, Crupier records that failed capability and keeps tool routes away from that model unless the evidence changes.
 
 Available probes:
 
@@ -454,7 +493,7 @@ result = crupier.deal(
 )
 ```
 
-In `0.1.0`, tool execution is provider-agnostic: Crupier asks the selected model for a JSON tool plan, executes approved local tools, deduplicates identical tool calls with idempotency keys, and sends tool results back for the final answer. Provider-native tool-call execution is planned as an optimization.
+Tool execution is provider-agnostic: Crupier asks the selected model for a JSON tool plan, executes approved local tools, deduplicates identical tool calls with idempotency keys, and sends tool results back for the final answer. Provider-native tool-call execution is planned as an optimization.
 
 ## Files, Images, PDFs, And Multimodal Requests
 
@@ -484,7 +523,7 @@ Current execution behavior:
 - Text, Markdown, JSON, YAML, HTML/CSS, code files, and PDFs can execute as extracted text context.
 - PDF extraction uses `pypdf` from `crupier[pdf]` when installed or a local `pdftotext` binary when available.
 - `constraints={"require_native_file_input": True}` forces a native file-capable route instead of extracted context.
-- Native PDF/audio/video/office-document execution, OCR, table-aware PDF extraction, and transcription are planned after `0.1.0`.
+- Native PDF/audio/video/office-document execution, OCR, table-aware PDF extraction, and transcription are planned after `0.2.0`.
 
 ## Embeddings
 
@@ -602,11 +641,12 @@ Crupier separates per-call retries from route fallback:
 [routing]
 max_provider_retries = 1
 retry_backoff_seconds = 0.2
+require_operational_providers = true
 ```
 
 Provider calls retry transient rate-limit and provider-unavailable errors before giving up or moving to the next fallback model. Crupier does not retry auth failures, missing optional dependencies, policy/budget failures, model-capability failures, non-transient provider setup errors, or tool approval blocks. Each failed provider attempt is recorded in `trace.errors` with provider, model, attempt, latency, error type, and retryability. Successful calls include the final `attempt` number in `trace.provider_calls`.
 
-Per request, set `constraints={"max_provider_retries": 0}` to disable provider retries or `constraints={"retry_backoff_seconds": 0}` for zero-wait test runs. `constraints={"timeout_seconds": 30}` applies to provider calls where the adapter/SDK exposes request-level timeouts, including OpenAI, OpenRouter, Anthropic Claude, and Ollama. For Google Gemini, configure a client timeout in `[providers.google]` with `timeout_seconds = 30`.
+Per request, set `constraints={"max_provider_retries": 0}` to disable provider retries, `constraints={"retry_backoff_seconds": 0}` for zero-wait test runs, or `constraints={"require_operational_providers": False}` for offline route simulation. `constraints={"timeout_seconds": 30}` applies to provider calls where the adapter/SDK exposes request-level timeouts, including OpenAI, OpenRouter, Anthropic Claude, and Ollama. For Google Gemini, configure a client timeout in `[providers.google]` with `timeout_seconds = 30`.
 
 ## Evals And Human Feedback
 
@@ -768,12 +808,12 @@ Final public release order:
 5. Rerun `crupier release check --strict-public --verify-providers --provider openai --provider anthropic --provider google --provider ollama`.
 6. Confirm Dependabot security updates are enabled and unpaused.
 7. Protect `main` with required CI, no force pushes, and pull-request review before accepting public changes.
-8. Publish a final GitHub Release from the current `main` tip tagged `v0.1.0` or `0.1.0`; the publish workflow rejects draft/non-final releases, non-main targets, commits that do not match `origin/main`, and tags that do not match the package version.
+8. Publish a final GitHub Release from the current `main` tip tagged `v0.2.0` or `0.2.0`; the publish workflow rejects draft/non-final releases, non-main targets, commits that do not match `origin/main`, and tags that do not match the package version.
 
 Manual workflow dispatch is only for retrying an intentional release operation.
-It must run from `main`, requires the `version` input to equal `0.1.0`, and
+It must run from `main`, requires the `version` input to equal `0.2.0`, and
 requires `confirm_publish=true` before any distribution is built or uploaded.
-The publish workflow treats `0.1.0` as the first public upload and fails if the
+The publish workflow treats `0.2.0` as the first public upload and fails if the
 PyPI project already exists. Future package versions allow the existing PyPI
 project name after ownership has been established by the first release.
 Publish attempts are serialized per ref so duplicate release/manual triggers do
@@ -782,7 +822,7 @@ permissions and links the `pypi` environment to the package page.
 
 For development and pull request expectations, see [CONTRIBUTING.md](https://github.com/686f6c61/crupier/blob/main/CONTRIBUTING.md).
 
-## What Is Implemented In 0.1.0
+## What Is Implemented In 0.2.0
 
 Implemented now:
 
@@ -803,7 +843,7 @@ Implemented now:
 - typed errors and `py.typed`
 - release gate with build, artifact, install smoke, PyPI name, project URL, provider readiness, CI, security, and dependency checks
 
-Planned after `0.1.0`:
+Planned after `0.2.0`:
 
 - online price refresh
 - production-calibrated model orchestrator evals
