@@ -813,9 +813,10 @@ Final public release order:
 Manual workflow dispatch is only for retrying an intentional release operation.
 It must run from `main`, requires the `version` input to equal `0.2.0`, and
 requires `confirm_publish=true` before any distribution is built or uploaded.
-The publish workflow treats `0.2.0` as the first public upload and fails if the
-PyPI project already exists. Future package versions allow the existing PyPI
-project name after ownership has been established by the first release.
+The publish workflow treats `0.1.0` as the first public upload and fails if the
+PyPI project does not start from an available name. Later package versions allow
+the existing PyPI project name after ownership has been established by the first
+release.
 Publish attempts are serialized per ref so duplicate release/manual triggers do
 not race each other. PyPI publishing uses job-scoped `id-token: write`
 permissions and links the `pypi` environment to the package page.

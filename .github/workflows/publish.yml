@@ -94,7 +94,7 @@ jobs:
         run: python -m pip_audit --skip-editable --progress-spinner off
       - name: Release readiness check
         env:
-          FIRST_PUBLIC_RELEASE_VERSION: "0.2.0"
+          FIRST_PUBLIC_RELEASE_VERSION: "0.1.0"
         run: |
           VERSION="$(python -c 'import pathlib, tomllib; print(tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"])')"
           EXTRA_ARGS=""
