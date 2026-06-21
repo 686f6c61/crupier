@@ -6,7 +6,7 @@ import json
 from typing import Any, Protocol
 
 from .adapters import ProviderAdapter
-from .config import CrupierConfig
+from .config import CrupierConfig, ProfileSettings
 from .costs import estimate_route_cost
 from .errors import CrupierRouteValidationError
 from .models import (
@@ -19,6 +19,11 @@ from .models import (
     RouteStep,
 )
 from .policy import PolicyEngine, PolicyResult
+from .prompts import (
+    ORCHESTRATOR_ROUTE_PLAN_PROMPT_VERSION,
+    build_orchestrator_planning_prompt,
+    build_orchestrator_repair_prompt,
+)
 from .route_schema import ALLOWED_STRATEGIES, validate_route_plan_shape
 from .selector import ModelSelector
 
@@ -67,6 +72,8 @@ class DeterministicOrchestrator:
             plan = self._critique_repair(request, candidates)
         elif strategy == "local_first":
             plan = self._local_first(request, candidates)
+        elif strategy == "delegate":
+            plan = self._delegate(request, candidates)
         else:
             plan = self._single(request, candidates)
             plan.reason += f" Requested strategy {strategy!r} is unavailable for deterministic routing; fell back to single."
@@ -110,6 +117,10 @@ class DeterministicOrchestrator:
 
     def _orchestrate_strategy(self, request: RequestEnvelope, candidates: list[CapabilityCard]) -> str:
         mode = request.mode or self.config.project.default_profile
+        profile = self.config.profiles.get(mode)
+        strategy = self._strategy_from_rules(request, candidates, profile)
+        if strategy:
+            return strategy
         risk = request.constraints.get("risk_level")
         if mode == "private":
             return "local_first"
@@ -126,6 +137,58 @@ class DeterministicOrchestrator:
         if mode == "agentic" and (request.tools or risk == "high"):
             return "critique_repair" if len(candidates) >= 2 else "single"
         return "single"
+
+    def _strategy_from_rules(
+        self,
+        request: RequestEnvelope,
+        candidates: list[CapabilityCard],
+        profile: ProfileSettings | None,
+    ) -> str | None:
+        if profile is None:
+            return None
+        rules = profile.options.get("strategy_rules")
+        if not isinstance(rules, list):
+            return None
+        for rule in rules:
+            if not isinstance(rule, dict):
+                continue
+            strategy = str(rule.get("strategy", ""))
+            if strategy not in ALLOWED_STRATEGIES:
+                continue
+            when = rule.get("when", {})
+            if isinstance(when, dict) and self._strategy_rule_matches(request, candidates, when):
+                return strategy
+        return None
+
+    def _strategy_rule_matches(
+        self,
+        request: RequestEnvelope,
+        candidates: list[CapabilityCard],
+        when: dict[str, Any],
+    ) -> bool:
+        tool_count = len(request.tools)
+        checks = {
+            "tools": bool(request.tools),
+            "structured": request.response_schema is not None or bool(request.constraints.get("response_schema")),
+        }
+        for key, expected in checks.items():
+            if key in when and bool(when[key]) != expected:
+                return False
+        if "risk_level" in when and str(when["risk_level"]) != str(request.constraints.get("risk_level")):
+            return False
+        if "min_tools" in when and tool_count < int(when["min_tools"]):
+            return False
+        if "max_tools" in when and tool_count > int(when["max_tools"]):
+            return False
+        if "min_candidates" in when and len(candidates) < int(when["min_candidates"]):
+            return False
+        if "max_candidates" in when and len(candidates) > int(when["max_candidates"]):
+            return False
+        if "file_kind" in when:
+            file_kinds = {asset.kind for asset in request.files}
+            if str(when["file_kind"]) not in file_kinds:
+                return False
+        return True
 
     def _single(self, request: RequestEnvelope, candidates: list[CapabilityCard]) -> RoutePlan:
         card = self._rank(request, candidates)[0]
@@ -238,6 +301,31 @@ class DeterministicOrchestrator:
             summary="Local-first route: " + " -> ".join(step.model or "" for step in steps),
         )
 
+    def _delegate(self, request: RequestEnvelope, candidates: list[CapabilityCard]) -> RoutePlan:
+        anchor = self._rank(request, candidates)[0]
+        max_depth = self._max_depth(request)
+        return RoutePlan(
+            strategy="delegate",
+            steps=[
+                RouteStep(
+                    role="delegate",
+                    model=anchor.model_ref.key,
+                    timeout_ms=self.config.routing.max_latency_ms,
+                    params={
+                        "task": request.task,
+                        "mode": request.mode or self.config.project.default_profile,
+                        "strategy": "orchestrated",
+                        "max_depth": max_depth,
+                    },
+                )
+            ],
+            estimated_cost=CostEstimate(0.0),
+            estimated_latency_ms=self._latency_estimate([anchor]),
+            reason="Delegated workflow requested; nested route will plan with inherited context and reduced depth.",
+            risk_level=self._risk_level(request, "delegate"),
+            summary=f"Delegate route anchored on {anchor.model_ref.key}.",
+        )
+
     def _rank(self, request: RequestEnvelope, candidates: list[CapabilityCard]) -> list[CapabilityCard]:
         return self.selector.rank(request, candidates)
 
@@ -289,11 +377,18 @@ class DeterministicOrchestrator:
     def _risk_level(request: RequestEnvelope, strategy: str) -> str:
         if "risk_level" in request.constraints:
             return str(request.constraints["risk_level"])
-        if strategy in {"fusion", "critique_repair"} or request.tools:
+        if strategy in {"fusion", "critique_repair", "delegate"} or request.tools:
             return "high"
         if request.mode in {"cheap", "fast"}:
             return "low"
         return "medium"
+
+    def _max_depth(self, request: RequestEnvelope) -> int:
+        value = request.constraints.get("max_depth", self.config.routing.max_depth)
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return max(0, int(self.config.routing.max_depth))
 
 
 class ModelOrchestrator:
@@ -319,32 +414,59 @@ class ModelOrchestrator:
         if not model_key:
             return self._deterministic_fallback(context, "no orchestrator model is configured")
 
+        attempted_models: list[str] = []
+        last_error = ""
+        for candidate_model in self._orchestrator_models():
+            attempted_models.append(candidate_model)
+            try:
+                plan = self._plan_with_model(candidate_model, context)
+                if candidate_model != model_key:
+                    plan.reason = (
+                        plan.reason
+                        + f" Fallback orchestrator {candidate_model} was used after primary orchestrator failure."
+                    ).strip()
+                return plan
+            except Exception as exc:  # noqa: BLE001 - invalid model plans fall back safely
+                last_error = str(exc)
+
+        attempted = " -> ".join(attempted_models)
+        reason = last_error or "model plan was invalid"
+        if attempted:
+            reason = f"{reason}; attempted orchestrators: {attempted}"
+        return self._deterministic_fallback(context, reason)
+
+    def _plan_with_model(self, model_key: str, context: PlanningContext) -> RoutePlan:
         max_repairs = max(0, int(self.config.orchestrator.max_repairs))
         raw_text = ""
         last_error = ""
-        try:
-            raw_text = self._call_orchestrator(self._planning_prompt(context), context)
-            for attempt in range(max_repairs + 1):
-                try:
-                    plan = self._plan_from_text(raw_text)
-                    self._validate_model_plan(plan, context)
-                    plan = self.fallback._finalize_plan(plan, context)
-                    plan.reason = (
-                        plan.reason + " Model orchestrator proposed and validated this route."
-                    ).strip()
-                    return plan
-                except Exception as exc:  # noqa: BLE001 - invalid model plans fall back safely
-                    last_error = str(exc)
-                    if attempt >= max_repairs:
-                        break
-                    raw_text = self._call_orchestrator(
-                        self._repair_prompt(context, raw_text=raw_text, error=last_error),
-                        context,
-                    )
-        except Exception as exc:  # noqa: BLE001 - provider/adapter failures fall back safely
-            last_error = str(exc)
+        raw_text = self._call_orchestrator(model_key, self._planning_prompt(context), context)
+        for attempt in range(max_repairs + 1):
+            try:
+                plan = self._plan_from_text(raw_text)
+                self._validate_model_plan(plan, context)
+                plan = self.fallback._finalize_plan(plan, context)
+                plan.reason = (plan.reason + " Model orchestrator proposed and validated this route.").strip()
+                return plan
+            except Exception as exc:  # noqa: BLE001 - invalid model plans are repaired or escalated
+                last_error = str(exc)
+                if attempt >= max_repairs:
+                    break
+                raw_text = self._call_orchestrator(
+                    model_key,
+                    self._repair_prompt(context, raw_text=raw_text, error=last_error),
+                    context,
+                )
+        raise CrupierRouteValidationError(last_error or "model plan was invalid")
 
-        return self._deterministic_fallback(context, last_error or "model plan was invalid")
+    def _orchestrator_models(self) -> list[str]:
+        models: list[str] = []
+        for value in (self.config.orchestrator.model, self.config.orchestrator.fallback_model):
+            if not value:
+                continue
+            key = ModelRef.parse(str(value)).key
+            if key not in models:
+                models.append(key)
+        return models
 
     def _deterministic_fallback(self, context: PlanningContext, reason: str) -> RoutePlan:
         plan = self.fallback.plan(context)
@@ -353,8 +475,8 @@ class ModelOrchestrator:
         ).strip()
         return plan
 
-    def _call_orchestrator(self, prompt: str, context: PlanningContext) -> str:
-        model_ref = ModelRef.parse(str(self.config.orchestrator.model))
+    def _call_orchestrator(self, model_key: str, prompt: str, context: PlanningContext) -> str:
+        model_ref = ModelRef.parse(model_key)
         adapter = self.adapters.get(model_ref.provider)
         if adapter is None:
             raise CrupierRouteValidationError(
@@ -375,47 +497,17 @@ class ModelOrchestrator:
         return response.text
 
     def _planning_prompt(self, context: PlanningContext) -> str:
-        payload = self._planning_payload(context)
-        return (
-            "You are Crupier's model-routing orchestrator. Return only one JSON object, no markdown.\n"
-            "The JSON must match this shape:\n"
-            "{\n"
-            '  "strategy": "single|fallback|cascade|panel|fusion|critique_repair|local_first",\n'
-            '  "steps": [{"role": "primary", "model": "provider:model"}],\n'
-            '  "estimated_cost": {"estimated_usd": 0.0},\n'
-            '  "estimated_latency_ms": 6000,\n'
-            '  "reason": "short explanation without hidden reasoning",\n'
-            '  "risk_level": "low|medium|high",\n'
-            '  "summary": "short route summary"\n'
-            "}\n"
-            "Rules:\n"
-            "- Use only candidate_models exactly as provided.\n"
-            "- Do not invent capabilities, providers, prices, tools, or model IDs.\n"
-            "- Valid role shapes: single/local_first use primary plus optional fallback; "
-            "cascade uses primary plus optional escalation; fallback uses one fallback step with models; "
-            "fusion requires panel, judge, final_writer; critique_repair requires generator, critic, repair.\n"
-            "- Prefer single/cascade/fallback unless uncertainty or risk justifies panel/fusion/critique_repair.\n"
-            "- Respect max_calls, modality requirements, strategy constraints, and deterministic_scores.\n"
-            "- Do not include raw prompt/input content or chain-of-thought.\n"
-            "Planning context JSON:\n"
-            f"{json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
-        )
+        return build_orchestrator_planning_prompt(self._planning_payload(context))
 
     def _repair_prompt(self, context: PlanningContext, *, raw_text: str, error: str) -> str:
-        payload = self._planning_payload(context)
-        return (
-            "Repair the previous Crupier RoutePlan. Return only one valid JSON object, no markdown.\n"
-            f"Validation error: {error}\n"
-            f"Previous output: {_truncate(raw_text, 4000)}\n"
-            "Planning context JSON:\n"
-            f"{json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
-        )
+        return build_orchestrator_repair_prompt(self._planning_payload(context), raw_text=raw_text, error=error)
 
     def _planning_payload(self, context: PlanningContext) -> dict[str, Any]:
         payload = context.to_dict(summary=True)
         payload["candidate_cards"] = [_candidate_summary(card) for card in context.candidates]
         payload["max_calls"] = int(context.request.constraints.get("max_calls", self.config.routing.max_calls))
         payload["allowed_strategies"] = sorted(self.ALLOWED_STRATEGIES)
+        payload["prompt_version"] = ORCHESTRATOR_ROUTE_PLAN_PROMPT_VERSION
         sensitive = self._sensitive_allowed_strategies(context)
         if sensitive:
             payload["strategy_guardrail"] = {
@@ -606,7 +698,3 @@ def _normalize_common_route_shape(data: dict[str, Any]) -> dict[str, Any]:
         note = " Crupier normalized common route role shape before validation."
         data["reason"] = (reason + note).strip()
     return data
-
-
-def _truncate(text: str, limit: int) -> str:
-    return text if len(text) <= limit else text[: limit - 3] + "..."

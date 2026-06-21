@@ -4,6 +4,7 @@ include LICENSE
 include SECURITY.md
 include CHANGELOG.md
 include .env.example
+recursive-include src/crupier *.py py.typed
 recursive-include examples *.json *.py
 prune .crupier
 prune .venv

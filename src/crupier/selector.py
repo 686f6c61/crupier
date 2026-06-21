@@ -6,15 +6,10 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .capabilities import CapabilityEvidence, capability_evidence
-from .config import CrupierConfig
+from .config import CrupierConfig, ScoringSettings
 from .costs import estimate_model_cost, estimate_tokens
-from .model_profiles import classify_task_signals
+from .model_profiles import classify_task_signal_weights
 from .models import CapabilityCard, RequestEnvelope
-
-
-QUALITY_WEIGHT = {"unknown": 0, "strong": 2, "frontier": 4}
-COST_WEIGHT = {"unknown": 0, "low": 4, "medium": 2, "high": 0}
-LATENCY_WEIGHT = {"unknown": 0, "fast": 4, "medium": 2, "slow": 0}
 
 
 @dataclass(slots=True)
@@ -46,6 +41,7 @@ class ModelSelector:
 
     def __init__(self, config: CrupierConfig):
         self.config = config
+        self.scoring = config.scoring
 
     def rank(self, request: RequestEnvelope, candidates: list[CapabilityCard]) -> list[CapabilityCard]:
         scores = self.score_all(request, candidates)
@@ -61,49 +57,73 @@ class ModelSelector:
         mode = request.mode or self.config.project.default_profile
         profile = self.config.profiles.get(mode)
         preferences = set(profile.prefer if profile else [])
-        task_signals = self._task_signals(request)
+        task_signal_weights = self._task_signal_weights(request)
+        task_signals = set(task_signal_weights)
 
-        self._add(terms, "quality_tier", QUALITY_WEIGHT.get(card.quality_tier, 0), f"quality={card.quality_tier}")
+        self._add(terms, "quality_tier", self._tier_weight("quality", card.quality_tier), f"quality={card.quality_tier}")
 
         matched_preferences = sorted(set(card.strengths).intersection(preferences))
         if matched_preferences:
             self._add(
                 terms,
                 "profile_preferences",
-                3 * len(matched_preferences),
+                self.scoring.profile_preference_weight * len(matched_preferences),
                 "matches " + ", ".join(matched_preferences),
             )
 
         matched_task = sorted(set(card.strengths).intersection(task_signals))
         if matched_task:
-            self._add(terms, "task_signals", 2 * len(matched_task), "task suggests " + ", ".join(matched_task))
+            value = self.scoring.task_signal_weight * sum(task_signal_weights.get(signal, 1.0) for signal in matched_task)
+            self._add(
+                terms,
+                "task_signals",
+                value,
+                "task suggests "
+                + ", ".join(f"{signal}={task_signal_weights.get(signal, 1.0):.2g}" for signal in matched_task),
+            )
 
         skill_terms = []
         for signal in sorted(task_signals):
             value = card.skill_scores.get(signal)
-            if isinstance(value, int | float) and float(value) >= 6.0:
-                skill_terms.append((signal, float(value)))
+            if isinstance(value, int | float) and float(value) >= self.scoring.skill_fit_min_score:
+                skill_terms.append((signal, float(value), task_signal_weights.get(signal, 1.0)))
         if skill_terms:
-            value = min(12.0, sum((score - 5.0) * 0.8 for _, score in skill_terms))
-            detail = ", ".join(f"{signal}={score:g}" for signal, score in skill_terms[:6])
+            value = min(
+                self.scoring.skill_fit_cap,
+                sum(
+                    (score - self.scoring.skill_fit_baseline) * self.scoring.skill_fit_multiplier * weight
+                    for _, score, weight in skill_terms
+                ),
+            )
+            detail = ", ".join(f"{signal}={score:g}x{weight:.2g}" for signal, score, weight in skill_terms[:6])
             self._add(terms, "skill_fit", value, "decision profile skills " + detail)
 
         if mode == "cheap":
-            self._add(terms, "cheap_mode_cost", COST_WEIGHT.get(card.cost_tier, 0) * 2, f"cost={card.cost_tier}")
+            self._add(
+                terms,
+                "cheap_mode_cost",
+                self._tier_weight("cost", card.cost_tier) * self.scoring.cheap_mode_cost_multiplier,
+                f"cost={card.cost_tier}",
+            )
         if mode == "fast":
             self._add(
                 terms,
                 "fast_mode_latency",
-                LATENCY_WEIGHT.get(card.latency_tier, 0) * 2,
+                self._tier_weight("latency", card.latency_tier) * self.scoring.fast_mode_latency_multiplier,
                 f"latency={card.latency_tier}",
             )
         if mode == "private" and card.model_ref.provider == "ollama":
-            self._add(terms, "private_mode_local", 10, "private mode prefers configured Ollama candidates")
+            self._add(
+                terms,
+                "private_mode_local",
+                self.scoring.private_mode_ollama_bonus,
+                "private mode prefers configured Ollama candidates",
+            )
         if mode in {"quality", "research", "agentic"}:
             self._add(
                 terms,
                 f"{mode}_mode_quality",
-                QUALITY_WEIGHT.get(card.quality_tier, 0),
+                self._tier_weight("quality", card.quality_tier),
                 f"{mode} mode values model quality",
             )
 
@@ -156,30 +176,40 @@ class ModelSelector:
 
         eval_score = self._local_eval_score(card, mode)
         if eval_score:
-            self._add(terms, "local_eval", eval_score, f"local eval signal for {mode}")
+            self._add(terms, "local_eval", eval_score * self.scoring.local_eval_weight, f"local eval signal for {mode}")
 
         human_feedback_score = self._human_feedback_score(card, mode)
         if human_feedback_score:
             self._add(
                 terms,
                 "human_feedback",
-                human_feedback_score,
+                human_feedback_score * self.scoring.human_feedback_weight,
                 f"project human feedback signal for {mode}",
             )
 
         if card.deprecation:
-            self._add(terms, "deprecation_penalty", -100, "model card marks model as deprecated")
+            self._add(terms, "deprecation_penalty", self.scoring.deprecation_penalty, "model card marks model as deprecated")
         routing_status = card.routing_hints.get("routing_status")
         if routing_status in {"legacy", "unknown"}:
-            self._add(terms, "routing_status_penalty", -6, f"routing_status={routing_status}")
+            self._add(
+                terms,
+                "routing_status_penalty",
+                self.scoring.routing_status_penalty,
+                f"routing_status={routing_status}",
+            )
         if card.routing_hints.get("requires_opt_in") and not card.routing_hints.get("production_default"):
-            self._add(terms, "opt_in_penalty", -4, "model requires explicit opt-in for default routing")
+            self._add(terms, "opt_in_penalty", self.scoring.opt_in_penalty, "model requires explicit opt-in for default routing")
         if mode == "cheap" and card.cost_tier == "high":
-            self._add(terms, "high_cost_penalty", -4, "cheap mode penalizes high-cost models")
+            self._add(terms, "high_cost_penalty", self.scoring.cheap_high_cost_penalty, "cheap mode penalizes high-cost models")
         if mode == "fast" and card.latency_tier not in {"fast", "unknown"}:
-            self._add(terms, "latency_penalty", -3, "fast mode penalizes slower models")
+            self._add(terms, "latency_penalty", self.scoring.fast_latency_penalty, "fast mode penalizes slower models")
         if card.model_ref.stability in {"preview", "experimental"}:
-            self._add(terms, "stability_penalty", -5, f"model stability={card.model_ref.stability}")
+            self._add(
+                terms,
+                "stability_penalty",
+                self.scoring.preview_stability_penalty,
+                f"model stability={card.model_ref.stability}",
+            )
 
         total = sum(term.value for term in terms)
         return SelectionScore(model=card.model_ref.key, score=total, terms=terms)
@@ -190,7 +220,12 @@ class ModelSelector:
             terms.append(ScoreTerm(name=name, value=float(value), reason=reason))
 
     def _add_capability_term(self, terms: list[ScoreTerm], name: str, evidence: CapabilityEvidence) -> None:
-        weights = {"verified": 6, "inferred": 2, "unknown": 0, "failed": -20}
+        weights = {
+            "verified": self.scoring.verified_capability_weight,
+            "inferred": self.scoring.inferred_capability_weight,
+            "unknown": 0.0,
+            "failed": self.scoring.failed_capability_penalty,
+        }
         value = weights.get(evidence.status, 0)
         if value:
             self._add(
@@ -235,14 +270,36 @@ class ModelSelector:
         output_tokens = int(request.constraints.get("max_output_tokens", request.constraints.get("max_tokens", 1024)))
         estimate = estimate_model_cost(card, input_tokens=input_tokens, output_tokens=output_tokens)
         if estimate > budget:
-            return ("budget_fit_penalty", -30.0, f"single-call estimate ${estimate:.4f} exceeds budget ${budget:.4f}")
+            return (
+                "budget_fit_penalty",
+                self.scoring.budget_over_penalty,
+                f"single-call estimate ${estimate:.4f} exceeds budget ${budget:.4f}",
+            )
         if estimate <= budget * 0.5:
-            return ("budget_fit", 3.0, f"single-call estimate ${estimate:.4f} is comfortably under budget ${budget:.4f}")
-        return ("budget_fit", 1.0, f"single-call estimate ${estimate:.4f} is within budget ${budget:.4f}")
+            return (
+                "budget_fit",
+                self.scoring.budget_comfort_bonus,
+                f"single-call estimate ${estimate:.4f} is comfortably under budget ${budget:.4f}",
+            )
+        return (
+            "budget_fit",
+            self.scoring.budget_within_bonus,
+            f"single-call estimate ${estimate:.4f} is within budget ${budget:.4f}",
+        )
+
+    def _tier_weight(self, family: str, tier: str) -> float:
+        scoring: ScoringSettings = self.scoring
+        if family == "quality":
+            return float(scoring.quality_weight.get(tier, 0.0))
+        if family == "cost":
+            return float(scoring.cost_weight.get(tier, 0.0))
+        if family == "latency":
+            return float(scoring.latency_weight.get(tier, 0.0))
+        return 0.0
 
     @staticmethod
-    def _task_signals(request: RequestEnvelope) -> set[str]:
-        return classify_task_signals(request)
+    def _task_signal_weights(request: RequestEnvelope) -> dict[str, float]:
+        return classify_task_signal_weights(request)
 
 
 def _declared_file_capability(card: CapabilityCard, capability: str) -> bool:

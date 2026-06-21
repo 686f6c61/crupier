@@ -147,7 +147,11 @@ class Crupier:
         mode: str | None = None,
         model: str | None = None,
         fallback_model: str | None = None,
+        fallback: str | None = None,
         temperature: float | None = None,
+        require_validated_plan: bool | None = None,
+        max_repairs: int | None = None,
+        allow_prompt_summary_only: bool | None = None,
         persist: bool = False,
     ) -> "Crupier":
         """Configure the model-powered route orchestrator.
@@ -163,15 +167,27 @@ class Crupier:
             self.config.orchestrator.fallback_model = ModelRef.parse(fallback_model).key
         if mode is not None:
             self.config.orchestrator.mode = mode
+        if fallback is not None:
+            self.config.orchestrator.fallback = fallback
         if temperature is not None:
             self.config.orchestrator.temperature = float(temperature)
+        if require_validated_plan is not None:
+            self.config.orchestrator.require_validated_plan = bool(require_validated_plan)
+        if max_repairs is not None:
+            self.config.orchestrator.max_repairs = int(max_repairs)
+        if allow_prompt_summary_only is not None:
+            self.config.orchestrator.allow_prompt_summary_only = bool(allow_prompt_summary_only)
         if persist:
             write_orchestrator_settings(
                 self.config.root,
                 mode=self.config.orchestrator.mode,
                 model=self.config.orchestrator.model,
                 fallback_model=self.config.orchestrator.fallback_model,
+                fallback=self.config.orchestrator.fallback,
                 temperature=self.config.orchestrator.temperature,
+                require_validated_plan=self.config.orchestrator.require_validated_plan,
+                max_repairs=self.config.orchestrator.max_repairs,
+                allow_prompt_summary_only=self.config.orchestrator.allow_prompt_summary_only,
             )
             self.config = CrupierConfig.from_toml(self.config.root)
             self.registry.config = self.config
@@ -231,6 +247,9 @@ class Crupier:
 
         cards = self.registry.allowed_cards()
         cards, provider_exclusions, provider_filters = self._filter_operational_candidates(request, cards, dry_run=dry_run)
+        cards, circuit_exclusions, circuit_filters = self._filter_circuit_breaker_candidates(cards)
+        provider_exclusions.extend(circuit_exclusions)
+        provider_filters.extend(circuit_filters)
         policy_result = self.policy.filter_candidates(request, cards)
         policy_result.excluded.extend(provider_exclusions)
         for filter_name in provider_filters:
@@ -304,6 +323,24 @@ class Crupier:
             reasons = "; ".join(f"{item.model}: {item.reason}" for item in excluded)
             raise CrupierPolicyError(f"No models remain after provider operational checks. {reasons}")
         return allowed, excluded, sorted(filters)
+
+    def _filter_circuit_breaker_candidates(
+        self,
+        cards: list[CapabilityCard],
+    ) -> tuple[list[CapabilityCard], list[Exclusion], list[str]]:
+        allowed: list[CapabilityCard] = []
+        excluded: list[Exclusion] = []
+        for card in cards:
+            reason = self.executor.provider_circuit_open_reason(card.model_ref.provider)
+            if reason is None:
+                allowed.append(card)
+                continue
+            excluded.append(Exclusion(card.model_ref.key, reason))
+        if not excluded:
+            return cards, [], []
+        if not allowed:
+            return cards, [], []
+        return allowed, excluded, ["provider_circuit_breaker"]
 
     def _provider_visible_models(self, provider: str) -> tuple[set[str] | None, str | None]:
         cached = self._provider_visibility_cache.get(provider)

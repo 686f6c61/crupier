@@ -37,6 +37,7 @@ from .feedback import (
     write_human_decision_template,
     write_human_review_packet,
 )
+from .learning import ScoringSuggestion, ScoringTuningReport, suggest_scoring_from_project
 from .models import (
     CapabilityCard,
     CostEstimate,
@@ -124,6 +125,8 @@ __all__ = [
     "HumanFeedbackStore",
     "HumanReviewItem",
     "HumanReviewPacket",
+    "ScoringSuggestion",
+    "ScoringTuningReport",
     "build_human_decision_template",
     "build_human_review_packet",
     "import_human_decisions",
@@ -168,6 +171,7 @@ __all__ = [
     "summarize_applied_human_feedback",
     "summarize_adoption_signoffs",
     "summarize_code_comment_reviews",
+    "suggest_scoring_from_project",
     "write_adoption_package_index",
     "write_code_comment_decision_template",
     "write_code_comments_sarif",

@@ -6,6 +6,7 @@ from crupier.cli import _smoke_model_refs, _verify_provider, _verify_provider_na
 from crupier.config import CrupierConfig, write_default_project, write_models_allow
 from crupier.model_profiles import apply_decision_profile
 from crupier.models import CapabilityCard, ModelRef, RequestEnvelope
+from crupier.registry import ModelRegistry
 
 
 def test_registry_update_writes_allowed_cards(tmp_path):
@@ -136,6 +137,58 @@ def test_registry_update_online_enriches_decision_profiles(tmp_path):
     assert expensive.routing_hints["production_default"] is False
     assert deprecated.routing_hints["routing_status"] == "deprecated"
     assert deprecated.deprecation["replacement"] == "openai:gpt-5.5"
+
+
+def test_registry_update_online_reports_price_and_profile_changes(tmp_path):
+    config = CrupierConfig.from_dict(
+        {
+            "providers": {"google": {"enabled": True}},
+            "models": {"allow": []},
+        }
+    )
+    config.root = tmp_path
+    registry = ModelRegistry(config)
+    registry.update_from_provider_models(
+        [
+            ProviderModel(
+                id="gemini-custom",
+                provider="google",
+                metadata={
+                    "supported_actions": ["generateContent"],
+                    "input_token_limit": 1000,
+                    "pricing": {"input_per_million_usd": 1.0, "output_per_million_usd": 2.0},
+                },
+            )
+        ],
+        dry_run=False,
+        provider="google",
+    )
+
+    report = registry.update_from_provider_models(
+        [
+            ProviderModel(
+                id="gemini-custom",
+                provider="google",
+                metadata={
+                    "supported_actions": ["embedContent"],
+                    "input_token_limit": 2000,
+                    "pricing": {"input_per_million_usd": 0.5, "output_per_million_usd": 1.0},
+                },
+            )
+        ],
+        dry_run=True,
+        provider="google",
+    )
+
+    assert report.modified_models == ["google:gemini-custom"]
+    assert report.price_changes[0]["model"] == "google:gemini-custom"
+    assert report.price_changes[0]["before"]["input_per_million_usd"] == 1.0
+    assert report.price_changes[0]["after"]["input_per_million_usd"] == 0.5
+    profile_change = report.profile_changes[0]
+    assert profile_change["model"] == "google:gemini-custom"
+    assert "context_window" in profile_change["fields"]
+    assert "model_kind" in profile_change["fields"]
+    assert "supports_embeddings" in profile_change["fields"]
 
 
 def test_decision_profiles_do_not_recommend_uncurated_discovered_models():
@@ -363,6 +416,9 @@ def test_cli_orchestrator_set_updates_config(tmp_path, capsys):
                 "ollama:glm-5.2",
                 "--fallback-model",
                 "anthropic:claude-opus-4-8",
+                "--max-repairs",
+                "4",
+                "--no-allow-prompt-summary-only",
             ]
         )
         == 0
@@ -372,7 +428,34 @@ def test_cli_orchestrator_set_updates_config(tmp_path, capsys):
     assert config.orchestrator.mode == "model"
     assert config.orchestrator.model == "ollama:glm-5.2"
     assert config.orchestrator.fallback_model == "anthropic:claude-opus-4-8"
+    assert config.orchestrator.max_repairs == 4
+    assert config.orchestrator.allow_prompt_summary_only is False
     assert "Updated [orchestrator]" in capsys.readouterr().out
+
+
+def test_cli_scoring_suggest_can_apply_eval_feedback_weights(tmp_path, capsys):
+    assert main(["--project", str(tmp_path), "init"]) == 0
+    capsys.readouterr()
+    config = CrupierConfig.from_toml(tmp_path)
+    registry = ModelRegistry(config)
+    strong = registry.get("openai:gpt-5.5")
+    mini = registry.get("openai:gpt-5.4-mini")
+    strong.local_eval_scores = {"eval:agentic": 6.0, "human:agentic": 4.0}
+    mini.local_eval_scores = {"eval:agentic": -2.0, "human:agentic": -1.0}
+    registry.save_card(strong)
+    registry.save_card(mini)
+
+    assert main(["--project", str(tmp_path), "scoring", "suggest", "--json"]) == 0
+    dry_run = json.loads(capsys.readouterr().out)
+    assert dry_run["applied"] is False
+    assert {item["field"] for item in dry_run["suggestions"]} == {"human_feedback_weight", "local_eval_weight"}
+
+    assert main(["--project", str(tmp_path), "scoring", "suggest", "--apply"]) == 0
+    config = CrupierConfig.from_toml(tmp_path)
+
+    assert config.scoring.local_eval_weight > 1
+    assert config.scoring.human_feedback_weight > 1
+    assert "scoring_suggest: applied" in capsys.readouterr().out
 
 
 def test_smoke_model_refs_selects_one_per_enabled_provider(tmp_path):

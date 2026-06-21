@@ -2,6 +2,17 @@
 
 All notable changes to Crupier will be documented here.
 
+## 0.3.0 - 2026-06-21
+
+- Added configurable project scoring weights, weighted task-signal classification, and `crupier scoring suggest` for conservative eval/feedback-driven scoring updates.
+- Added model-orchestrator fallback models, versioned orchestrator prompts, richer CLI orchestrator settings, and shared `.crupier/profiles/` profile presets.
+- Completed executable route strategies for cascade validation/escalation, parallel panel/fusion execution, iterative tool loops, and bounded `delegate` sub-routes.
+- Added declarative policy rules for deny/required capability checks without patching core policy code.
+- Added provider retry jitter, per-provider circuit breakers, and route-time degraded-provider exclusion when another provider remains available.
+- Improved online model refresh reporting with pricing and profile/capability change details, plus the `models refresh` command.
+- Tightened multimodal execution contracts by explicitly blocking unimplemented OCR, audio/video transcription, spreadsheets, office-document extraction, and native non-image paths.
+- Bumped the package to final `0.3.0`; publishing remains gated on full local and real-provider verification.
+
 ## 0.2.0 - 2026-06-20
 
 - Added curated model decision profiles for OpenAI, Anthropic Claude, Google Gemini, and Ollama Cloud so discovered models are separated from production-default, specialized, opt-in, legacy, and deprecated routing choices.

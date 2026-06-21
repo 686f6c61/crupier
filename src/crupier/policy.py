@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .capabilities import capability_evidence, capability_reason
-from .config import CrupierConfig
+from .config import CrupierConfig, PolicyRule
 from .errors import CrupierBudgetExceededError, CrupierPolicyError, CrupierRouteValidationError
 from .models import CapabilityCard, ModelRef, RequestEnvelope, RoutePlan
 from .route_schema import planned_call_count, validate_route_plan_shape
@@ -106,6 +106,11 @@ class PolicyEngine:
                 if file_reason:
                     self._exclude(result, key, file_reason, "file_input")
                     continue
+            declarative_reason = self._declarative_rule_rejection_reason(card, request)
+            if declarative_reason:
+                rule_name, reason = declarative_reason
+                self._exclude(result, key, reason, f"policy_rule:{rule_name}")
+                continue
             result.allowed.append(card)
 
         if not result.allowed:
@@ -137,6 +142,37 @@ class PolicyEngine:
         planned_calls = planned_call_count(plan)
         if planned_calls > max_calls:
             raise CrupierRouteValidationError(f"Route plans {planned_calls} calls, above max_calls={max_calls}.")
+
+    def _declarative_rule_rejection_reason(
+        self,
+        card: CapabilityCard,
+        request: RequestEnvelope,
+    ) -> tuple[str, str] | None:
+        for rule in self.config.policy.rules:
+            if not self._rule_matches(rule, card, request):
+                continue
+            reason = rule.reason or f"blocked by policy rule {rule.name!r}"
+            if rule.effect == "deny":
+                return rule.name, reason
+            if rule.effect in {"require_capability", "require_verified_capability"}:
+                for capability in rule.capabilities:
+                    evidence = capability_evidence(card, capability, declared=_declared_capability(card, capability))
+                    if not evidence.supported:
+                        return rule.name, f"{reason}: {capability_reason(evidence)}"
+                    if rule.effect == "require_verified_capability" and evidence.status != "verified":
+                        return rule.name, f"{reason}: {capability_reason(evidence)}"
+        return None
+
+    @staticmethod
+    def _rule_matches(rule: PolicyRule, card: CapabilityCard, request: RequestEnvelope) -> bool:
+        mode = request.mode
+        if rule.modes and mode not in rule.modes:
+            return False
+        if rule.providers and card.model_ref.provider not in rule.providers:
+            return False
+        if rule.models and card.model_ref.key not in {ModelRef.parse(model).key for model in rule.models}:
+            return False
+        return True
 
     @staticmethod
     def _exclude(result: PolicyResult, model: str, reason: str, filter_name: str) -> None:
@@ -187,4 +223,18 @@ def _declared_file_capability(card: CapabilityCard, capability: str) -> bool:
         return card.supports_file_input or "file" in card.modalities_input
     if capability == "pdf_native_input":
         return card.supports_file_input or "pdf" in card.modalities_input
+    return False
+
+
+def _declared_capability(card: CapabilityCard, capability: str) -> bool:
+    if capability == "tool_call":
+        return card.supports_tools
+    if capability == "structured_output":
+        return card.supports_structured_output
+    if capability == "streaming":
+        return card.supports_streaming
+    if capability == "embeddings":
+        return card.supports_embeddings
+    if capability in {"vision_input", "audio_input", "video_input", "file_input", "pdf_native_input"}:
+        return _declared_file_capability(card, capability)
     return False

@@ -55,6 +55,11 @@ def test_config_loads_profiles_and_models():
             "project": {"name": "x", "default_profile": "private"},
             "providers": {"ollama": {"enabled": True, "host": "http://localhost:11434"}},
             "models": {"allow": ["ollama:qwen3.5:122b"]},
+            "scoring": {
+                "quality_weight": {"frontier": 12},
+                "skill_fit_min_score": 7,
+                "human_feedback_weight": 2.5,
+            },
             "profiles": {"private": {"prefer": ["local"], "strategy": "local_first"}},
         }
     )
@@ -62,6 +67,36 @@ def test_config_loads_profiles_and_models():
     assert config.project.name == "x"
     assert config.providers["ollama"].host == "http://localhost:11434"
     assert config.profiles["private"].strategy == "local_first"
+    assert config.scoring.quality_weight["frontier"] == 12
+    assert config.scoring.quality_weight["strong"] == 2
+    assert config.scoring.skill_fit_min_score == 7
+    assert config.scoring.human_feedback_weight == 2.5
+
+
+def test_config_loads_shared_profile_files(tmp_path):
+    write_default_project(tmp_path)
+    profiles_dir = tmp_path / ".crupier" / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    (profiles_dir / "legal.toml").write_text(
+        """
+name = "legal"
+prefer = ["accuracy", "citations"]
+strategy = "critique_repair"
+review_level = "strict"
+""",
+        encoding="utf-8",
+    )
+    (profiles_dir / "agentic.json").write_text(
+        '{"prefer":["tool_use","low_latency"],"strategy":"single","owner":"platform"}',
+        encoding="utf-8",
+    )
+
+    config = CrupierConfig.from_toml(tmp_path)
+
+    assert config.profiles["legal"].strategy == "critique_repair"
+    assert config.profiles["legal"].options["review_level"] == "strict"
+    assert config.profiles["agentic"].strategy == "single"
+    assert config.profiles["agentic"].options["owner"] == "platform"
 
 
 def test_write_models_allow_replaces_models_section(tmp_path):
@@ -82,6 +117,10 @@ def test_write_orchestrator_settings_and_sdk_configuration(tmp_path):
         model="ollama:glm-5.2",
         fallback_model="anthropic:claude-opus-4-8",
         temperature=0.1,
+        fallback="deterministic",
+        require_validated_plan=False,
+        max_repairs=3,
+        allow_prompt_summary_only=False,
     )
 
     config = CrupierConfig.from_toml(tmp_path)
@@ -89,11 +128,21 @@ def test_write_orchestrator_settings_and_sdk_configuration(tmp_path):
     assert config.orchestrator.model == "ollama:glm-5.2"
     assert config.orchestrator.fallback_model == "anthropic:claude-opus-4-8"
     assert config.orchestrator.temperature == 0.1
+    assert config.orchestrator.require_validated_plan is False
+    assert config.orchestrator.max_repairs == 3
+    assert config.orchestrator.allow_prompt_summary_only is False
 
     client = Crupier.from_project(tmp_path)
-    client.configure_orchestrator(mode="hybrid", model="anthropic:claude-opus-4-8")
+    client.configure_orchestrator(
+        mode="hybrid",
+        model="anthropic:claude-opus-4-8",
+        max_repairs=2,
+        allow_prompt_summary_only=True,
+    )
     assert client.config.orchestrator.mode == "hybrid"
     assert client.config.orchestrator.model == "anthropic:claude-opus-4-8"
+    assert client.config.orchestrator.max_repairs == 2
+    assert client.config.orchestrator.allow_prompt_summary_only is True
     assert client.planner.config.orchestrator.model == "anthropic:claude-opus-4-8"
 
 

@@ -7,6 +7,7 @@ used by both deterministic scoring and the opt-in LLM orchestrator.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .models import CapabilityCard, RequestEnvelope
@@ -741,7 +742,7 @@ DEPRECATED_MODEL_NOTICES: dict[str, dict[str, Any]] = {
 }
 
 
-def classify_task_signals(request: RequestEnvelope) -> set[str]:
+def classify_task_signal_weights(request: RequestEnvelope) -> dict[str, float]:
     text_parts = [request.task]
     if isinstance(request.input, str):
         text_parts.append(request.input)
@@ -751,40 +752,69 @@ def classify_task_signals(request: RequestEnvelope) -> set[str]:
             text_parts.append(content)
     text = " ".join(text_parts).lower()
 
-    signals: set[str] = set()
+    signals: dict[str, float] = {}
     for signal, keywords in TASK_KEYWORDS.items():
-        if any(keyword in text for keyword in keywords):
-            signals.add(signal)
+        matches = _keyword_match_count(text, keywords)
+        if matches:
+            _boost_signal(signals, signal, min(1.0, 0.35 + (matches * 0.25)))
 
     mode = request.mode or ""
     if mode:
-        signals.add(mode)
+        _boost_signal(signals, mode, 0.7)
     if request.tools:
-        signals.update({"agentic", "tool_use"})
+        _boost_signal(signals, "agentic", 1.0)
+        _boost_signal(signals, "tool_use", 1.0)
     if request.response_schema is not None or request.constraints.get("response_schema"):
-        signals.add("structured_output")
+        _boost_signal(signals, "structured_output", 1.0)
     if request.files:
-        signals.add("multimodal")
+        _boost_signal(signals, "multimodal", 0.8)
     if request.file_plan is not None:
         for modality in request.file_plan.required_model_modalities:
             if modality == "image":
-                signals.update({"vision", "multimodal"})
+                _boost_signal(signals, "vision", 1.0)
+                _boost_signal(signals, "multimodal", 1.0)
             elif modality in {"audio", "video"}:
-                signals.update({modality, "multimodal"})
+                _boost_signal(signals, modality, 1.0)
+                _boost_signal(signals, "multimodal", 1.0)
             elif modality == "file":
-                signals.add("pdf")
+                _boost_signal(signals, "pdf", 0.8)
         for capability in request.file_plan.required_model_capabilities:
             if capability == "pdf_native_input":
-                signals.update({"pdf", "document_extraction"})
+                _boost_signal(signals, "pdf", 1.0)
+                _boost_signal(signals, "document_extraction", 1.0)
             elif capability == "vision_input":
-                signals.update({"vision", "multimodal"})
+                _boost_signal(signals, "vision", 1.0)
+                _boost_signal(signals, "multimodal", 1.0)
     if "pdf" in signals:
-        signals.add("document_extraction")
+        _boost_signal(signals, "document_extraction", 0.9)
     if "console" in signals:
-        signals.update({"agentic", "tool_use"})
+        _boost_signal(signals, "agentic", 0.75)
+        _boost_signal(signals, "tool_use", 0.75)
     if "coding" in signals and mode == "agentic":
-        signals.add("agentic")
-    return signals
+        _boost_signal(signals, "agentic", 0.85)
+    return dict(sorted(signals.items()))
+
+
+def classify_task_signals(request: RequestEnvelope) -> set[str]:
+    return set(classify_task_signal_weights(request))
+
+
+def _boost_signal(signals: dict[str, float], signal: str, value: float) -> None:
+    signals[signal] = max(signals.get(signal, 0.0), min(1.0, max(0.0, float(value))))
+
+
+def _keyword_match_count(text: str, keywords: list[str]) -> int:
+    return sum(1 for keyword in keywords if _keyword_matches(text, keyword))
+
+
+def _keyword_matches(text: str, keyword: str) -> bool:
+    keyword = keyword.strip().lower()
+    if not keyword:
+        return False
+    if any(separator in keyword for separator in (" ", "-", "_")):
+        return keyword in text
+    pattern = rf"(?<!\w){re.escape(keyword)}(?!\w)"
+    return re.search(pattern, text, flags=re.IGNORECASE) is not None
 
 
 def apply_decision_profile(card: CapabilityCard, *, provider_metadata: dict[str, Any] | None = None) -> CapabilityCard:
@@ -805,6 +835,7 @@ def apply_decision_profile(card: CapabilityCard, *, provider_metadata: dict[str,
 
 
 def _apply_provider_metadata(card: CapabilityCard, metadata: dict[str, Any]) -> None:
+    _apply_metadata_pricing(card, metadata)
     provider = card.model_ref.provider
     if provider == "anthropic":
         card.context_window = card.context_window or _int_or_none(metadata.get("max_input_tokens"))
@@ -836,6 +867,22 @@ def _apply_provider_metadata(card: CapabilityCard, metadata: dict[str, Any]) -> 
             card.supports_streaming = True
         if metadata.get("thinking"):
             card.strengths.append("reasoning")
+
+
+def _apply_metadata_pricing(card: CapabilityCard, metadata: dict[str, Any]) -> None:
+    pricing = metadata.get("pricing")
+    if not isinstance(pricing, dict):
+        direct_keys = {
+            "input_per_million_usd",
+            "output_per_million_usd",
+            "cached_input_per_million_usd",
+            "input_usd_per_million",
+            "output_usd_per_million",
+        }
+        pricing = {key: metadata[key] for key in direct_keys if key in metadata}
+    if not pricing:
+        return
+    card.pricing = {**card.pricing, **pricing, "source": str(pricing.get("source") or "provider_metadata")}
 
 
 def _apply_official_override(card: CapabilityCard) -> None:

@@ -32,6 +32,54 @@ def _diff_fields(left: dict[str, Any], right: dict[str, Any]) -> list[str]:
     return sorted(field for field in set(left) | set(right) if left.get(field) != right.get(field))
 
 
+PROFILE_CHANGE_FIELDS = {
+    "context_window",
+    "max_output_tokens",
+    "model_kind",
+    "modalities_input",
+    "modalities_output",
+    "supports_embeddings",
+    "embedding_dimensions",
+    "embedding_input_modalities",
+    "supports_tools",
+    "supports_structured_output",
+    "supports_streaming",
+    "supports_web",
+    "supports_file_input",
+    "supports_code_execution",
+    "cost_tier",
+    "latency_tier",
+    "quality_tier",
+    "strengths",
+    "routing_hints",
+    "natural_profile",
+    "skill_scores",
+    "capability_status",
+}
+
+
+def _record_card_change_details(
+    report: UpdateReport,
+    *,
+    model: str,
+    old_data: dict[str, Any] | None,
+    new_data: dict[str, Any],
+) -> None:
+    if old_data is None:
+        return
+    if old_data.get("pricing") != new_data.get("pricing"):
+        report.price_changes.append(
+            {
+                "model": model,
+                "before": old_data.get("pricing", {}),
+                "after": new_data.get("pricing", {}),
+            }
+        )
+    fields = [field for field in sorted(PROFILE_CHANGE_FIELDS) if old_data.get(field) != new_data.get(field)]
+    if fields:
+        report.profile_changes.append({"model": model, "fields": fields})
+
+
 def _retained_discovery_index_keys(index: dict[str, Any], *, exclude_providers: set[str]) -> set[str]:
     if index.get("source") != "provider_discovery":
         return set()
@@ -460,6 +508,7 @@ class ModelRegistry:
                 else:
                     report.modified_models.append(normalized)
                     changed.append({"model": normalized, "fields": _diff_fields(old_data, new_data)})
+                    _record_card_change_details(report, model=normalized, old_data=old_data, new_data=new_data)
                 report.changed_models.append(normalized)
                 if not dry_run:
                     path.write_text(_json_dumps(new_data), encoding="utf-8")
@@ -530,6 +579,7 @@ class ModelRegistry:
                 else:
                     report.modified_models.append(normalized)
                     changed.append({"model": normalized, "fields": _diff_fields(old_data, new_data)})
+                    _record_card_change_details(report, model=normalized, old_data=old_data, new_data=new_data)
                 report.changed_models.append(normalized)
                 if not dry_run:
                     path.write_text(_json_dumps(new_data), encoding="utf-8")

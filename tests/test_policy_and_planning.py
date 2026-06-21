@@ -1,6 +1,6 @@
 from crupier import Crupier
 from crupier.adapters import AdapterResponse, ProviderModel
-from crupier.config import CrupierConfig
+from crupier.config import CrupierConfig, PolicyRule
 from crupier.errors import CrupierPolicyError, CrupierProviderAuthError, CrupierRouteValidationError
 from crupier.models import CapabilityCard, ModelRef, RequestEnvelope
 from crupier.orchestrator import DeterministicOrchestrator, ModelOrchestrator
@@ -211,6 +211,56 @@ def test_policy_can_require_verified_capabilities(tmp_path):
     assert result.excluded[0].model == "openai:gpt-5.5"
 
 
+def test_declarative_policy_rule_can_deny_provider_by_mode(tmp_path):
+    config = make_config(tmp_path, allow=["openai:gpt-5.5", "anthropic:claude-opus-4-8"])
+    config.policy.rules = [
+        PolicyRule(
+            name="no_openai_agentic",
+            effect="deny",
+            modes=["agentic"],
+            providers=["openai"],
+            reason="agentic routes must use non-OpenAI provider in this project",
+        )
+    ]
+    client = Crupier(config)
+
+    result = client.deal("Plan agent", mode="agentic", trace="summary")
+
+    assert result.route.models == ["anthropic:claude-opus-4-8"]
+    assert result.trace is not None
+    assert any(item["model"] == "openai:gpt-5.5" and "agentic routes" in item["reason"] for item in result.trace.excluded_models)
+
+
+def test_declarative_policy_rule_can_require_verified_capability(tmp_path):
+    config = make_config(tmp_path, allow=[])
+    config.policy.rules = [
+        PolicyRule(
+            name="verified_tools_only",
+            effect="require_verified_capability",
+            capabilities=["tool_call"],
+            reason="tools require verified capability",
+        )
+    ]
+    policy = PolicyEngine(config)
+    inferred = CapabilityCard(
+        model_ref=ModelRef.parse("openai:gpt-5.5"),
+        last_updated="test",
+        supports_tools=True,
+    )
+    verified = CapabilityCard(
+        model_ref=ModelRef.parse("openai:gpt-5.4-mini"),
+        last_updated="test",
+        supports_tools=True,
+        capability_status={"tool_call": {"status": "verified", "source": "probe:tool_call"}},
+    )
+
+    result = policy.filter_candidates(RequestEnvelope(task="Use tool", tools=[object()]), [inferred, verified])
+
+    assert [card.model_ref.key for card in result.allowed] == ["openai:gpt-5.4-mini"]
+    assert result.excluded[0].model == "openai:gpt-5.5"
+    assert "tools require verified capability" in result.excluded[0].reason
+
+
 def test_research_mode_uses_fusion_when_multiple_models_allowed(tmp_path):
     client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.5", "anthropic:claude-opus-4-8"]))
 
@@ -219,6 +269,21 @@ def test_research_mode_uses_fusion_when_multiple_models_allowed(tmp_path):
     assert result.route is not None
     assert result.route.strategy == "fusion"
     assert len(result.route.models) == 2
+
+
+def test_profile_strategy_rules_override_orchestrated_strategy(tmp_path):
+    config = make_config(tmp_path, allow=["openai:gpt-5.5", "anthropic:claude-opus-4-8"])
+    config.profiles["agentic"].options["strategy_rules"] = [
+        {"when": {"tools": True, "max_tools": 1}, "strategy": "single"},
+        {"when": {"tools": True, "min_tools": 2}, "strategy": "critique_repair"},
+    ]
+    client = Crupier(config)
+
+    short = client.deal("Use one tool", mode="agentic", tools=[object()])
+    long = client.deal("Use two tools", mode="agentic", tools=[object(), object()])
+
+    assert short.route.strategy == "single"
+    assert long.route.strategy == "critique_repair"
 
 
 def test_force_model_uses_exact_allowed_model(tmp_path):
@@ -260,6 +325,7 @@ def test_route_planner_builds_orchestrator_context(tmp_path):
     assert len(context.deterministic_scores) == 1
     assert context.orchestrator_mode == "deterministic"
     assert context.metadata["configured_orchestrator_model"] == "openai:gpt-5.4-mini"
+    assert context.metadata["configured_orchestrator_fallback_model"] is None
 
 
 def test_deterministic_orchestrator_matches_route_planner_facade(tmp_path):
@@ -307,6 +373,7 @@ def test_model_orchestrator_accepts_valid_validated_plan(tmp_path):
     assert "candidate_cards" in adapter.prompts[0]
     assert "routing_status" in adapter.prompts[0]
     assert "best_skills" in adapter.prompts[0]
+    assert "Prompt-Version: orchestrator.route_plan.v1" in adapter.prompts[0]
 
 
 def test_model_orchestrator_rejects_illegal_model_and_falls_back(tmp_path):
@@ -334,6 +401,50 @@ def test_model_orchestrator_rejects_illegal_model_and_falls_back(tmp_path):
     assert "openai:not-allowed" not in plan.models
     assert plan.strategy == "fusion"
     assert "deterministic fallback" in plan.reason
+
+
+def test_model_orchestrator_uses_fallback_model_before_deterministic(tmp_path):
+    config = make_config(tmp_path, allow=["openai:gpt-5.5", "anthropic:claude-opus-4-8"])
+    config.orchestrator.mode = "model"
+    config.orchestrator.fallback_model = "anthropic:claude-opus-4-8"
+    config.orchestrator.max_repairs = 0
+    request = RequestEnvelope(task="Choose a robust model route", mode="agentic")
+    candidates = ModelRegistry(config).allowed_cards()
+    primary = FakeOrchestratorAdapter(
+        """
+        {
+          "strategy": "single",
+          "steps": [{"role": "primary", "model": "openai:not-allowed"}],
+          "estimated_cost": {"estimated_usd": 0.0},
+          "reason": "Invalid on purpose.",
+          "risk_level": "medium",
+          "summary": "Invalid route."
+        }
+        """
+    )
+    fallback = FakeOrchestratorAdapter(
+        """
+        {
+          "strategy": "single",
+          "steps": [{"role": "primary", "model": "anthropic:claude-opus-4-8"}],
+          "estimated_cost": {"estimated_usd": 0.0},
+          "estimated_latency_ms": 6000,
+          "reason": "Fallback orchestrator selected the robust model.",
+          "risk_level": "medium",
+          "summary": "Single Claude route."
+        }
+        """
+    )
+    context = RoutePlanner(config).build_context(request, candidates, ["allowlist:2"])
+
+    plan = ModelOrchestrator(config, adapters={"openai": primary, "anthropic": fallback}).plan(context)
+
+    assert plan.strategy == "single"
+    assert plan.models == ["anthropic:claude-opus-4-8"]
+    assert "Fallback orchestrator anthropic:claude-opus-4-8 was used" in plan.reason
+    assert "deterministic fallback" not in plan.reason
+    assert len(primary.prompts) == 1
+    assert len(fallback.prompts) == 1
 
 
 def test_model_orchestrator_normalizes_common_cascade_role_shape(tmp_path):

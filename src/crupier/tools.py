@@ -127,6 +127,31 @@ def build_tool_final_prompt(
     return build_prompt(request, extra=extra)
 
 
+def build_tool_replanning_prompt(
+    request: RequestEnvelope,
+    tools: list[ToolSpec],
+    executions: list[ToolExecution],
+    *,
+    response_schema: dict[str, Any] | None = None,
+) -> str:
+    tool_catalog = [tool.public_dict() for tool in tools]
+    extra = (
+        "Available tools:\n"
+        + json.dumps(tool_catalog, ensure_ascii=False, sort_keys=True)
+        + "\n\nTool execution results so far:\n"
+        + json.dumps([execution.to_dict() for execution in executions], ensure_ascii=False, sort_keys=True)
+        + "\n\nReturn only JSON with this shape:\n"
+        '{"tool_calls":[{"name":"tool_name","arguments":{}}],"final":"answer if enough information is available"}\n'
+        "Request more tool_calls only if the previous results are insufficient. Do not repeat completed tool calls."
+    )
+    if response_schema:
+        extra += (
+            "\nThe final answer must ultimately be JSON matching this schema:\n"
+            + json.dumps(response_schema, ensure_ascii=False, sort_keys=True)
+        )
+    return build_prompt(request, extra=extra)
+
+
 def parse_tool_plan(text: str) -> tuple[list[ToolCallRequest], str | None]:
     try:
         data = _extract_json_object(text)
@@ -156,6 +181,8 @@ def execute_tool_plan(
     calls: list[ToolCallRequest],
     tools: list[ToolSpec],
     request: RequestEnvelope,
+    *,
+    previous_executions: list[ToolExecution] | None = None,
 ) -> list[ToolExecution]:
     by_name = {tool.name: tool for tool in tools}
     allowed_tools = set(request.constraints.get("allowed_tools", by_name))
@@ -164,7 +191,11 @@ def execute_tool_plan(
     require_approval_for = set(request.constraints.get("require_approval_for", []))
 
     executions: list[ToolExecution] = []
-    completed_by_key: dict[str, ToolExecution] = {}
+    completed_by_key: dict[str, ToolExecution] = {
+        execution.idempotency_key: execution
+        for execution in previous_executions or []
+        if execution.status in {"completed", "skipped_duplicate"}
+    }
     for call in calls:
         if call.name not in by_name:
             raise CrupierModelUnsupportedError(f"Model requested unknown tool {call.name!r}.")

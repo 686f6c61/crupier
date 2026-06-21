@@ -38,6 +38,7 @@ class RoutePlanner:
             orchestrator_mode=self.config.orchestrator.mode,
             metadata={
                 "configured_orchestrator_model": self.config.orchestrator.model,
+                "configured_orchestrator_fallback_model": self.config.orchestrator.fallback_model,
             },
         )
 

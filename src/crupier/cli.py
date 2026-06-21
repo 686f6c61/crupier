@@ -20,6 +20,7 @@ from .feedback import (
     write_human_decision_template,
     write_human_review_packet,
 )
+from .learning import suggest_scoring_from_project
 from .models import ModelRef
 from .probes import AVAILABLE_PROBES
 from .adapters.google import google_env_label, google_env_present
@@ -121,6 +122,11 @@ def build_parser() -> argparse.ArgumentParser:
     models_allow.add_argument("models", nargs="+", help="Model refs, e.g. openai:gpt-5.5 anthropic:claude-opus-4-8")
     models_allow.add_argument("--replace", action="store_true", help="Replace the allow list instead of appending")
     models_allow.set_defaults(func=cmd_models_allow)
+    models_refresh = model_subparsers.add_parser("refresh", help="Refresh model cards from operational providers")
+    models_refresh.add_argument("--provider", choices=REAL_PROVIDER_CHOICES, help="Refresh a single provider")
+    models_refresh.add_argument("--dry-run", action="store_true", help="Show refresh diff without writing cards")
+    models_refresh.add_argument("--json", action="store_true", help="Print JSON")
+    models_refresh.set_defaults(func=cmd_models_refresh)
 
     orchestrator = subparsers.add_parser("orchestrator", help="Route orchestrator commands")
     orchestrator_subparsers = orchestrator.add_subparsers(dest="orchestrator_command", required=True)
@@ -131,9 +137,34 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrator_set.add_argument("--mode", choices=["deterministic", "model", "hybrid"], help="Orchestrator mode")
     orchestrator_set.add_argument("--model", help="Orchestrator model ref, e.g. ollama:glm-5.2")
     orchestrator_set.add_argument("--fallback-model", help="Fallback orchestrator model ref")
+    orchestrator_set.add_argument("--fallback", help="Fallback behavior after model orchestrators fail")
     orchestrator_set.add_argument("--temperature", type=float, help="Orchestrator model temperature")
+    orchestrator_set.add_argument("--max-repairs", type=int, help="Maximum model-plan repair attempts")
+    orchestrator_set.add_argument(
+        "--require-validated-plan",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Require model orchestrator plans to validate before execution",
+    )
+    orchestrator_set.add_argument(
+        "--allow-prompt-summary-only",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Allow prompt-summary-only context in orchestrator planning payloads",
+    )
     orchestrator_set.add_argument("--json", action="store_true", help="Print JSON")
     orchestrator_set.set_defaults(func=cmd_orchestrator_set)
+
+    scoring = subparsers.add_parser("scoring", help="Scoring calibration commands")
+    scoring_subparsers = scoring.add_subparsers(dest="scoring_command", required=True)
+    scoring_suggest = scoring_subparsers.add_parser(
+        "suggest",
+        help="Suggest scoring-weight updates from applied eval and feedback signals",
+    )
+    scoring_suggest.add_argument("--apply", action="store_true", help="Persist suggested scoring weights")
+    scoring_suggest.add_argument("--min-samples", type=int, default=2, help="Minimum signal count before suggesting")
+    scoring_suggest.add_argument("--json", action="store_true", help="Print JSON")
+    scoring_suggest.set_defaults(func=cmd_scoring_suggest)
 
     registry = subparsers.add_parser("registry", help="Registry commands")
     registry_subparsers = registry.add_subparsers(dest="registry_command", required=True)
@@ -908,6 +939,16 @@ def cmd_models_allow(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_models_refresh(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    report = client.update(dry_run=args.dry_run, online=True, provider=args.provider)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+    else:
+        _print_update_report(report)
+    return 0
+
+
 def cmd_orchestrator_show(args: argparse.Namespace) -> int:
     config = CrupierConfig.from_toml(args.project)
     data = {
@@ -918,6 +959,7 @@ def cmd_orchestrator_show(args: argparse.Namespace) -> int:
         "temperature": config.orchestrator.temperature,
         "require_validated_plan": config.orchestrator.require_validated_plan,
         "max_repairs": config.orchestrator.max_repairs,
+        "allow_prompt_summary_only": config.orchestrator.allow_prompt_summary_only,
     }
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
@@ -928,15 +970,32 @@ def cmd_orchestrator_show(args: argparse.Namespace) -> int:
 
 
 def cmd_orchestrator_set(args: argparse.Namespace) -> int:
-    if not any([args.mode, args.model, args.fallback_model, args.temperature is not None]):
-        raise CrupierConfigError("Pass at least one of --mode, --model, --fallback-model, or --temperature.")
+    if not any(
+        [
+            args.mode,
+            args.model,
+            args.fallback_model,
+            args.fallback,
+            args.temperature is not None,
+            args.require_validated_plan is not None,
+            args.max_repairs is not None,
+            args.allow_prompt_summary_only is not None,
+        ]
+    ):
+        raise CrupierConfigError(
+            "Pass at least one orchestrator setting such as --mode, --model, --fallback-model, or --max-repairs."
+        )
     mode = args.mode or ("model" if args.model else None)
     path = write_orchestrator_settings(
         args.project,
         mode=mode,
         model=args.model,
         fallback_model=args.fallback_model,
+        fallback=args.fallback,
         temperature=args.temperature,
+        require_validated_plan=args.require_validated_plan,
+        max_repairs=args.max_repairs,
+        allow_prompt_summary_only=args.allow_prompt_summary_only,
     )
     config = CrupierConfig.from_toml(args.project)
     data = {
@@ -944,7 +1003,11 @@ def cmd_orchestrator_set(args: argparse.Namespace) -> int:
         "mode": config.orchestrator.mode,
         "model": config.orchestrator.model,
         "fallback_model": config.orchestrator.fallback_model,
+        "fallback": config.orchestrator.fallback,
         "temperature": config.orchestrator.temperature,
+        "require_validated_plan": config.orchestrator.require_validated_plan,
+        "max_repairs": config.orchestrator.max_repairs,
+        "allow_prompt_summary_only": config.orchestrator.allow_prompt_summary_only,
     }
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
@@ -953,6 +1016,29 @@ def cmd_orchestrator_set(args: argparse.Namespace) -> int:
     print(f"mode: {config.orchestrator.mode}")
     print(f"model: {config.orchestrator.model}")
     print(f"fallback_model: {config.orchestrator.fallback_model}")
+    print(f"fallback: {config.orchestrator.fallback}")
+    print(f"max_repairs: {config.orchestrator.max_repairs}")
+    return 0
+
+
+def cmd_scoring_suggest(args: argparse.Namespace) -> int:
+    config = CrupierConfig.from_toml(args.project)
+    report = suggest_scoring_from_project(config, apply=args.apply, min_samples=args.min_samples)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        return 0
+    mode = "applied" if report.applied else "dry-run"
+    print(f"scoring_suggest: {mode}")
+    print(f"eval_signals: {report.evidence['eval_signal_count']}")
+    print(f"human_feedback_signals: {report.evidence['human_feedback_signal_count']}")
+    if not report.suggestions:
+        print("No scoring updates suggested.")
+        return 0
+    for suggestion in report.suggestions:
+        print(f"{suggestion.field}: {suggestion.current:g} -> {suggestion.suggested:g}")
+        print(f"  reason: {suggestion.reason}")
+    if report.written_path:
+        print(report.written_path)
     return 0
 
 

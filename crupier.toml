@@ -47,7 +47,11 @@ max_cost_per_request_usd = 1.00
 max_latency_ms = 30000
 max_depth = 8
 max_calls = 12
+max_tool_rounds = 3
 require_operational_providers = true
+retry_jitter_seconds = 0
+circuit_breaker_failure_threshold = 3
+circuit_breaker_cooldown_seconds = 60
 
 [orchestrator]
 mode = "model"
@@ -58,6 +62,37 @@ temperature = 0
 require_validated_plan = true
 max_repairs = 1
 allow_prompt_summary_only = true
+
+[scoring]
+quality_weight = { unknown = 0, strong = 2, frontier = 4 }
+cost_weight = { unknown = 0, low = 4, medium = 2, high = 0 }
+latency_weight = { unknown = 0, fast = 4, medium = 2, slow = 0 }
+profile_preference_weight = 3
+task_signal_weight = 2
+skill_fit_min_score = 6
+skill_fit_baseline = 5
+skill_fit_multiplier = 0.8
+skill_fit_cap = 12
+cheap_mode_cost_multiplier = 2
+fast_mode_latency_multiplier = 2
+private_mode_ollama_bonus = 10
+verified_capability_weight = 6
+inferred_capability_weight = 2
+failed_capability_penalty = -20
+local_eval_weight = 1
+human_feedback_weight = 1
+deprecation_penalty = -100
+routing_status_penalty = -6
+opt_in_penalty = -4
+cheap_high_cost_penalty = -4
+fast_latency_penalty = -3
+preview_stability_penalty = -5
+budget_over_penalty = -30
+budget_comfort_bonus = 3
+budget_within_bonus = 1
+
+[policy]
+rules = []
 
 [logging]
 mode = "metadata"

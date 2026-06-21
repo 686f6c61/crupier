@@ -19,6 +19,7 @@ ALLOWED_STRATEGIES = {
     "fusion",
     "critique_repair",
     "local_first",
+    "delegate",
 }
 ALLOWED_RISK_LEVELS = {"low", "medium", "high"}
 ALLOWED_ROLES_BY_STRATEGY = {
@@ -29,6 +30,7 @@ ALLOWED_ROLES_BY_STRATEGY = {
     "fusion": {"panel", "judge", "final_writer"},
     "critique_repair": {"generator", "critic", "repair"},
     "local_first": {"primary", "fallback"},
+    "delegate": {"delegate"},
 }
 
 
@@ -100,3 +102,5 @@ def _validate_required_roles(strategy: str, seen_roles: set[str]) -> None:
             raise CrupierRouteValidationError(
                 "Route strategy 'critique_repair' is missing roles: " + ", ".join(sorted(missing))
             )
+    if strategy == "delegate" and "delegate" not in seen_roles:
+        raise CrupierRouteValidationError("Route strategy 'delegate' requires a delegate step.")

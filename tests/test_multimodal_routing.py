@@ -172,6 +172,62 @@ def test_real_execution_still_blocks_native_pdf_without_mapping(tmp_path):
         raise AssertionError("native PDF execution should be blocked until provider mappings exist")
 
 
+def test_real_execution_blocks_unimplemented_audio_transcription(tmp_path):
+    audio = tmp_path / "call.mp3"
+    audio.write_bytes(b"fake audio")
+    client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
+
+    try:
+        client.deal("Summarize the call", files=[audio], dry_run=False)
+    except CrupierModelUnsupportedError as exc:
+        assert "audio" in str(exc)
+        assert "transcript" in str(exc)
+    else:
+        raise AssertionError("audio transcription should be explicit unsupported until implemented")
+
+
+def test_real_execution_blocks_unimplemented_image_ocr(tmp_path):
+    image = tmp_path / "scan.png"
+    image.write_bytes(b"fake image")
+    client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
+
+    try:
+        client.deal("OCR this scan", files=[image], constraints={"file_strategy": "extract"}, dry_run=False)
+    except CrupierModelUnsupportedError as exc:
+        assert "image" in str(exc)
+        assert "ocr_text" in str(exc)
+    else:
+        raise AssertionError("image OCR should be explicit unsupported until implemented")
+
+
+def test_real_execution_blocks_unimplemented_spreadsheet_parsing(tmp_path):
+    sheet = tmp_path / "ledger.xlsx"
+    sheet.write_bytes(b"fake spreadsheet")
+    client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
+
+    try:
+        client.deal("Summarize this ledger", files=[sheet], dry_run=False)
+    except CrupierModelUnsupportedError as exc:
+        assert "spreadsheet" in str(exc)
+        assert "table_rows" in str(exc)
+    else:
+        raise AssertionError("spreadsheet parsing should be explicit unsupported until implemented")
+
+
+def test_real_execution_blocks_unimplemented_document_extraction(tmp_path):
+    document = tmp_path / "brief.docx"
+    document.write_bytes(b"fake docx")
+    client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
+
+    try:
+        client.deal("Summarize this brief", files=[document], dry_run=False)
+    except CrupierModelUnsupportedError as exc:
+        assert "document" in str(exc)
+        assert "extracted_text" in str(exc)
+    else:
+        raise AssertionError("document extraction should be explicit unsupported until implemented")
+
+
 def test_file_routing_plan_serializes_without_uri_by_default():
     plan = plan_file_representations([FileAsset(kind="image", name="secret.png", uri="/tmp/secret.png")], task="Read")
 

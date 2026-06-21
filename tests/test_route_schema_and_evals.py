@@ -87,6 +87,21 @@ def test_eval_expectations_report_human_relevant_failures():
     assert "expected at least 2 models, got 1" in failures
 
 
+def test_route_plan_shape_accepts_delegate_strategy():
+    plan = RoutePlan(
+        strategy="delegate",
+        steps=[
+            RouteStep(
+                role="delegate",
+                model="openai:gpt-5.4-mini",
+                params={"task": "Research then write", "strategy": "orchestrated"},
+            )
+        ],
+    )
+
+    validate_route_plan_shape(plan)
+
+
 def test_builtin_routing_evals_pass_with_seed_config(tmp_path):
     report = RoutingEvalRunner(Crupier(make_config(tmp_path))).run()
 
