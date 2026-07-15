@@ -1,7 +1,7 @@
 import json
 
 from crupier import Crupier
-from crupier.adapters import AdapterResponse, EmbeddingResponse, ProviderModel
+from crupier.adapters import AdapterResponse, EmbeddingResponse, OperationResponse, ProviderModel
 from crupier.cli import main
 from crupier.config import CrupierConfig
 
@@ -63,6 +63,36 @@ class FakeEmbeddingAdapter(FakeProbeAdapter):
         )
 
 
+class FakeOperationProbeAdapter:
+    provider = "nan"
+
+    def __init__(self):
+        self.calls = []
+
+    @staticmethod
+    def supports_operation(*, operation, model):
+        return model == {
+            "reranker": "rerank",
+            "transcription": "whisper",
+            "tts": "kokoro",
+            "image_generation": "flux-2-klein",
+        }.get(operation)
+
+    def execute_operation(self, *, operation, model, request, payload):
+        self.calls.append({"operation": operation, "model": model, "payload": payload})
+        output = {
+            "reranker": [{"index": 1, "relevance_score": 0.9}],
+            "transcription": {"text": ""},
+            "tts": b"audio",
+            "image_generation": [{"b64_json": "aW1hZ2U="}],
+        }[operation]
+        return OperationResponse(
+            operation=operation,
+            output=output,
+            metadata={"provider": "nan", "model": model},
+        )
+
+
 def test_capability_probe_apply_updates_card(tmp_path):
     config = CrupierConfig.from_dict(
         {
@@ -114,7 +144,7 @@ def test_generic_capability_probes_avoid_optional_sampling_params(tmp_path):
     assert report.summary() == {"verified": 3}
     assert adapter.calls
     assert all("temperature" not in call["constraints"] for call in adapter.calls)
-    assert all(call["constraints"]["max_output_tokens"] == 128 for call in adapter.calls)
+    assert [call["constraints"]["max_output_tokens"] for call in adapter.calls] == [128, 512, 128]
 
 
 def test_text_basic_probe_accepts_punctuation_variants(tmp_path):
@@ -218,6 +248,74 @@ def test_embedding_probe_apply_updates_embedding_card(tmp_path):
     assert card["embedding_dimensions"] == 4
     assert card["modalities_output"] == ["embedding"]
     assert card["capability_status"]["embeddings"]["status"] == "verified"
+
+
+def test_specialized_operation_probes_drive_readiness(tmp_path):
+    models = ["nan:rerank", "nan:whisper", "nan:kokoro", "nan:flux-2-klein"]
+    config = CrupierConfig.from_dict(
+        {
+            "providers": {"nan": {"enabled": True}},
+            "models": {"allow": models},
+        }
+    )
+    config.root = tmp_path
+    adapter = FakeOperationProbeAdapter()
+    client = Crupier(config, adapters={"nan": adapter})
+
+    before = client.capabilities.readiness(models)
+    report = client.capabilities.probe(models, apply=True)
+    after = client.capabilities.readiness(models)
+
+    assert before.summary() == {"needs_probes": 4}
+    assert report.summary() == {"verified": 4}
+    assert after.summary() == {"ready": 4}
+    assert [result.probe for result in report.results] == [
+        "reranker",
+        "transcription",
+        "tts",
+        "image_generation",
+    ]
+    transcription_call = next(call for call in adapter.calls if call["operation"] == "transcription")
+    assert transcription_call["payload"]["filename"] == "crupier-probe.wav"
+    assert transcription_call["payload"]["file"].startswith(b"RIFF")
+
+
+def test_default_probe_plan_uses_only_embedding_probe_for_embedding_model(tmp_path):
+    config = CrupierConfig.from_dict(
+        {
+            "providers": {"openai": {"enabled": True}},
+            "models": {"allow": ["openai:text-embedding-3-small"]},
+        }
+    )
+    config.root = tmp_path
+    adapter = FakeEmbeddingAdapter()
+    client = Crupier(config, adapters={"openai": adapter})
+
+    report = client.capabilities.probe(["openai:text-embedding-3-small"], apply=True)
+
+    assert report.summary() == {"verified": 1}
+    assert [result.probe for result in report.results] == ["embeddings"]
+    assert adapter.calls == []
+
+
+def test_explicit_inapplicable_probe_is_skipped_and_not_persisted(tmp_path):
+    config = CrupierConfig.from_dict(
+        {
+            "providers": {"openai": {"enabled": True}},
+            "models": {"allow": ["openai:text-embedding-3-small"]},
+        }
+    )
+    config.root = tmp_path
+    client = Crupier(config, adapters={"openai": FakeEmbeddingAdapter()})
+
+    report = client.capabilities.probe(
+        ["openai:text-embedding-3-small"], probes=["text_basic"], apply=True
+    )
+
+    assert report.summary() == {"skipped": 1}
+    card = client.registry.get("openai:text-embedding-3-small")
+    assert "text_basic" not in card.probe_results
+    assert "text_generation" not in card.capability_status
 
 
 def test_capability_readiness_ready_after_verified_probes(tmp_path):

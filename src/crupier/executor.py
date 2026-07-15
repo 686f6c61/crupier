@@ -6,22 +6,32 @@ import json
 import random
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import replace
+from threading import RLock
 from time import perf_counter, sleep
 
 from .adapters import AdapterResponse, ProviderAdapter
 from .adapters.common import build_prompt
+from .budgets import ExecutionBudget, request_with_timeout
 from .config import CrupierConfig
-from .costs import actual_cost_from_calls
+from .costs import actual_cost_from_calls, usage_estimated_cost_from_calls
 from .errors import (
+    CrupierBudgetExceededError,
+    CrupierExecutionLimitError,
     CrupierProviderAuthError,
     CrupierProviderRateLimitError,
-    CrupierModelUnsupportedError,
     CrupierProviderUnavailableError,
+    CrupierRouteValidationError,
     CrupierStructuredOutputError,
 )
-from .models import CostEstimate, CrupierResult, DecisionTrace, RequestEnvelope, RoutePlan
-from .multimodal import can_execute_native_images
+from .models import CapabilityCard, CostEstimate, CrupierResult, DecisionTrace, RequestEnvelope, RoutePlan
+from .prompts import (
+    build_critique_instruction,
+    build_repair_instruction,
+    build_tool_critique_instruction,
+    build_tool_repair_instruction,
+)
 from .registry import ModelRegistry
+from .runtime_policy import apply_runtime_policy
 from .structured import build_repair_prompt, build_structured_prompt, parse_and_validate_json, schema_from_request
 from .tools import (
     ToolExecution,
@@ -29,9 +39,30 @@ from .tools import (
     build_tool_planning_prompt,
     build_tool_replanning_prompt,
     execute_tool_plan,
+    extract_final_answer,
     normalize_tools,
     parse_tool_plan,
 )
+
+
+def _non_negative_int(value: object, *, default: int) -> int:
+    try:
+        return max(0, int(value))  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return max(0, int(default))
+
+
+def _positive_int(value: object, *, default: int) -> int:
+    return max(1, _non_negative_int(value, default=default))
+
+
+def _optional_non_negative_float(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        return max(0.0, float(value))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
 
 
 class RouteExecutor:
@@ -40,6 +71,11 @@ class RouteExecutor:
         self.adapters = adapters or {}
         self._provider_failure_counts: dict[str, int] = {}
         self._provider_circuit_open_until: dict[str, float] = {}
+        self._state_lock = RLock()
+        try:
+            self._cards = ModelRegistry(config).load()
+        except Exception:  # noqa: BLE001 - execution can still proceed without optional runtime hints
+            self._cards = {}
 
     def execute(
         self,
@@ -48,10 +84,11 @@ class RouteExecutor:
         trace: DecisionTrace,
         *,
         dry_run: bool = True,
+        budget: ExecutionBudget | None = None,
     ) -> CrupierResult:
         started = perf_counter()
         if not dry_run:
-            return self._execute_real(request, plan, trace, started)
+            return self._execute_real(request, plan, trace, started, budget)
 
         trace.provider_calls.extend(
             {"role": step.role, "model": step.model, "models": step.models, "dry_run": True}
@@ -110,12 +147,9 @@ class RouteExecutor:
         plan: RoutePlan,
         trace: DecisionTrace,
         started: float,
+        budget: ExecutionBudget | None = None,
     ) -> CrupierResult:
-        if request.files and not can_execute_native_images(request.file_plan):
-            raise CrupierModelUnsupportedError(
-                "Real provider execution is currently implemented only for native image inputs. "
-                "Use dry_run=True to inspect routing for PDFs/audio/video/documents, or extract them before calling."
-            )
+        budget = budget or ExecutionBudget(self.config, request, self._budget_cards())
         raw_outputs: list[AdapterResponse] = []
         warnings: list[str] = []
         output_json = None
@@ -129,36 +163,64 @@ class RouteExecutor:
                 trace,
                 raw_outputs,
                 structured_schema,
+                budget,
             )
+            if plan.strategy == "critique_repair":
+                output_text, output_json = self._execute_tool_critique_repair(
+                    request,
+                    plan,
+                    output_text,
+                    tool_ledger,
+                    trace,
+                    raw_outputs,
+                    structured_schema,
+                    budget,
+                )
         elif structured_schema is not None:
-            output_json, output_text = self._execute_structured(request, plan, trace, raw_outputs, structured_schema)
+            output_json, output_text = self._execute_structured(
+                request, plan, trace, raw_outputs, structured_schema, budget
+            )
         elif plan.strategy in {"single", "local_first"}:
-            response = self._execute_first_model(request, plan, trace, raw_outputs)
+            response = self._execute_first_model(request, plan, trace, raw_outputs, budget)
             output_text = response.text
         elif plan.strategy == "fallback":
-            response = self._execute_fallback(request, plan, trace, raw_outputs)
+            response = self._execute_fallback(request, plan, trace, raw_outputs, budget)
             output_text = response.text
         elif plan.strategy == "cascade":
-            response = self._execute_cascade(request, plan, trace, raw_outputs)
+            response = self._execute_cascade(request, plan, trace, raw_outputs, budget)
             output_text = response.text
         elif plan.strategy == "panel":
-            output_text = self._execute_panel(request, plan, trace, raw_outputs)
+            output_text = self._execute_panel(request, plan, trace, raw_outputs, budget)
         elif plan.strategy == "fusion":
-            output_text = self._execute_fusion(request, plan, trace, raw_outputs)
+            output_text = self._execute_fusion(request, plan, trace, raw_outputs, budget)
         elif plan.strategy == "critique_repair":
-            output_text = self._execute_critique_repair(request, plan, trace, raw_outputs)
+            output_text = self._execute_critique_repair(request, plan, trace, raw_outputs, budget)
         elif plan.strategy == "delegate":
-            output_text = self._execute_delegate(request, plan, trace)
+            output_text = self._execute_delegate(request, plan, trace, budget)
         else:
-            response = self._execute_first_model(request, plan, trace, raw_outputs)
+            response = self._execute_first_model(request, plan, trace, raw_outputs, budget)
             output_text = response.text
             warnings.append(f"Strategy {plan.strategy!r} executed as first-model route.")
 
         latency_ms = int((perf_counter() - started) * 1000)
         trace.latency_ms = latency_ms
         actual_usd = self._actual_cost(trace.provider_calls)
-        trace.cost = CostEstimate(estimated_usd=plan.estimated_cost.estimated_usd, actual_usd=actual_usd)
-        final_quality_signals = {"real_provider_calls": True, "tool_calls": len(tool_ledger)}
+        usage_estimate = self._usage_estimated_cost(trace.provider_calls)
+        reserved_estimate = _optional_non_negative_float(
+            budget.snapshot()["estimated_cost_reserved_usd"]
+        ) or 0.0
+        trace.cost = CostEstimate(
+            estimated_usd=usage_estimate if usage_estimate is not None else reserved_estimate,
+            actual_usd=actual_usd,
+        )
+        final_quality_signals: dict[str, object] = dict(trace.final_quality_signals)
+        final_quality_signals.update(
+            {
+                "real_provider_calls": True,
+                "tool_calls": len(tool_ledger),
+                "execution_budget": budget.snapshot(),
+            }
+        )
         provider_retry_errors = [
             item for item in trace.errors if item.get("phase") == "provider_call" and item.get("retryable")
         ]
@@ -197,6 +259,7 @@ class RouteExecutor:
         trace: DecisionTrace,
         raw_outputs: list[AdapterResponse],
         schema: dict[str, object] | None,
+        budget: ExecutionBudget,
     ) -> tuple[str, object | None, list[ToolExecution]]:
         tools = normalize_tools(request.tools)
         model = self._models_in_execution_order(plan)[0]
@@ -209,15 +272,23 @@ class RouteExecutor:
                 if round_index == 0
                 else build_tool_replanning_prompt(request, tools, executions, response_schema=schema)
             )
-            planning = self._call_model(
-                model,
+            model, planning = self._call_plan_role(
+                plan,
+                "generator",
                 planning_prompt,
                 self._request_without_response_schema(request),
                 trace,
                 raw_outputs,
-                role=f"tool_planner_round_{round_index + 1}",
+                trace_role=f"tool_planner_round_{round_index + 1}",
+                budget=budget,
             )
             calls, final = parse_tool_plan(planning.text)
+            max_calls_per_round = self._max_tool_calls_per_round(request)
+            if len(calls) > max_calls_per_round:
+                raise CrupierRouteValidationError(
+                    f"Tool planner requested {len(calls)} calls in one round, above "
+                    f"max_tool_calls_per_round={max_calls_per_round}."
+                )
             if not calls:
                 if executions and schema is not None:
                     break
@@ -229,18 +300,29 @@ class RouteExecutor:
                     raw_outputs,
                     schema,
                     model=model,
+                    budget=budget,
                 )
                 return output_text, output_json, executions
-            executions.extend(execute_tool_plan(calls, tools, request, previous_executions=executions))
+            executions.extend(
+                execute_tool_plan(
+                    calls,
+                    tools,
+                    request,
+                    previous_executions=executions,
+                    max_result_chars=self._max_tool_result_chars(request),
+                )
+            )
 
         final_prompt = build_tool_final_prompt(request, executions, response_schema=schema)
-        final_response = self._call_model(
-            model,
+        model, final_response = self._call_plan_role(
+            plan,
+            "generator",
             final_prompt,
             self._request_with_response_schema(request, schema),
             trace,
             raw_outputs,
-            role="tool_final",
+            trace_role="tool_final",
+            budget=budget,
         )
         output_json = self._parse_or_repair_structured(
             final_response.text,
@@ -249,8 +331,73 @@ class RouteExecutor:
             raw_outputs,
             schema,
             model=model,
+            budget=budget,
         )
         return final_response.text, output_json, executions
+
+    def _execute_tool_critique_repair(
+        self,
+        request: RequestEnvelope,
+        plan: RoutePlan,
+        draft: str,
+        executions: list[ToolExecution],
+        trace: DecisionTrace,
+        raw_outputs: list[AdapterResponse],
+        schema: dict[str, object] | None,
+        budget: ExecutionBudget,
+    ) -> tuple[str, object | None]:
+        tool_results = json.dumps(
+            [execution.to_dict() for execution in executions],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        critique_prompt = build_prompt(
+            request,
+            extra=build_tool_critique_instruction(
+                tool_results=tool_results,
+                draft=draft,
+            ),
+        )
+        _, critique = self._call_plan_role(
+            plan,
+            "critic",
+            critique_prompt,
+            self._request_without_response_schema(request),
+            trace,
+            raw_outputs,
+            trace_role="tool_critic",
+            budget=budget,
+        )
+        repair_prompt = build_prompt(
+            request,
+            extra=build_tool_repair_instruction(
+                tool_results=tool_results,
+                draft=draft,
+                critique=critique.text,
+                structured_output=schema is not None,
+            ),
+        )
+        repair_model, repair = self._call_plan_role(
+            plan,
+            "repair",
+            repair_prompt,
+            self._request_with_response_schema(request, schema),
+            trace,
+            raw_outputs,
+            trace_role="tool_repair",
+            budget=budget,
+        )
+        repaired_text = extract_final_answer(repair.text) if schema is None else repair.text
+        output_json = self._parse_or_repair_structured(
+            repaired_text,
+            request,
+            trace,
+            raw_outputs,
+            schema,
+            model=repair_model,
+            budget=budget,
+        )
+        return repaired_text, output_json
 
     def _execute_structured(
         self,
@@ -259,12 +406,15 @@ class RouteExecutor:
         trace: DecisionTrace,
         raw_outputs: list[AdapterResponse],
         schema: dict[str, object],
+        budget: ExecutionBudget,
     ) -> tuple[object, str]:
         last_error: Exception | None = None
         prompt = build_structured_prompt(request, schema)
         structured_request = self._request_with_response_schema(request, schema)
         for model in self._models_in_execution_order(plan):
-            response = self._call_model(model, prompt, structured_request, trace, raw_outputs, role="structured")
+            response = self._call_model(
+                model, prompt, structured_request, trace, raw_outputs, role="structured", budget=budget
+            )
             try:
                 data = parse_and_validate_json(response.text, schema)
                 return data, response.text
@@ -278,6 +428,7 @@ class RouteExecutor:
                     trace,
                     raw_outputs,
                     role="structured_repair",
+                    budget=budget,
                 )
                 try:
                     data = parse_and_validate_json(repair.text, schema)
@@ -296,6 +447,7 @@ class RouteExecutor:
         schema: dict[str, object] | None,
         *,
         model: str,
+        budget: ExecutionBudget,
     ) -> object | None:
         if schema is None:
             return None
@@ -310,6 +462,7 @@ class RouteExecutor:
                 trace,
                 raw_outputs,
                 role="structured_repair",
+                budget=budget,
             )
             return parse_and_validate_json(repair.text, schema)
 
@@ -333,11 +486,20 @@ class RouteExecutor:
         plan: RoutePlan,
         trace: DecisionTrace,
         raw_outputs: list[AdapterResponse],
+        budget: ExecutionBudget,
     ) -> AdapterResponse:
         for step in plan.steps:
             model = step.model or (step.models[0] if step.models else None)
             if model:
-                return self._call_model(model, build_prompt(request), request, trace, raw_outputs, role=step.role)
+                return self._call_model(
+                    model,
+                    build_prompt(request),
+                    request,
+                    trace,
+                    raw_outputs,
+                    role=step.role,
+                    budget=budget,
+                )
         raise CrupierProviderUnavailableError("Route has no executable model step.")
 
     def _execute_fallback(
@@ -346,6 +508,7 @@ class RouteExecutor:
         plan: RoutePlan,
         trace: DecisionTrace,
         raw_outputs: list[AdapterResponse],
+        budget: ExecutionBudget,
     ) -> AdapterResponse:
         models: list[str] = []
         for step in plan.steps:
@@ -355,7 +518,17 @@ class RouteExecutor:
         last_error: Exception | None = None
         for model in models:
             try:
-                return self._call_model(model, build_prompt(request), request, trace, raw_outputs, role="fallback")
+                return self._call_model(
+                    model,
+                    build_prompt(request),
+                    request,
+                    trace,
+                    raw_outputs,
+                    role="fallback",
+                    budget=budget,
+                )
+            except (CrupierBudgetExceededError, CrupierExecutionLimitError):
+                raise
             except Exception as exc:  # noqa: BLE001 - fallback records provider-specific failures
                 last_error = exc
                 trace.fallbacks.append({"model": model, "error": str(exc)})
@@ -367,6 +540,7 @@ class RouteExecutor:
         plan: RoutePlan,
         trace: DecisionTrace,
         raw_outputs: list[AdapterResponse],
+        budget: ExecutionBudget,
     ) -> AdapterResponse:
         models = self._cascade_models(plan)
         if not models:
@@ -374,9 +548,20 @@ class RouteExecutor:
 
         last_response: AdapterResponse | None = None
         last_error: Exception | None = None
+        last_validation_reason: str | None = None
         for index, model in enumerate(models):
             try:
-                response = self._call_model(model, build_prompt(request), request, trace, raw_outputs, role="cascade")
+                response = self._call_model(
+                    model,
+                    build_prompt(request),
+                    request,
+                    trace,
+                    raw_outputs,
+                    role="cascade",
+                    budget=budget,
+                )
+            except (CrupierBudgetExceededError, CrupierExecutionLimitError):
+                raise
             except Exception as exc:  # noqa: BLE001 - cascade escalates past provider failures
                 last_error = exc
                 next_model = models[index + 1] if index + 1 < len(models) else None
@@ -385,13 +570,16 @@ class RouteExecutor:
                 )
                 continue
             last_response = response
-            ok, reason = self._cascade_response_sufficient(request, plan, response, trace, raw_outputs)
+            ok, reason = self._cascade_response_sufficient(
+                request, plan, response, trace, raw_outputs, budget
+            )
             if ok:
                 if index > 0:
                     trace.fallbacks.append(
                         {"model": model, "phase": "cascade_escalation", "reason": "escalated response accepted"}
                     )
                 return response
+            last_validation_reason = reason
             next_model = models[index + 1] if index + 1 < len(models) else None
             trace.fallbacks.append(
                 {
@@ -403,7 +591,11 @@ class RouteExecutor:
             )
 
         if last_response is not None:
-            return last_response
+            raise CrupierProviderUnavailableError(
+                "Cascade exhausted every model without a sufficient response. "
+                f"Last validation reason: {last_validation_reason or 'unknown'}",
+                retryable=False,
+            )
         raise CrupierProviderUnavailableError(f"All cascade models failed. Last error: {last_error}") from last_error
 
     def _cascade_response_sufficient(
@@ -413,6 +605,7 @@ class RouteExecutor:
         response: AdapterResponse,
         trace: DecisionTrace,
         raw_outputs: list[AdapterResponse],
+        budget: ExecutionBudget,
     ) -> tuple[bool, str]:
         validator_model = self._model_for_role(plan, "validator") or request.constraints.get("cascade_validator_model")
         if validator_model:
@@ -422,6 +615,7 @@ class RouteExecutor:
                 response,
                 trace,
                 raw_outputs,
+                budget,
             )
         return self._heuristic_validate_cascade_response(request, response)
 
@@ -432,6 +626,7 @@ class RouteExecutor:
         response: AdapterResponse,
         trace: DecisionTrace,
         raw_outputs: list[AdapterResponse],
+        budget: ExecutionBudget,
     ) -> tuple[bool, str]:
         prompt = build_prompt(
             request,
@@ -443,7 +638,15 @@ class RouteExecutor:
                 "or says it lacks enough information."
             ),
         )
-        verdict = self._call_model(model, prompt, request, trace, raw_outputs, role="cascade_validator")
+        verdict = self._call_model(
+            model,
+            prompt,
+            request,
+            trace,
+            raw_outputs,
+            role="cascade_validator",
+            budget=budget,
+        )
         try:
             data = json.loads(verdict.text.strip())
         except json.JSONDecodeError:
@@ -492,11 +695,14 @@ class RouteExecutor:
         plan: RoutePlan,
         trace: DecisionTrace,
         raw_outputs: list[AdapterResponse],
+        budget: ExecutionBudget,
     ) -> str:
         panel_models = next((step.models for step in plan.steps if step.role == "panel"), [])
         outputs = [
             f"## {model}\n{response.text}"
-            for model, response in self._run_panel_models(request, panel_models, trace, raw_outputs)
+            for model, response in self._run_panel_models(
+                request, panel_models, trace, raw_outputs, budget
+            )
         ]
         if not outputs:
             raise CrupierProviderUnavailableError("All panel models failed.")
@@ -508,16 +714,33 @@ class RouteExecutor:
         plan: RoutePlan,
         trace: DecisionTrace,
         raw_outputs: list[AdapterResponse],
+        budget: ExecutionBudget,
     ) -> str:
         panel_models = next((step.models for step in plan.steps if step.role == "panel"), [])
+        panel_results = self._run_panel_models(
+            request, panel_models, trace, raw_outputs, budget
+        )
+        required_panel_outputs = min(2, len(panel_models))
+        trace.final_quality_signals.update(
+            {
+                "fusion_panel_planned": len(panel_models),
+                "fusion_panel_successful": len(panel_results),
+                "fusion_panel_quorum_required": required_panel_outputs,
+                "fusion_panel_quorum": len(panel_results) >= required_panel_outputs,
+            }
+        )
+        if len(panel_results) < required_panel_outputs:
+            raise CrupierProviderUnavailableError(
+                "Fusion requires at least 2 non-empty panel outputs; "
+                f"received {len(panel_results)}."
+            )
         panel_outputs = [
             f"Model {model}:\n{response.text}"
-            for model, response in self._run_panel_models(request, panel_models, trace, raw_outputs)
+            for model, response in panel_results
         ]
         if not panel_outputs:
             raise CrupierProviderUnavailableError("Fusion panel failed; no model outputs available.")
 
-        judge_model = self._model_for_role(plan, "judge") or panel_models[0]
         judge_prompt = build_prompt(
             request,
             extra=(
@@ -527,9 +750,17 @@ class RouteExecutor:
                 "Do not include hidden chain-of-thought."
             ),
         )
-        judge = self._call_model(judge_model, judge_prompt, request, trace, raw_outputs, role="judge")
+        _, judge = self._call_plan_role(
+            plan,
+            "judge",
+            judge_prompt,
+            request,
+            trace,
+            raw_outputs,
+            trace_role="judge",
+            budget=budget,
+        )
 
-        writer_model = self._model_for_role(plan, "final_writer") or judge_model
         final_prompt = build_prompt(
             request,
             extra=(
@@ -538,7 +769,16 @@ class RouteExecutor:
                 + "\n\nWrite the final answer for the user. Be direct, cite uncertainty, and do not include hidden reasoning."
             ),
         )
-        final = self._call_model(writer_model, final_prompt, request, trace, raw_outputs, role="final_writer")
+        _, final = self._call_plan_role(
+            plan,
+            "final_writer",
+            final_prompt,
+            request,
+            trace,
+            raw_outputs,
+            trace_role="final_writer",
+            budget=budget,
+        )
         return final.text
 
     def _run_panel_models(
@@ -547,25 +787,41 @@ class RouteExecutor:
         panel_models: list[str],
         trace: DecisionTrace,
         raw_outputs: list[AdapterResponse],
+        budget: ExecutionBudget,
     ) -> list[tuple[str, AdapterResponse]]:
         if not panel_models:
             return []
         if not self.config.routing.allow_parallel or len(panel_models) == 1:
-            return self._run_panel_models_sequential(request, panel_models, trace, raw_outputs)
+            return self._run_panel_models_sequential(request, panel_models, trace, raw_outputs, budget)
 
         max_workers = self._max_parallel_models(request, len(panel_models))
         results: dict[str, AdapterResponse] = {}
+        limit_error: CrupierBudgetExceededError | CrupierExecutionLimitError | None = None
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
-                executor.submit(self._call_model, model, build_prompt(request), request, trace, raw_outputs, role="panel"): model
+                executor.submit(
+                    self._call_model,
+                    model,
+                    build_prompt(request),
+                    request,
+                    trace,
+                    raw_outputs,
+                    role="panel",
+                    budget=budget,
+                ): model
                 for model in panel_models
             }
             for future in as_completed(futures):
                 model = futures[future]
                 try:
                     results[model] = future.result()
+                except (CrupierBudgetExceededError, CrupierExecutionLimitError) as exc:
+                    limit_error = limit_error or exc
                 except Exception as exc:  # noqa: BLE001
-                    trace.errors.append({"model": model, "error": str(exc), "phase": "panel"})
+                    with self._state_lock:
+                        trace.errors.append({"model": model, "error": str(exc), "phase": "panel"})
+        if limit_error is not None:
+            raise limit_error
         return [(model, results[model]) for model in panel_models if model in results]
 
     def _run_panel_models_sequential(
@@ -574,12 +830,23 @@ class RouteExecutor:
         panel_models: list[str],
         trace: DecisionTrace,
         raw_outputs: list[AdapterResponse],
+        budget: ExecutionBudget,
     ) -> list[tuple[str, AdapterResponse]]:
         outputs: list[tuple[str, AdapterResponse]] = []
         for model in panel_models:
             try:
-                response = self._call_model(model, build_prompt(request), request, trace, raw_outputs, role="panel")
+                response = self._call_model(
+                    model,
+                    build_prompt(request),
+                    request,
+                    trace,
+                    raw_outputs,
+                    role="panel",
+                    budget=budget,
+                )
                 outputs.append((model, response))
+            except (CrupierBudgetExceededError, CrupierExecutionLimitError):
+                raise
             except Exception as exc:  # noqa: BLE001
                 trace.errors.append({"model": model, "error": str(exc), "phase": "panel"})
         return outputs
@@ -590,40 +857,101 @@ class RouteExecutor:
         plan: RoutePlan,
         trace: DecisionTrace,
         raw_outputs: list[AdapterResponse],
+        budget: ExecutionBudget,
     ) -> str:
-        generator_model = self._model_for_role(plan, "generator") or plan.models[0]
-        critic_model = self._model_for_role(plan, "critic") or generator_model
-        repair_model = self._model_for_role(plan, "repair") or generator_model
-
-        draft = self._call_model(generator_model, build_prompt(request), request, trace, raw_outputs, role="generator")
+        _, draft = self._call_plan_role(
+            plan,
+            "generator",
+            build_prompt(request),
+            request,
+            trace,
+            raw_outputs,
+            trace_role="generator",
+            budget=budget,
+        )
         critique_prompt = build_prompt(
             request,
-            extra=(
-                "Draft answer:\n"
-                + draft.text
-                + "\n\nCritique this draft for correctness, missing constraints, cost/latency tradeoffs, and tool-risk. "
-                "Do not include hidden chain-of-thought."
-            ),
+            extra=build_critique_instruction(draft=draft.text),
         )
-        critique = self._call_model(critic_model, critique_prompt, request, trace, raw_outputs, role="critic")
+        _, critique = self._call_plan_role(
+            plan,
+            "critic",
+            critique_prompt,
+            request,
+            trace,
+            raw_outputs,
+            trace_role="critic",
+            budget=budget,
+        )
         repair_prompt = build_prompt(
             request,
-            extra=(
-                "Draft answer:\n"
-                + draft.text
-                + "\n\nCritique:\n"
-                + critique.text
-                + "\n\nProduce the repaired final answer. Do not include hidden chain-of-thought."
-            ),
+            extra=build_repair_instruction(draft=draft.text, critique=critique.text),
         )
-        final = self._call_model(repair_model, repair_prompt, request, trace, raw_outputs, role="repair")
-        return final.text
+        _, final = self._call_plan_role(
+            plan,
+            "repair",
+            repair_prompt,
+            request,
+            trace,
+            raw_outputs,
+            trace_role="repair",
+            budget=budget,
+        )
+        return extract_final_answer(final.text)
+
+    def _call_plan_role(
+        self,
+        plan: RoutePlan,
+        plan_role: str,
+        prompt: str,
+        request: RequestEnvelope,
+        trace: DecisionTrace,
+        raw_outputs: list[AdapterResponse],
+        *,
+        trace_role: str,
+        budget: ExecutionBudget,
+    ) -> tuple[str, AdapterResponse]:
+        models = self._role_fallback_models(plan, plan_role)
+        if not models:
+            raise CrupierProviderUnavailableError(
+                f"Route has no executable model for role {plan_role!r}."
+            )
+        last_error: Exception | None = None
+        for index, model in enumerate(models):
+            try:
+                return model, self._call_model(
+                    model,
+                    prompt,
+                    request,
+                    trace,
+                    raw_outputs,
+                    role=trace_role,
+                    budget=budget,
+                )
+            except (CrupierBudgetExceededError, CrupierExecutionLimitError):
+                raise
+            except Exception as exc:  # noqa: BLE001 - validated plan models provide bounded role fallback
+                last_error = exc
+                trace.fallbacks.append(
+                    {
+                        "phase": "role_fallback",
+                        "role": trace_role,
+                        "plan_role": plan_role,
+                        "model": model,
+                        "error": str(exc),
+                        "next_model": models[index + 1] if index + 1 < len(models) else None,
+                    }
+                )
+        raise CrupierProviderUnavailableError(
+            f"All models for role {plan_role!r} failed. Last error: {last_error}"
+        ) from last_error
 
     def _execute_delegate(
         self,
         request: RequestEnvelope,
         plan: RoutePlan,
         trace: DecisionTrace,
+        budget: ExecutionBudget,
     ) -> str:
         step = next((item for item in plan.steps if item.role == "delegate"), None)
         if step is None:
@@ -635,6 +963,13 @@ class RouteExecutor:
         params = dict(step.params)
         nested_constraints = dict(request.constraints)
         nested_constraints["max_depth"] = remaining_depth - 1
+        nested_constraints["max_calls"] = budget.remaining_calls()
+        remaining_cost = budget.remaining_cost_usd()
+        if remaining_cost is not None:
+            nested_constraints["max_cost_usd"] = remaining_cost
+        remaining_latency_ms = budget.remaining_latency_ms()
+        if remaining_latency_ms is not None:
+            nested_constraints["max_latency_ms"] = remaining_latency_ms
         if "constraints" in params and isinstance(params["constraints"], dict):
             nested_constraints.update(params["constraints"])
             nested_constraints["max_depth"] = min(
@@ -675,6 +1010,9 @@ class RouteExecutor:
             trace.provider_calls.extend(nested_result.trace.provider_calls)
             trace.fallbacks.extend(nested_result.trace.fallbacks)
             trace.errors.extend(nested_result.trace.errors)
+            nested_budget = nested_result.trace.final_quality_signals.get("execution_budget")
+            if isinstance(nested_budget, dict):
+                budget.absorb(nested_budget)
         return nested_result.output_text
 
     def _call_model(
@@ -686,6 +1024,7 @@ class RouteExecutor:
         raw_outputs: list[AdapterResponse],
         *,
         role: str,
+        budget: ExecutionBudget,
     ) -> AdapterResponse:
         provider, model = model_key.split(":", 1)
         adapter = self.adapters.get(provider)
@@ -713,55 +1052,124 @@ class RouteExecutor:
         backoff_seconds = self._provider_retry_backoff_seconds(request)
         jitter_seconds = self._provider_retry_jitter_seconds(request)
         last_error: Exception | None = None
+        effective_request, runtime_policy = apply_runtime_policy(model_key, request, self._cards.get(model_key))
         for attempt in range(1, max_retries + 2):
-            call_started = perf_counter()
             try:
-                response = adapter.generate(model=model, prompt=prompt, request=request)
+                reservation = budget.reserve(model=model_key, prompt=prompt, request=effective_request)
+            except (CrupierBudgetExceededError, CrupierExecutionLimitError) as exc:
+                with self._state_lock:
+                    trace.errors.append(
+                        {
+                            "phase": "execution_budget",
+                            "role": role,
+                            "provider": provider,
+                            "model": model_key,
+                            "attempt": attempt,
+                            "retryable": False,
+                            "error_type": exc.__class__.__name__,
+                            "error": str(exc),
+                        }
+                    )
+                raise
+            call_request = request_with_timeout(effective_request, reservation.timeout_seconds)
+            call_started = perf_counter()
+            response: AdapterResponse | None = None
+            try:
+                response = adapter.generate(model=model, prompt=prompt, request=call_request)
+                if runtime_policy:
+                    response.metadata = {**response.metadata, "runtime_policy": runtime_policy}
+                if not response.text.strip():
+                    raise CrupierProviderUnavailableError(
+                        f"Provider {provider!r} model {model_key!r} returned an empty text response."
+                    )
             except (CrupierProviderAuthError, CrupierProviderRateLimitError, CrupierProviderUnavailableError) as exc:
                 duration_ms = int((perf_counter() - call_started) * 1000)
                 retryable = attempt <= max_retries and self._provider_error_retryable(exc)
                 last_error = exc
-                trace.errors.append(
-                    {
-                        "phase": "provider_call",
-                        "role": role,
-                        "provider": provider,
-                        "model": model_key,
-                        "attempt": attempt,
-                        "max_provider_retries": max_retries,
-                        "latency_ms": duration_ms,
-                        "retryable": retryable,
-                        "error_type": exc.__class__.__name__,
-                        "error": str(exc),
-                    }
-                )
+                with self._state_lock:
+                    if response is not None:
+                        raw_outputs.append(response)
+                        trace.provider_calls.append(
+                            {
+                                "role": role,
+                                "provider": provider,
+                                "model": model_key,
+                                "attempt": attempt,
+                                "status": "failed",
+                                "latency_ms": duration_ms,
+                                "estimated_usd_reserved": reservation.estimated_usd,
+                                "usage": response.usage,
+                                "metadata": {**response.metadata, "empty_response": True},
+                            }
+                        )
+                    trace.errors.append(
+                        {
+                            "phase": "provider_call",
+                            "role": role,
+                            "provider": provider,
+                            "model": model_key,
+                            "attempt": attempt,
+                            "max_provider_retries": max_retries,
+                            "latency_ms": duration_ms,
+                            "retryable": retryable,
+                            "error_type": exc.__class__.__name__,
+                            "error": str(exc),
+                        }
+                    )
                 self._record_provider_failure(provider)
                 if not retryable:
                     raise
                 if backoff_seconds > 0:
                     sleep(backoff_seconds * (2 ** (attempt - 1)) + random.uniform(0.0, jitter_seconds))
                 continue
+            assert response is not None
             duration_ms = int((perf_counter() - call_started) * 1000)
             self._record_provider_success(provider)
-            raw_outputs.append(response)
-            trace.provider_calls.append(
-                {
-                    "role": role,
-                    "provider": provider,
-                    "model": model_key,
-                    "attempt": attempt,
-                    "latency_ms": duration_ms,
-                    "usage": response.usage,
-                    "metadata": response.metadata,
-                }
-            )
+            call_record = {
+                "role": role,
+                "provider": provider,
+                "model": model_key,
+                "attempt": attempt,
+                "status": "success",
+                "latency_ms": duration_ms,
+                "estimated_usd_reserved": reservation.estimated_usd,
+                "usage": response.usage,
+                "metadata": response.metadata,
+            }
+            with self._state_lock:
+                raw_outputs.append(response)
+                trace.provider_calls.append(call_record)
+            try:
+                budget.ensure_deadline()
+            except CrupierExecutionLimitError as exc:
+                call_record["discarded_after_deadline"] = True
+                with self._state_lock:
+                    trace.errors.append(
+                        {
+                            "phase": "execution_budget",
+                            "role": role,
+                            "provider": provider,
+                            "model": model_key,
+                            "attempt": attempt,
+                            "retryable": False,
+                            "error_type": exc.__class__.__name__,
+                            "error": str(exc),
+                        }
+                    )
+                raise
             return response
         raise CrupierProviderUnavailableError(f"Provider call failed after retries. Last error: {last_error}") from last_error
+
+    def _budget_cards(self) -> list[CapabilityCard]:
+        try:
+            return ModelRegistry(self.config).list(allowed_only=False)
+        except Exception:  # noqa: BLE001 - fallback tier pricing still provides a conservative budget
+            return []
 
     def _provider_retry_budget(self, request: RequestEnvelope) -> int:
         value = request.constraints.get("max_provider_retries", self.config.routing.max_provider_retries)
         try:
-            return max(0, int(value))
+            return max(0, int(value))  # type: ignore[call-overload]
         except (TypeError, ValueError):
             return max(0, int(self.config.routing.max_provider_retries))
 
@@ -780,18 +1188,19 @@ class RouteExecutor:
             return max(0.0, float(self.config.routing.retry_jitter_seconds))
 
     def _provider_circuit_error(self, provider: str) -> CrupierProviderUnavailableError | None:
-        open_until = self._provider_circuit_open_until.get(provider)
-        if open_until is None:
-            return None
-        remaining = open_until - perf_counter()
-        if remaining <= 0:
-            self._provider_circuit_open_until.pop(provider, None)
-            self._provider_failure_counts.pop(provider, None)
-            return None
-        return CrupierProviderUnavailableError(
-            f"Provider {provider!r} circuit breaker is open for {remaining:.1f}s after repeated failures.",
-            retryable=False,
-        )
+        with self._state_lock:
+            open_until = self._provider_circuit_open_until.get(provider)
+            if open_until is None:
+                return None
+            remaining = open_until - perf_counter()
+            if remaining <= 0:
+                self._provider_circuit_open_until.pop(provider, None)
+                self._provider_failure_counts.pop(provider, None)
+                return None
+            return CrupierProviderUnavailableError(
+                f"Provider {provider!r} circuit breaker is open for {remaining:.1f}s after repeated failures.",
+                retryable=False,
+            )
 
     def provider_circuit_open_reason(self, provider: str) -> str | None:
         error = self._provider_circuit_error(provider)
@@ -801,16 +1210,18 @@ class RouteExecutor:
         threshold = max(0, int(self.config.routing.circuit_breaker_failure_threshold))
         if threshold <= 0:
             return
-        failures = self._provider_failure_counts.get(provider, 0) + 1
-        self._provider_failure_counts[provider] = failures
-        if failures >= threshold:
-            cooldown = max(0.0, float(self.config.routing.circuit_breaker_cooldown_seconds))
-            if cooldown > 0:
-                self._provider_circuit_open_until[provider] = perf_counter() + cooldown
+        with self._state_lock:
+            failures = self._provider_failure_counts.get(provider, 0) + 1
+            self._provider_failure_counts[provider] = failures
+            if failures >= threshold:
+                cooldown = max(0.0, float(self.config.routing.circuit_breaker_cooldown_seconds))
+                if cooldown > 0:
+                    self._provider_circuit_open_until[provider] = perf_counter() + cooldown
 
     def _record_provider_success(self, provider: str) -> None:
-        self._provider_failure_counts.pop(provider, None)
-        self._provider_circuit_open_until.pop(provider, None)
+        with self._state_lock:
+            self._provider_failure_counts.pop(provider, None)
+            self._provider_circuit_open_until.pop(provider, None)
 
     def _max_tool_rounds(self, request: RequestEnvelope) -> int:
         value = request.constraints.get("max_tool_rounds", self.config.routing.max_tool_rounds)
@@ -819,13 +1230,27 @@ class RouteExecutor:
         except (TypeError, ValueError):
             return max(1, int(self.config.routing.max_tool_rounds))
 
+    def _max_tool_calls_per_round(self, request: RequestEnvelope) -> int:
+        value = request.constraints.get(
+            "max_tool_calls_per_round",
+            self.config.routing.max_tool_calls_per_round,
+        )
+        return _positive_int(value, default=self.config.routing.max_tool_calls_per_round)
+
+    def _max_tool_result_chars(self, request: RequestEnvelope) -> int:
+        value = request.constraints.get(
+            "max_tool_result_chars",
+            self.config.routing.max_tool_result_chars,
+        )
+        return max(256, _positive_int(value, default=self.config.routing.max_tool_result_chars))
+
     def _remaining_delegate_depth(self, request: RequestEnvelope) -> int:
         return self._coerce_non_negative_int(request.constraints.get("max_depth"), self.config.routing.max_depth)
 
     @staticmethod
     def _coerce_non_negative_int(value: object, default: int) -> int:
         try:
-            return max(0, int(value))
+            return max(0, int(value))  # type: ignore[call-overload]
         except (TypeError, ValueError):
             return max(0, int(default))
 
@@ -852,6 +1277,13 @@ class RouteExecutor:
         except Exception:  # noqa: BLE001 - cost accounting should not hide a successful provider call
             return None
         return actual_cost_from_calls(calls, cards)
+
+    def _usage_estimated_cost(self, calls: list[dict[str, object]]) -> float | None:
+        try:
+            cards = ModelRegistry(self.config).list(allowed_only=False)
+        except Exception:  # noqa: BLE001 - reserved estimates remain available without registry cards
+            return None
+        return usage_estimated_cost_from_calls(calls, cards)
 
     @staticmethod
     def _models_in_execution_order(plan: RoutePlan) -> list[str]:
@@ -886,3 +1318,17 @@ class RouteExecutor:
             if step.role == role:
                 return step.model or (step.models[0] if step.models else None)
         return None
+
+    @staticmethod
+    def _role_fallback_models(plan: RoutePlan, role: str) -> list[str]:
+        preferred: list[str] = []
+        step = next((item for item in plan.steps if item.role == role), None)
+        if step is not None:
+            for model in [step.model, *step.models]:
+                if model and model not in preferred:
+                    preferred.append(model)
+        alternatives = [model for model in plan.models if model not in preferred]
+        if preferred:
+            provider = preferred[0].split(":", 1)[0]
+            alternatives.sort(key=lambda model: model.split(":", 1)[0] == provider)
+        return preferred + alternatives

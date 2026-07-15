@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from typing import Any
+from typing import Any, NoReturn
 
 from crupier.config import OLLAMA_CLOUD_HOST, ProviderSettings
 from crupier.errors import (
+    CrupierModelUnsupportedError,
     CrupierProviderAuthError,
     CrupierProviderRateLimitError,
     CrupierProviderUnavailableError,
@@ -30,6 +31,11 @@ class OllamaAdapter:
 
     def __init__(self, settings: ProviderSettings):
         self.settings = settings
+
+    @staticmethod
+    def supports_file_kind(*, model: str, kind: str) -> bool:
+        del model
+        return kind == "image"
 
     def generate(self, *, model: str, prompt: str, request: RequestEnvelope) -> AdapterResponse:
         url = self._chat_url()
@@ -130,7 +136,11 @@ class OllamaAdapter:
             )
         return sorted(models, key=lambda model: model.id)
 
-    def embed(self, *, model: str, input: Any) -> EmbeddingResponse:
+    def embed(self, *, model: str, input: Any, dimensions: int | None = None) -> EmbeddingResponse:
+        if dimensions is not None:
+            raise CrupierModelUnsupportedError(
+                "Ollama embeddings do not expose provider-side output dimensions; choose a model with the required size."
+            )
         payload = {"model": model, "input": input}
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(self._embed_url(), data=data, headers=self._headers(), method="POST")
@@ -267,7 +277,7 @@ class OllamaAdapter:
                 text_seen = True
             if event_count >= 20 and text_seen:
                 break
-        ok = event_count > 0
+        ok = event_count > 0 and text_seen
         return AdapterResponse(
             text="",
             raw=None,
@@ -353,7 +363,7 @@ class OllamaAdapter:
             and not base.startswith("http://127.0.0.1")
         )
 
-    def _raise_http_error(self, exc: urllib.error.HTTPError) -> None:
+    def _raise_http_error(self, exc: urllib.error.HTTPError) -> NoReturn:
         body = exc.read().decode("utf-8", errors="replace")
         message = body or str(exc)
         if exc.code in {401, 403}:

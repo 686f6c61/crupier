@@ -33,7 +33,7 @@ def estimate_route_cost(plan: RoutePlan, request: RequestEnvelope, cards: list[C
     return CostEstimate(estimated_usd=round(total, 8))
 
 
-def actual_cost_from_calls(calls: list[dict[str, Any]], cards: list[CapabilityCard]) -> float | None:
+def usage_estimated_cost_from_calls(calls: list[dict[str, Any]], cards: list[CapabilityCard]) -> float | None:
     cards_by_key = {card.model_ref.key: card for card in cards}
     total = 0.0
     any_usage = False
@@ -53,6 +53,30 @@ def actual_cost_from_calls(calls: list[dict[str, Any]], cards: list[CapabilityCa
             output_tokens=int(output_tokens or 0),
         )
     return round(total, 8) if any_usage else None
+
+
+def actual_cost_from_calls(calls: list[dict[str, Any]], cards: list[CapabilityCard]) -> float | None:
+    """Return provider-reported billed cost only when every metered call reports it."""
+
+    del cards  # Kept in the signature for compatibility with the prior internal helper.
+    total = 0.0
+    metered_calls = 0
+    for call in calls:
+        usage = call.get("usage") or {}
+        if not isinstance(usage, dict) or not usage:
+            continue
+        has_tokens = _usage_value(usage, "input_tokens", "prompt_tokens", "prompt_eval_count") is not None
+        has_tokens = has_tokens or _usage_value(
+            usage, "output_tokens", "completion_tokens", "eval_count"
+        ) is not None
+        if not has_tokens:
+            continue
+        metered_calls += 1
+        value = _first_number(usage, "cost_usd", "total_cost_usd", "cost")
+        if value is None:
+            return None
+        total += value
+    return round(total, 8) if metered_calls else None
 
 
 def estimate_model_cost(card: CapabilityCard | None, *, input_tokens: int, output_tokens: int) -> float:

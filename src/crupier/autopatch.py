@@ -40,5 +40,5 @@ def _patch_openai(**client_kwargs: Any) -> bool:
             merged = {**client_kwargs, **kwargs}
             super().__init__(**merged)
 
-    openai.OpenAI = PatchedOpenAI
+    setattr(openai, "OpenAI", PatchedOpenAI)
     return True

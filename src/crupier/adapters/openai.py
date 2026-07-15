@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, NoReturn
 
 from crupier.config import ProviderSettings
 from crupier.errors import (
@@ -13,7 +13,7 @@ from crupier.errors import (
     CrupierProviderUnavailableError,
 )
 from crupier.models import RequestEnvelope
-from crupier.multimodal import native_image_payloads
+from crupier.multimodal import native_file_payloads
 from crupier.structured import schema_from_request
 
 from .base import AdapterResponse, EmbeddingResponse, ProviderModel
@@ -34,15 +34,34 @@ class OpenAIAdapter:
         self.settings = settings
         self._client: Any = None
 
+    @staticmethod
+    def supports_file_kind(*, model: str, kind: str) -> bool:
+        del model
+        return kind in {"image", "pdf"}
+
     def generate(self, *, model: str, prompt: str, request: RequestEnvelope) -> AdapterResponse:
         client = self._client or self._build_client()
         self._client = client
         input_payload: Any = prompt or build_prompt(request)
-        image_payloads = []
+        native_payloads = []
         if request.files:
-            image_payloads = native_image_payloads(request.files)
+            native_payloads = native_file_payloads(
+                request.files,
+                allowed_kinds={"image", "pdf"},
+                max_bytes=int(request.constraints.get("max_native_file_bytes", 20_000_000)),
+            )
             content: list[dict[str, Any]] = [{"type": "input_text", "text": input_payload}]
-            content.extend({"type": "input_image", "image_url": image["data_url"]} for image in image_payloads)
+            for item in native_payloads:
+                if item["kind"] == "image":
+                    content.append({"type": "input_image", "image_url": item["data_url"]})
+                else:
+                    content.append(
+                        {
+                            "type": "input_file",
+                            "filename": item["name"],
+                            "file_data": item["data_url"],
+                        }
+                    )
             input_payload = [{"role": "user", "content": content}]
         payload: dict[str, Any] = {
             "model": model,
@@ -74,7 +93,8 @@ class OpenAIAdapter:
             "provider": self.provider,
             "model": model,
             "api": "responses.create",
-            "multimodal_images": len(image_payloads),
+            "multimodal_images": sum(item["kind"] == "image" for item in native_payloads),
+            "native_files": sum(item["kind"] != "image" for item in native_payloads),
             "response_format": "json_schema" if response_schema else None,
             "removed_params": removed_params,
         }
@@ -103,11 +123,16 @@ class OpenAIAdapter:
             models.append(ProviderModel(id=str(model_id), provider=self.provider, metadata=metadata))
         return sorted(models, key=lambda model: model.id)
 
-    def embed(self, *, model: str, input: Any) -> EmbeddingResponse:
+    def embed(self, *, model: str, input: Any, dimensions: int | None = None) -> EmbeddingResponse:
         client = self._client or self._build_client()
         self._client = client
+        payload: dict[str, Any] = {"model": model, "input": input}
+        if dimensions is not None:
+            if dimensions <= 0:
+                raise CrupierProviderUnavailableError("Embedding dimensions must be positive.", retryable=False)
+            payload["dimensions"] = dimensions
         try:
-            response = client.embeddings.create(model=model, input=input)
+            response = client.embeddings.create(**payload)
         except Exception as exc:  # noqa: BLE001
             self._raise_mapped_error(exc)
 
@@ -223,7 +248,7 @@ class OpenAIAdapter:
             payload: dict[str, Any] = {
                 "model": model,
                 "input": 'Reply with exactly: "stream-ok"',
-                "max_output_tokens": 16,
+                "max_output_tokens": int(request.constraints.get("max_output_tokens", 256)),
                 "stream": True,
             }
             timeout = request_timeout_seconds(request)
@@ -240,7 +265,7 @@ class OpenAIAdapter:
                     break
         except Exception as exc:  # noqa: BLE001
             self._raise_mapped_error(exc)
-        ok = event_count > 0
+        ok = event_count > 0 and text_seen
         return AdapterResponse(
             text="",
             raw=None,
@@ -287,7 +312,7 @@ class OpenAIAdapter:
                     self._raise_mapped_error(repaired_exc)
             self._raise_mapped_error(exc)
 
-    def _raise_mapped_error(self, exc: Exception) -> None:
+    def _raise_mapped_error(self, exc: Exception) -> NoReturn:
         name = exc.__class__.__name__.lower()
         if "auth" in name or "permission" in name:
             raise CrupierProviderAuthError(str(exc), provider=self.provider, env_key=self.settings.env_key) from exc

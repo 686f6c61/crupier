@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .errors import CrupierError
-from .models import CrupierResult, RequestEnvelope
+from .models import CrupierResult, OperationResult, RequestEnvelope
 
 
 @dataclass(slots=True)
@@ -51,7 +51,7 @@ class TraceStore:
         *,
         project: str,
         request: RequestEnvelope,
-        result: CrupierResult,
+        result: CrupierResult | OperationResult,
         dry_run: bool,
         trace_level: bool | str,
     ) -> Path | None:
@@ -133,7 +133,7 @@ class TraceStore:
         *,
         project: str,
         request: RequestEnvelope,
-        result: CrupierResult,
+        result: CrupierResult | OperationResult,
         dry_run: bool,
         trace_level: bool | str,
     ) -> dict[str, Any]:
@@ -141,7 +141,7 @@ class TraceStore:
         decision = result.trace.storage_decision
         store_prompt = bool(decision.get("store_prompt", False))
         store_response = bool(decision.get("store_response", False))
-        replayable = store_prompt and not request.tools
+        replayable = store_prompt and not request.tools and isinstance(result, CrupierResult)
         return {
             "schema_version": 1,
             "trace_id": result.trace.trace_id,
@@ -193,7 +193,12 @@ def _request_record(request: RequestEnvelope, *, store_prompt: bool) -> dict[str
     return data
 
 
-def _result_record(result: CrupierResult, *, store_response: bool, store_prompt: bool) -> dict[str, Any]:
+def _result_record(
+    result: CrupierResult | OperationResult,
+    *,
+    store_response: bool,
+    store_prompt: bool,
+) -> dict[str, Any]:
     metadata = dict(result.provider_metadata)
     if "tool_calls" in metadata:
         metadata["tool_calls"] = [_safe_tool_call(call, store_prompt=store_prompt, store_response=store_response) for call in metadata["tool_calls"]]
@@ -204,6 +209,14 @@ def _result_record(result: CrupierResult, *, store_response: bool, store_prompt:
         "warnings": result.warnings,
         "provider_metadata": _jsonable(metadata),
     }
+    if isinstance(result, OperationResult):
+        data.update({"operation": result.operation, "model": result.model, "usage": result.usage})
+        if store_response:
+            if isinstance(result.data, bytes | bytearray):
+                data["data"] = {"bytes": len(result.data), "binary_content_stored": False}
+            else:
+                data["data"] = _jsonable(_redact_value(result.data))
+        return data
     if store_response:
         data["output_text"] = _redact(result.output_text)
         data["output_json"] = _jsonable(_redact_value(result.output_json))

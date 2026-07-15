@@ -22,7 +22,7 @@ from .feedback import (
 )
 from .learning import suggest_scoring_from_project
 from .models import ModelRef
-from .probes import AVAILABLE_PROBES
+from .probes import AVAILABLE_PROBES, OPERATION_PROBES
 from .adapters.google import google_env_label, google_env_present
 from .release import ReleaseCheck, check_project_urls_reachable, check_pypi_project_name, run_release_checks
 from .project_audit import (
@@ -51,7 +51,7 @@ from .project_audit import (
 from .server import build_openai_compatible_server
 from .version import __version__
 
-REAL_PROVIDER_CHOICES = ("openai", "anthropic", "google", "ollama", "openrouter")
+REAL_PROVIDER_CHOICES = ("openai", "anthropic", "google", "ollama", "openrouter", "inference", "nan")
 SMOKE_MAX_OUTPUT_TOKENS = 128
 DEFAULT_PROVIDER_ENV_KEYS = {
     "openai": "OPENAI_API_KEY",
@@ -59,6 +59,8 @@ DEFAULT_PROVIDER_ENV_KEYS = {
     "google": "GOOGLE_API_KEY",
     "ollama": "OLLAMA_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
+    "inference": "INFERENCE_API_KEY",
+    "nan": "NAN_API_KEY",
 }
 _ENV_FILE_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -140,6 +142,11 @@ def build_parser() -> argparse.ArgumentParser:
     orchestrator_set.add_argument("--fallback", help="Fallback behavior after model orchestrators fail")
     orchestrator_set.add_argument("--temperature", type=float, help="Orchestrator model temperature")
     orchestrator_set.add_argument("--max-repairs", type=int, help="Maximum model-plan repair attempts")
+    orchestrator_set.add_argument(
+        "--candidate-limit",
+        type=int,
+        help="Maximum diverse candidate cards shown to the model orchestrator (2-32)",
+    )
     orchestrator_set.add_argument(
         "--require-validated-plan",
         action=argparse.BooleanOptionalAction,
@@ -592,7 +599,13 @@ def build_parser() -> argparse.ArgumentParser:
     deal.add_argument("--strategy", default=None, help="Force a strategy")
     deal.add_argument("--force-model", help="Force an exact allowed model ref, e.g. openai:gpt-5.4-mini")
     deal.add_argument("--max-cost-usd", type=float, help="Hard budget for this request")
+    deal.add_argument("--max-latency-ms", type=int, help="End-to-end latency budget for planning and execution")
     deal.add_argument("--max-output-tokens", type=int, help="Provider output token cap")
+    deal.add_argument(
+        "--file-strategy",
+        choices=["auto", "native", "extract"],
+        help="Choose automatic, provider-native, or extracted file handling",
+    )
     deal.add_argument("--response-schema", help="JSON Schema object for structured output")
     deal.add_argument("--trace", choices=["none", "summary", "debug"], default="none")
     deal.add_argument("--store-trace", action="store_true", help="Persist a trace under .crupier/traces")
@@ -610,6 +623,7 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--strategy", default=None, help="Force a strategy")
     route.add_argument("--force-model", help="Force an exact allowed model ref, e.g. openai:gpt-5.4-mini")
     route.add_argument("--max-cost-usd", type=float, help="Hard budget for this request")
+    route.add_argument("--max-latency-ms", type=int, help="End-to-end latency budget for planning and execution")
     route.add_argument("--max-output-tokens", type=int, help="Provider output token cap")
     route.add_argument("--response-schema", help="JSON Schema object for structured output")
     route.add_argument("--json", action="store_true", help="Print JSON")
@@ -673,6 +687,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["strict", "balanced", "aggressive", "locked"],
         default="balanced",
         help="How much Crupier may adapt requested models",
+    )
+    serve.add_argument(
+        "--max-request-bytes",
+        type=int,
+        default=10_000_000,
+        help="Maximum JSON or multipart request body size",
     )
     serve.add_argument("--no-dry-run", action="store_true", help="Attempt real provider execution")
     serve.set_defaults(func=cmd_serve)
@@ -959,6 +979,7 @@ def cmd_orchestrator_show(args: argparse.Namespace) -> int:
         "temperature": config.orchestrator.temperature,
         "require_validated_plan": config.orchestrator.require_validated_plan,
         "max_repairs": config.orchestrator.max_repairs,
+        "candidate_limit": config.orchestrator.candidate_limit,
         "allow_prompt_summary_only": config.orchestrator.allow_prompt_summary_only,
     }
     if args.json:
@@ -979,6 +1000,7 @@ def cmd_orchestrator_set(args: argparse.Namespace) -> int:
             args.temperature is not None,
             args.require_validated_plan is not None,
             args.max_repairs is not None,
+            args.candidate_limit is not None,
             args.allow_prompt_summary_only is not None,
         ]
     ):
@@ -995,6 +1017,7 @@ def cmd_orchestrator_set(args: argparse.Namespace) -> int:
         temperature=args.temperature,
         require_validated_plan=args.require_validated_plan,
         max_repairs=args.max_repairs,
+        candidate_limit=args.candidate_limit,
         allow_prompt_summary_only=args.allow_prompt_summary_only,
     )
     config = CrupierConfig.from_toml(args.project)
@@ -1007,6 +1030,7 @@ def cmd_orchestrator_set(args: argparse.Namespace) -> int:
         "temperature": config.orchestrator.temperature,
         "require_validated_plan": config.orchestrator.require_validated_plan,
         "max_repairs": config.orchestrator.max_repairs,
+        "candidate_limit": config.orchestrator.candidate_limit,
         "allow_prompt_summary_only": config.orchestrator.allow_prompt_summary_only,
     }
     if args.json:
@@ -1018,6 +1042,7 @@ def cmd_orchestrator_set(args: argparse.Namespace) -> int:
     print(f"fallback_model: {config.orchestrator.fallback_model}")
     print(f"fallback: {config.orchestrator.fallback}")
     print(f"max_repairs: {config.orchestrator.max_repairs}")
+    print(f"candidate_limit: {config.orchestrator.candidate_limit}")
     return 0
 
 
@@ -1900,7 +1925,7 @@ def cmd_adopt_package(args: argparse.Namespace) -> int:
     )
     artifact_groups["adoption_handoff"] = [str(path) for path in write_adoption_handoff_report(args.project, handoff)]
     written_files = [path for paths_for_group in artifact_groups.values() for path in paths_for_group]
-    payload = {
+    payload: dict[str, Any] = {
         "project": project_name,
         "status": handoff.status,
         "ready": handoff.ready,
@@ -1931,8 +1956,8 @@ def cmd_adopt_package(args: argparse.Namespace) -> int:
             for path in paths_for_group:
                 print(f"    {path}")
         print("package_index:")
-        for path in package_paths:
-            print(f"  {path}")
+        for package_path in package_paths:
+            print(f"  {package_path}")
         if handoff.required_human_actions:
             print("human_actions:")
             for action in handoff.required_human_actions:
@@ -2370,6 +2395,7 @@ def cmd_smoke(args: argparse.Namespace) -> int:
                 constraints={
                     "force_model": model_ref,
                     "max_output_tokens": SMOKE_MAX_OUTPUT_TOKENS,
+                    "disable_thinking": True,
                     "store_prompt": False,
                     "store_response": False,
                 },
@@ -2443,8 +2469,16 @@ def cmd_serve(args: argparse.Namespace) -> int:
         compat_mode=args.compat_mode,
         allow_remote=args.allow_remote,
         cors_origin=args.cors_origin,
+        max_request_bytes=args.max_request_bytes,
     )
-    host, port = server.server_address
+    address = server.server_address
+    if isinstance(address, tuple):
+        raw_host, raw_port = address[0], address[1]
+        host = raw_host.decode() if isinstance(raw_host, bytes) else str(raw_host)
+        port = int(raw_port)
+    else:
+        host = address.decode() if isinstance(address, bytes) else str(address)
+        port = int(args.port)
     print(f"crupier serve: http://{host}:{port}/v1 ({args.compat}, mode={args.compat_mode})", file=sys.stderr)
     print("Set OPENAI_BASE_URL to this URL for OpenAI-compatible clients.", file=sys.stderr)
     if args.cors_origin:
@@ -2480,10 +2514,14 @@ def _cli_constraints(args: argparse.Namespace) -> dict[str, Any]:
     constraints: dict[str, Any] = {}
     if getattr(args, "max_cost_usd", None) is not None:
         constraints["max_cost_usd"] = args.max_cost_usd
+    if getattr(args, "max_latency_ms", None) is not None:
+        constraints["max_latency_ms"] = args.max_latency_ms
     if getattr(args, "max_output_tokens", None) is not None:
         constraints["max_output_tokens"] = args.max_output_tokens
     if getattr(args, "force_model", None):
         constraints["force_model"] = args.force_model
+    if getattr(args, "file_strategy", None):
+        constraints["file_strategy"] = args.file_strategy
     if getattr(args, "store_trace", False) or getattr(args, "store_prompt", False) or getattr(args, "store_response", False):
         constraints["store_trace"] = True
     if getattr(args, "store_prompt", False):
@@ -2523,8 +2561,8 @@ def _smoke_model_refs(
     all_models: bool,
 ) -> list[str]:
     if explicit:
-        refs = [ModelRef.parse(model).key for model in explicit]
-        return [model for model in refs if provider is None or ModelRef.parse(model).provider == provider]
+        explicit_refs = [ModelRef.parse(model).key for model in explicit]
+        return [model for model in explicit_refs if provider is None or ModelRef.parse(model).provider == provider]
 
     enabled = {
         name
@@ -2714,6 +2752,21 @@ def _run_smoke_checks(client: Crupier, model_refs: list[str]) -> list[dict[str, 
         if card.model_kind == "embedding" or (card.supports_embeddings and card.modalities_output == ["embedding"]):
             results.append(_run_embedding_smoke(client, model_ref))
             continue
+        if card.model_kind in OPERATION_PROBES:
+            results.append(_run_operation_smoke(client, model_ref, card.model_kind))
+            continue
+        if card.model_kind != "chat":
+            results.append(
+                {
+                    "ok": True,
+                    "model": model_ref,
+                    "provider": ModelRef.parse(model_ref).provider,
+                    "kind": card.model_kind,
+                    "skipped": True,
+                    "reason": "No public execution facade exists for this model kind.",
+                }
+            )
+            continue
         try:
             result = client.deal(
                 task='Smoke test. Reply with exactly: "crupier-ok"',
@@ -2722,6 +2775,7 @@ def _run_smoke_checks(client: Crupier, model_refs: list[str]) -> list[dict[str, 
                 constraints={
                     "force_model": model_ref,
                     "max_output_tokens": SMOKE_MAX_OUTPUT_TOKENS,
+                    "disable_thinking": True,
                     "store_prompt": False,
                     "store_response": False,
                 },
@@ -2776,6 +2830,28 @@ def _run_embedding_smoke(client: Crupier, model_ref: str) -> dict[str, Any]:
         }
 
 
+def _run_operation_smoke(client: Crupier, model_ref: str, operation: str) -> dict[str, Any]:
+    ref = ModelRef.parse(model_ref)
+    try:
+        report = client.capabilities.probe([model_ref], probes=[operation], apply=False)
+        result = report.results[0]
+        return {
+            "ok": result.status == "verified" and result.ok is True,
+            "model": model_ref,
+            "provider": ref.provider,
+            "kind": operation,
+            "latency_ms": result.latency_ms,
+            **({"error_type": result.error_type, "error": result.error} if result.error else {}),
+        }
+    except Exception as exc:  # noqa: BLE001 - verification reports per-model failures
+        return {
+            "ok": False,
+            "model": model_ref,
+            "provider": ref.provider,
+            "kind": operation,
+            "error_type": exc.__class__.__name__,
+            "error": _redact_secrets(str(exc)),
+        }
 def _provider_verify_status(item: dict[str, Any], *, run_smoke: bool) -> str:
     if item["issues"]:
         return "failed"
@@ -2793,9 +2869,11 @@ def _provider_verify_status(item: dict[str, Any], *, run_smoke: bool) -> str:
 def _provider_env_status(settings: Any, provider: str) -> dict[str, Any]:
     env_key = getattr(settings, "env_key", None) or DEFAULT_PROVIDER_ENV_KEYS.get(provider)
     host = getattr(settings, "host", None)
-    required = provider in {"openai", "anthropic", "google", "openrouter"} or (
+    required = provider in {"openai", "anthropic", "google", "openrouter", "nan"} or (
         provider == "ollama" and _ollama_cloud_host(host)
     )
+    if provider == "inference":
+        required = str(getattr(settings, "options", {}).get("auth", "")).lower() != "none"
     if provider == "google":
         present = google_env_present(settings)
         env_key = google_env_label(settings)
@@ -2901,8 +2979,8 @@ def _capability_probe_model_refs(
     all_models: bool,
 ) -> list[str]:
     if explicit:
-        refs = [ModelRef.parse(model).key for model in explicit]
-        return [model for model in refs if provider is None or ModelRef.parse(model).provider == provider]
+        explicit_refs = [ModelRef.parse(model).key for model in explicit]
+        return [model for model in explicit_refs if provider is None or ModelRef.parse(model).provider == provider]
 
     cards = client.registry.list(allowed_only=not all_models)
     refs: list[str] = []

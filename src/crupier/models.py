@@ -171,7 +171,7 @@ class CapabilityCard:
             local_eval_scores=dict(data.get("local_eval_scores", {})),
             capability_status=dict(data.get("capability_status", {})),
             probe_results=dict(data.get("probe_results", {})),
-            deprecation=dict(data.get("deprecation", {})),
+            deprecation=dict(data.get("deprecation") or {}),
             strengths=list(data.get("strengths", [])),
             cost_tier=data.get("cost_tier", "unknown"),
             latency_tier=data.get("latency_tier", "unknown"),
@@ -490,6 +490,36 @@ class CrupierResult:
             "latency_ms": self.latency_ms,
             "warnings": self.warnings,
             "provider_metadata": self.provider_metadata,
+        }
+
+
+@dataclass(slots=True)
+class OperationResult:
+    operation: str
+    model: str
+    data: Any = None
+    raw: Any = None
+    route: RoutePlan | None = None
+    trace: DecisionTrace | None = None
+    cost: CostEstimate = field(default_factory=CostEstimate)
+    latency_ms: int | None = None
+    usage: dict[str, Any] = field(default_factory=dict)
+    provider_metadata: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self, *, trace_summary: bool = True) -> dict[str, Any]:
+        data = {"bytes": len(self.data)} if isinstance(self.data, bytes | bytearray) else self.data
+        return {
+            "operation": self.operation,
+            "model": self.model,
+            "data": data,
+            "route": self.route.to_dict() if self.route else None,
+            "trace": self.trace.to_dict(summary=trace_summary) if self.trace else None,
+            "cost": self.cost.to_dict(),
+            "latency_ms": self.latency_ms,
+            "usage": self.usage,
+            "provider_metadata": self.provider_metadata,
+            "warnings": self.warnings,
         }
 
 

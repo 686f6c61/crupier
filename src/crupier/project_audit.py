@@ -699,6 +699,7 @@ class ProjectAuditRunner:
                     "force_model": model_ref,
                     "max_output_tokens": 16,
                     "max_cost_usd": 0.02,
+                    "disable_thinking": True,
                     "store_prompt": False,
                     "store_response": False,
                 },
@@ -729,7 +730,12 @@ class ProjectAuditRunner:
                 task="Extract invoice data for the project audit.",
                 input="Invoice for Ada, total 12.50",
                 response_schema=schema,
-                constraints={"force_model": model_ref, "max_output_tokens": 120, "max_cost_usd": 0.02},
+                constraints={
+                    "force_model": model_ref,
+                    "max_output_tokens": 120,
+                    "max_cost_usd": 0.02,
+                    "disable_thinking": True,
+                },
                 dry_run=False,
                 trace="summary",
             )
@@ -754,7 +760,12 @@ class ProjectAuditRunner:
             result = self.client.deal(
                 task="Use the lookup_user tool to find Ada. Answer with only the user id and plan.",
                 tools=[lookup_user],
-                constraints={"force_model": model_ref, "max_output_tokens": 120, "max_cost_usd": 0.02},
+                constraints={
+                    "force_model": model_ref,
+                    "max_output_tokens": 120,
+                    "max_cost_usd": 0.02,
+                    "disable_thinking": True,
+                },
                 dry_run=False,
                 trace="summary",
             )
@@ -787,7 +798,12 @@ class ProjectAuditRunner:
             result = self.client.deal(
                 task="Read the attached text file. What is the audit passphrase? Answer exactly one word.",
                 files=[file_path],
-                constraints={"force_model": model_ref, "max_output_tokens": 20, "max_cost_usd": 0.02},
+                constraints={
+                    "force_model": model_ref,
+                    "max_output_tokens": 20,
+                    "max_cost_usd": 0.02,
+                    "disable_thinking": True,
+                },
                 dry_run=False,
                 trace="summary",
             )
@@ -819,7 +835,12 @@ class ProjectAuditRunner:
             result = self.client.deal(
                 task="This image is a single solid color. What color is it? Answer exactly one word.",
                 files=[image_path],
-                constraints={"force_model": model_ref, "max_output_tokens": 20, "max_cost_usd": 0.02},
+                constraints={
+                    "force_model": model_ref,
+                    "max_output_tokens": 20,
+                    "max_cost_usd": 0.02,
+                    "disable_thinking": True,
+                },
                 dry_run=False,
                 trace="summary",
             )
@@ -1605,14 +1626,15 @@ def _doctor_real_canary_gate(report: ProjectAuditReport, *, real: bool, producti
     )
 
 
+def _is_confident_history_score(score: Any) -> bool:
+    appearances = getattr(score, "appearances", 0)
+    return str(getattr(score, "confidence", "")) in {"medium", "high"} and isinstance(appearances, int) and appearances > 0
+
+
 def _doctor_eval_history_gate(history: Any, *, production: bool) -> DoctorGate:
     total_runs = int(getattr(history, "total_runs", 0) or 0)
     scores = list(getattr(history, "model_scores", []) or [])
-    confident_scores = [
-        score
-        for score in scores
-        if getattr(score, "confidence", "") in {"medium", "high"} and getattr(score, "appearances", 0)
-    ]
+    confident_scores = [score for score in scores if _is_confident_history_score(score)]
     if total_runs == 0:
         return DoctorGate(
             id="eval_history",

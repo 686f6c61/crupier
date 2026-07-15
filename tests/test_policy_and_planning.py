@@ -1,8 +1,12 @@
+from threading import Barrier
+
+import pytest
+
 from crupier import Crupier
 from crupier.adapters import AdapterResponse, ProviderModel
-from crupier.config import CrupierConfig, PolicyRule
+from crupier.config import CrupierConfig, PolicyRule, ProviderSettings
 from crupier.errors import CrupierPolicyError, CrupierProviderAuthError, CrupierRouteValidationError
-from crupier.models import CapabilityCard, ModelRef, RequestEnvelope
+from crupier.models import CapabilityCard, ModelRef, RequestEnvelope, RoutePlan, RouteStep
 from crupier.orchestrator import DeterministicOrchestrator, ModelOrchestrator
 from crupier.planner import RoutePlanner
 from crupier.policy import PolicyEngine
@@ -82,6 +86,17 @@ class FakeBrokenListAdapter(FakeVisibleModelsAdapter):
         raise CrupierProviderAuthError("bad key", provider="openai", env_key="OPENAI_API_KEY")
 
 
+class ConcurrentDiscoveryAdapter:
+    def __init__(self, provider, model, barrier):
+        self.provider = provider
+        self.model = model
+        self.barrier = barrier
+
+    def list_models(self):
+        self.barrier.wait(timeout=2)
+        return [ProviderModel(id=self.model, provider=self.provider)]
+
+
 def test_policy_filters_latest_aliases(tmp_path):
     config = make_config(tmp_path, allow=["openai:gpt-latest"])
     registry = ModelRegistry(config)
@@ -130,6 +145,32 @@ def test_client_blocks_provider_with_non_operational_api_key(tmp_path):
         raise AssertionError("provider with invalid API key should be blocked before routing")
 
 
+def test_client_checks_distinct_provider_visibility_concurrently(tmp_path):
+    config = make_config(tmp_path, allow=["openai:gpt-5.5", "anthropic:claude-opus-4-8"])
+    config.routing.require_operational_providers = True
+    barrier = Barrier(2)
+    client = Crupier(
+        config,
+        adapters={
+            "openai": ConcurrentDiscoveryAdapter("openai", "gpt-5.5", barrier),
+            "anthropic": ConcurrentDiscoveryAdapter("anthropic", "claude-opus-4-8", barrier),
+        },
+    )
+
+    allowed, excluded, filters = client._filter_operational_candidates(
+        RequestEnvelope(task="x"),
+        client.registry.allowed_cards(),
+        dry_run=False,
+    )
+
+    assert {card.model_ref.key for card in allowed} == {
+        "openai:gpt-5.5",
+        "anthropic:claude-opus-4-8",
+    }
+    assert excluded == []
+    assert filters == []
+
+
 def test_policy_rejects_deprecated_models_by_default(tmp_path):
     config = make_config(tmp_path, allow=["openai:gpt-5.2-chat-latest"])
     registry = ModelRegistry(config)
@@ -141,6 +182,21 @@ def test_policy_rejects_deprecated_models_by_default(tmp_path):
         assert "deprecated or shut down" in str(exc)
     else:
         raise AssertionError("deprecated model should have been rejected")
+
+
+def test_policy_rejects_model_whose_provider_is_not_configured(tmp_path):
+    config = make_config(tmp_path, allow=[])
+    card = CapabilityCard(
+        model_ref=ModelRef.parse("custom:chat-model"),
+        last_updated="test",
+    )
+
+    try:
+        PolicyEngine(config).filter_candidates(RequestEnvelope(task="x"), [card])
+    except CrupierPolicyError as exc:
+        assert "provider 'custom' is not configured" in str(exc)
+    else:
+        raise AssertionError("models from unconfigured providers must not be routable")
 
 
 def test_private_mode_prefers_ollama_local_first(tmp_path):
@@ -373,7 +429,79 @@ def test_model_orchestrator_accepts_valid_validated_plan(tmp_path):
     assert "candidate_cards" in adapter.prompts[0]
     assert "routing_status" in adapter.prompts[0]
     assert "best_skills" in adapter.prompts[0]
-    assert "Prompt-Version: orchestrator.route_plan.v1" in adapter.prompts[0]
+    assert "Prompt-Version: orchestrator.route_plan.v3" in adapter.prompts[0]
+    assert 'fusion never uses primary' in adapter.prompts[0]
+    call = context.request.metadata["_crupier_orchestrator_calls"][0]
+    assert call["plan_status"] == "validated"
+    assert call["strategy"] == "single"
+
+
+def test_policy_enforces_request_panel_size_bounds(tmp_path):
+    config = make_config(tmp_path)
+    policy = PolicyEngine(config)
+    cards = ModelRegistry(config).allowed_cards()
+    request = RequestEnvelope(
+        task="Compare alternatives",
+        constraints={"min_panel_size": 3, "max_panel_size": 3},
+    )
+    result = policy.filter_candidates(request, cards)
+
+    def plan(models):
+        return RoutePlan(
+            strategy="fusion",
+            steps=[
+                RouteStep(role="panel", models=models),
+                RouteStep(role="judge", model="openai:gpt-5.4-mini"),
+                RouteStep(role="final_writer", model="openai:gpt-5.5"),
+            ],
+        )
+
+    with pytest.raises(CrupierRouteValidationError, match="below min_panel_size=3"):
+        policy.validate_route(
+            plan(["openai:gpt-5.5", "anthropic:claude-opus-4-8"]),
+            result,
+            request,
+        )
+    policy.validate_route(
+        plan(["openai:gpt-5.5", "anthropic:claude-opus-4-8", "google:gemini-3.5-flash"]),
+        result,
+        request,
+    )
+
+
+def test_model_orchestrator_sends_a_bounded_diverse_compact_candidate_pool(tmp_path):
+    config = make_config(tmp_path)
+    config.orchestrator.mode = "model"
+    config.orchestrator.candidate_limit = 3
+    request = RequestEnvelope(task="Choose a fast and reliable model", mode="fast")
+    candidates = ModelRegistry(config).allowed_cards()
+    context = RoutePlanner(config).build_context(request, candidates, [f"allowlist:{len(candidates)}"])
+
+    payload = ModelOrchestrator(config, adapters={})._planning_payload(context)
+
+    assert payload["candidate_pool_total"] == len(candidates)
+    assert payload["candidate_pool_shown"] == 3
+    assert len(payload["candidate_models"]) == 3
+    assert len({card["provider"] for card in payload["candidate_cards"]}) == 3
+    assert {score["model"] for score in payload["deterministic_scores"]} == set(payload["candidate_models"])
+    assert all(len(score["top_terms"]) <= 5 for score in payload["deterministic_scores"])
+    assert all("reason" not in term for score in payload["deterministic_scores"] for term in score["top_terms"])
+    assert all("capability_status" not in card for card in payload["candidate_cards"])
+
+
+def test_model_orchestrator_exposes_profile_required_strategy_and_role_contract(tmp_path):
+    config = make_config(tmp_path)
+    config.orchestrator.mode = "model"
+    request = RequestEnvelope(task="Compare architectures", mode="research")
+    candidates = ModelRegistry(config).allowed_cards()
+
+    payload = ModelOrchestrator(config, adapters={})._planning_payload(
+        RoutePlanner(config).build_context(request, candidates, ["allowlist"])
+    )
+
+    assert payload["required_strategy"] == "fusion"
+    assert payload["allowed_strategies"] == ["fusion"]
+    assert payload["route_step_contract"]["fusion"] == ["panel", "judge", "final_writer"]
 
 
 def test_model_orchestrator_rejects_illegal_model_and_falls_back(tmp_path):
@@ -401,6 +529,10 @@ def test_model_orchestrator_rejects_illegal_model_and_falls_back(tmp_path):
     assert "openai:not-allowed" not in plan.models
     assert plan.strategy == "fusion"
     assert "deterministic fallback" in plan.reason
+    assert context.request.metadata["_crupier_orchestrator_calls"][0]["plan_status"] == "invalid"
+    assert "required profile strategy 'fusion'" in context.request.metadata["_crupier_orchestrator_calls"][0][
+        "validation_error"
+    ]
 
 
 def test_model_orchestrator_uses_fallback_model_before_deterministic(tmp_path):
@@ -540,3 +672,15 @@ def test_model_orchestrator_rejects_agentic_high_risk_strategy_downgrade(tmp_pat
     assert plan.strategy == "critique_repair"
     assert "deterministic fallback" in plan.reason
     assert "strategy_guardrail" in adapter.prompts[0]
+
+
+def test_generative_policy_excludes_specialized_model_kinds(tmp_path):
+    config = make_config(tmp_path, allow=["nan:qwen3.6", "nan:qwen3-embedding"])
+    config.providers["nan"] = ProviderSettings(enabled=True, env_key="NAN_API_KEY")
+    cards = ModelRegistry(config).allowed_cards()
+
+    result = PolicyEngine(config).filter_candidates(RequestEnvelope(task="Classify this ticket"), cards)
+
+    assert [card.model_ref.key for card in result.allowed] == ["nan:qwen3.6"]
+    exclusion = next(item for item in result.excluded if item.model == "nan:qwen3-embedding")
+    assert "model kind 'embedding'" in exclusion.reason

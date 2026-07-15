@@ -87,9 +87,11 @@ jobs:
               raise SystemExit(f"Unsupported publish event {event!r}.")
           PY
       - name: Run tests
-        run: python -m pytest -q
-      - name: Run critical lint
-        run: python -m ruff check src tests --select E9,F63,F7,F82
+        run: python -m pytest -q --cov=crupier --cov-report=term --cov-fail-under=95
+      - name: Run lint
+        run: python -m ruff check src tests
+      - name: Check public package types
+        run: python -m mypy src/crupier
       - name: Audit Python dependencies
         run: python -m pip_audit --skip-editable --progress-spinner off
       - name: Release readiness check

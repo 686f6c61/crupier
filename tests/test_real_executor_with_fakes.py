@@ -1,8 +1,12 @@
+from datetime import datetime, timezone
+from time import sleep
+
 from crupier import Crupier
 from crupier.adapters import AdapterResponse
 from crupier.config import CrupierConfig
 from crupier.errors import (
     CrupierBudgetExceededError,
+    CrupierExecutionLimitError,
     CrupierProviderRateLimitError,
     CrupierProviderUnavailableError,
     CrupierToolApprovalRequired,
@@ -82,7 +86,101 @@ def test_real_single_uses_injected_adapter(tmp_path):
     assert adapter.calls[0]["model"] == "gpt-5.4-mini"
     assert result.trace is not None
     assert result.trace.provider_calls[0]["provider"] == "openai"
-    assert result.cost.actual_usd is not None
+    assert result.cost.estimated_usd > 0
+    assert result.cost.actual_usd is None
+
+
+def test_forced_model_bypasses_model_orchestrator_and_uses_one_call(tmp_path):
+    adapter = FakeAdapter("openai", outputs=["forced answer"])
+    config = make_config(tmp_path, allow=["openai:gpt-5.4-mini"])
+    config.orchestrator.mode = "model"
+    config.orchestrator.model = "openai:gpt-5.4-mini"
+    client = Crupier(config, adapters={"openai": adapter})
+
+    result = client.deal(
+        "Say hi",
+        constraints={"force_model": "openai:gpt-5.4-mini", "max_calls": 1},
+        dry_run=False,
+        trace="debug",
+    )
+
+    assert result.output_text == "forced answer"
+    assert len(adapter.calls) == 1
+    assert result.provider_metadata["orchestrator_calls"] == []
+    assert result.trace is not None
+    assert result.trace.final_quality_signals["execution_budget"]["calls_started"] == 1
+    assert "force_model already determines the route" in result.route.reason
+
+
+def test_model_orchestrator_call_consumes_complete_request_call_budget(tmp_path):
+    route = """
+    {
+      "strategy": "single",
+      "steps": [{"role": "primary", "model": "openai:gpt-5.4-mini"}],
+      "reason": "Use the only available model.",
+      "risk_level": "medium",
+      "summary": "Single route."
+    }
+    """
+    adapter = FakeAdapter("openai", outputs=[route, "must not execute"])
+    config = make_config(tmp_path, allow=["openai:gpt-5.4-mini", "openai:gpt-5.5"])
+    config.orchestrator.mode = "model"
+    config.orchestrator.model = "openai:gpt-5.4-mini"
+    client = Crupier(config, adapters={"openai": adapter})
+
+    try:
+        client.deal("Say hi", constraints={"max_calls": 1}, dry_run=False, trace="debug")
+    except CrupierExecutionLimitError as exc:
+        assert "max_calls=1" in str(exc)
+    else:
+        raise AssertionError("execution should not exceed the call consumed by route planning")
+
+    assert len(adapter.calls) == 1
+
+
+def test_model_orchestrator_trace_identifies_validated_route_author(tmp_path):
+    route = """
+    {
+      "strategy": "single",
+      "steps": [{"role": "primary", "model": "openai:gpt-5.4-mini"}],
+      "reason": "Best fit.",
+      "risk_level": "medium",
+      "summary": "Single route."
+    }
+    """
+    adapter = FakeAdapter("openai", outputs=[route, "answer"])
+    config = make_config(
+        tmp_path,
+        allow=["openai:gpt-5.4-mini", "openai:gpt-5.5"],
+        strategy="orchestrated",
+    )
+    config.orchestrator.mode = "model"
+    config.orchestrator.model = "openai:gpt-5.4-mini"
+    client = Crupier(config, adapters={"openai": adapter})
+
+    result = client.deal("Say hi", dry_run=False, trace="debug")
+
+    assert result.output_text == "answer"
+    assert result.trace is not None
+    assert result.trace.orchestrator_model == "openai:gpt-5.4-mini"
+    assert result.trace.final_quality_signals["orchestrator_outcome"] == "validated_model_plan"
+    assert result.trace.final_quality_signals["orchestrator_validation_failures"] == 0
+    assert result.provider_metadata["orchestrator_calls"][0]["plan_status"] == "validated"
+
+
+def test_single_candidate_bypasses_model_orchestrator(tmp_path):
+    adapter = FakeAdapter("openai", outputs=["single answer"])
+    config = make_config(tmp_path, allow=["openai:gpt-5.4-mini"])
+    config.orchestrator.mode = "model"
+    config.orchestrator.model = "openai:gpt-5.4-mini"
+    client = Crupier(config, adapters={"openai": adapter})
+
+    result = client.deal("Say hi", constraints={"max_calls": 1}, dry_run=False, trace="debug")
+
+    assert result.output_text == "single answer"
+    assert len(adapter.calls) == 1
+    assert result.provider_metadata["orchestrator_calls"] == []
+    assert "filters left only one candidate" in result.route.reason
 
 
 def test_provider_call_retries_transient_error_then_succeeds(tmp_path):
@@ -107,6 +205,23 @@ def test_provider_call_retries_transient_error_then_succeeds(tmp_path):
     assert result.trace.final_quality_signals["provider_retry_errors"] == 1
 
 
+def test_provider_call_retries_and_accounts_for_empty_response(tmp_path):
+    adapter = FakeAdapter("openai", outputs=["   ", "recovered after empty response"])
+    client = Crupier(
+        make_config(tmp_path, allow=["openai:gpt-5.4-mini"]),
+        adapters={"openai": adapter},
+    )
+
+    result = client.deal("Say hi", dry_run=False, trace="debug")
+
+    assert result.output_text == "recovered after empty response"
+    assert len(adapter.calls) == 2
+    assert [call["status"] for call in result.trace.provider_calls] == ["failed", "success"]
+    assert result.trace.provider_calls[0]["metadata"]["empty_response"] is True
+    assert result.trace.provider_calls[1]["attempt"] == 2
+    assert result.trace.errors[0]["retryable"] is True
+
+
 def test_provider_retry_can_be_disabled_per_request(tmp_path):
     adapter = FakeAdapter(
         "openai",
@@ -124,6 +239,27 @@ def test_provider_retry_can_be_disabled_per_request(tmp_path):
         pass
     else:
         raise AssertionError("provider retry should be disabled by request constraint")
+
+    assert len(adapter.calls) == 1
+
+
+def test_provider_retry_cannot_exceed_live_call_budget(tmp_path):
+    adapter = FakeAdapter(
+        "openai",
+        failures=[CrupierProviderRateLimitError("temporary rate limit")],
+        outputs=["must not run"],
+    )
+    client = Crupier(
+        make_config(tmp_path, allow=["openai:gpt-5.4-mini"]),
+        adapters={"openai": adapter},
+    )
+
+    try:
+        client.deal("Say hi", constraints={"max_calls": 1}, dry_run=False, trace="debug")
+    except CrupierExecutionLimitError as exc:
+        assert "max_calls=1" in str(exc)
+    else:
+        raise AssertionError("retry should be blocked after the live call budget is consumed")
 
     assert len(adapter.calls) == 1
 
@@ -231,8 +367,8 @@ def test_budget_blocks_before_provider_call(tmp_path):
 
 
 def test_real_fallback_tries_next_adapter(tmp_path):
-    openai = FakeAdapter("openai", fail=True)
-    anthropic = FakeAdapter("anthropic")
+    openai = FakeAdapter("openai")
+    anthropic = FakeAdapter("anthropic", fail=True)
     client = Crupier(
         make_config(tmp_path, allow=["openai:gpt-5.5", "anthropic:claude-opus-4-8"], strategy="fallback"),
         adapters={"openai": openai, "anthropic": anthropic},
@@ -240,11 +376,11 @@ def test_real_fallback_tries_next_adapter(tmp_path):
 
     result = client.deal("Use fallback", dry_run=False, trace="debug")
 
-    assert result.output_text == "anthropic:claude-opus-4-8: ok"
-    assert len(openai.calls) == 2
-    assert len(anthropic.calls) == 1
+    assert result.output_text == "openai:gpt-5.5: ok"
+    assert len(anthropic.calls) == 2
+    assert len(openai.calls) == 1
     assert result.trace is not None
-    assert result.trace.fallbacks[0]["model"] == "openai:gpt-5.5"
+    assert result.trace.fallbacks[0]["model"] == "anthropic:claude-opus-4-8"
     assert result.trace.errors[0]["max_provider_retries"] == 1
 
 
@@ -377,6 +513,88 @@ def test_real_tool_execution_can_replan_for_multiple_rounds(tmp_path):
     assert result.output_text == "Ada order ord_456 is shipped."
     assert [item["name"] for item in result.provider_metadata["tool_calls"]] == ["lookup_user", "lookup_order"]
     assert len(adapter.calls) == 3
+
+
+def test_tool_final_call_respects_live_call_budget(tmp_path):
+    def lookup_user(name: str):
+        return {"name": name}
+
+    adapter = FakeAdapter(
+        "openai",
+        outputs=['{"tool_calls":[{"name":"lookup_user","arguments":{"name":"Ada"}}]}'],
+    )
+    client = Crupier(
+        make_config(tmp_path, allow=["openai:gpt-5.4-mini"]),
+        adapters={"openai": adapter},
+    )
+
+    try:
+        client.deal(
+            "Lookup Ada",
+            tools=[lookup_user],
+            constraints={"max_calls": 1},
+            dry_run=False,
+            trace="debug",
+        )
+    except CrupierExecutionLimitError as exc:
+        assert "max_calls=1" in str(exc)
+    else:
+        raise AssertionError("tool finalization should not exceed the live provider-call budget")
+
+    assert len(adapter.calls) == 1
+
+
+def test_tool_results_are_json_safe_and_bounded(tmp_path):
+    def inspect_clock():
+        return {
+            "at": datetime(2026, 7, 14, tzinfo=timezone.utc),
+            "payload": "x" * 2000,
+        }
+
+    adapter = FakeAdapter(
+        "openai",
+        outputs=[
+            '{"tool_calls":[{"name":"inspect_clock","arguments":{}}]}',
+            "done",
+        ],
+    )
+    client = Crupier(
+        make_config(tmp_path, allow=["openai:gpt-5.4-mini"]),
+        adapters={"openai": adapter},
+    )
+
+    result = client.deal(
+        "Inspect clock",
+        tools=[inspect_clock],
+        constraints={"max_tool_result_chars": 300},
+        dry_run=False,
+    )
+
+    tool_result = result.provider_metadata["tool_calls"][0]["result"]
+    assert tool_result["truncated"] is True
+    assert tool_result["original_chars"] > 300
+    assert len(tool_result["preview"]) == 300
+    assert "2026-07-14" in tool_result["preview"]
+
+
+def test_provider_response_past_deadline_is_rejected(tmp_path):
+    class SlowAdapter(FakeAdapter):
+        def generate(self, *, model, prompt, request):
+            sleep(0.02)
+            return super().generate(model=model, prompt=prompt, request=request)
+
+    adapter = SlowAdapter("openai")
+    client = Crupier(
+        make_config(tmp_path, allow=["openai:gpt-5.4-mini"]),
+        adapters={"openai": adapter},
+    )
+
+    try:
+        client.deal("Say hi", constraints={"max_latency_ms": 1}, dry_run=False, trace="debug")
+    except CrupierExecutionLimitError as exc:
+        assert "max_latency_ms=1" in str(exc)
+    else:
+        raise AssertionError("a response arriving after the route deadline must be rejected")
 
 
 def test_real_tool_execution_blocks_sensitive_tool_without_approval(tmp_path):

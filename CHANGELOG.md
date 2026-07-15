@@ -2,6 +2,35 @@
 
 All notable changes to Crupier will be documented here.
 
+## 0.4.0 - 2026-07-15
+
+- Added real configurable inference-server coverage with live model discovery, chat/structured/streaming probes, native multimodal input, embeddings, model-kind classification, and curated routing cards without invented benchmarks or pricing.
+- Added capability-aware execution for provider-specific reranking, transcription, text-to-speech, image generation, and multi-reference image editing, with operation-specific validation and probes.
+- Added `Crupier.run()` model-powered operation classification plus explicit `embed`, `rerank`, `transcribe`, `synthesize`, `generate_image`, and `edit_image` methods under a shared end-to-end budget and trace.
+- Made newly initialized projects model-powered by default, while retaining deterministic scoring, policy validation, repair limits, and deterministic fallback; programmatic configs can still opt into deterministic-only routing.
+- Extended the OpenAI-like Python and HTTP surfaces with provider-neutral embeddings, reranking, images, speech, transcription, multipart uploads, binary responses, and bounded request bodies.
+- Made request budgets cover model-orchestrator planning as well as execution, retries, tools, parallel routes, and delegation; explicit `force_model` and single-candidate routes now bypass redundant LLM planning.
+- Corrected cost semantics so token-derived values remain estimates and `actual_usd` is only populated from provider-reported billed cost.
+- Added request-aware reasoning controls for Qwen, Gemma, DeepSeek, and Mimo families, with explicit caller settings taking precedence.
+- Added adapter-level native-file transport checks so model capability metadata cannot cause an adapter to silently omit images, audio, PDFs, or other files.
+- Added OpenAI native-PDF transport, provider-specific native-audio routing, automatic native audio while transcript preprocessing is unavailable, bounded file loading, and mixed extracted/native file execution.
+- Tightened runtime config validation, provider visibility caching, server request-size limits, embedding policy, retry/circuit-breaker budgets, tool result bounds, and multimodal data-URL handling.
+- Made capability probes model-kind aware and strengthened structured, streaming, tool, embedding, reranking, transcription, speech, and image probe evidence from live configurable-server and Ollama Cloud checks.
+- Expanded model-orchestrator context with bounded request content, natural capability summaries, context/output limits, reasoning hints, edge cases, and pricing evidence; prompt-summary-only mode is now opt-in.
+- Added full `mypy` cleanliness for the typed package, full Ruff CI, a 95% coverage gate, package build checks, and dependency vulnerability auditing.
+
+- Tightened `orchestrator.route_plan.v3` with exact per-strategy role contracts, resilient provider-diverse fusion planning, Crupier-owned cost/latency estimates, validated-plan authorship in traces, and auditable primary/fallback orchestrator outcomes.
+- Added a public live end-to-end routing harness covering autonomous single, cascade, fusion, critique-repair, tool-ledger review, delegate, native image, and native PDF routes without forcing executor models.
+- Added a public real-provider operations harness covering model-powered operation classification, multiple embedding backends, reranking, TTS-to-transcription, image generation/editing, Python compatibility, route events, and the complete loopback HTTP API without persisting generated media or vectors.
+- Versioned tool critique/repair prompts and made unstructured repair output use a parsed final-answer envelope so tool ledgers, critic notes, and internal verification material cannot leak into the user-facing response.
+- Made empty provider text responses retryable and cost-visible, required two planned panel models, and made fusion fail closed unless at least two non-empty panel contributions reach the judge.
+- Made general-purpose default profiles genuinely model-orchestrated, added hard `min_panel_size`/`max_panel_size` policy constraints, and preserved explicit profile strategies as user-owned locks rather than model suggestions.
+- Added budget-aware fallback across validated models for generator, critic, repair, tool, judge, and final-writer roles, and isolated public live-validation cases so circuit state remains a deliberate cross-request test rather than suite-order contamination.
+- Versioned general critique/repair prompts and parsed a final-answer envelope so non-tool agent workflows cannot expose drafts, critic commentary, or audit-only intermediate material in the user-facing result.
+- Made tool-aware critique/repair consume authoritative tool results, and made cascade fail closed when every candidate response fails sufficiency validation.
+- Tightened multimodal execution contracts by explicitly blocking unimplemented OCR, transcript-first video processing, spreadsheets, office-document extraction, and native non-image paths while keeping dedicated audio transcription executable through the operation API.
+- Bumped the package to final `0.4.0`; publishing remains gated on full local and real-provider verification.
+
 ## 0.3.0 - 2026-06-21
 
 - Added configurable project scoring weights, weighted task-signal classification, and `crupier scoring suggest` for conservative eval/feedback-driven scoring updates.

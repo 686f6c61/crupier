@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import io
 import json
+import wave
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from time import perf_counter
@@ -21,7 +23,8 @@ DEFAULT_PROBES = (
     "tool_call",
     "streaming",
 )
-AVAILABLE_PROBES = DEFAULT_PROBES + ("embeddings",)
+OPERATION_PROBES = ("reranker", "transcription", "tts", "image_generation")
+AVAILABLE_PROBES = DEFAULT_PROBES + ("embeddings",) + OPERATION_PROBES
 
 PROBE_CAPABILITIES = {
     "text_basic": "text_generation",
@@ -31,6 +34,10 @@ PROBE_CAPABILITIES = {
     "tool_call": "tool_call",
     "streaming": "streaming",
     "embeddings": "embeddings",
+    "reranker": "reranker",
+    "transcription": "transcription",
+    "tts": "tts",
+    "image_generation": "image_generation",
 }
 CORE_PROBES = ("text_basic", "json_instruction", "max_output_param")
 
@@ -123,8 +130,8 @@ class CapabilityProbeRunner:
         apply: bool = False,
         dry_run: bool = False,
     ) -> ProbeReport:
-        selected_probes = tuple(probes or DEFAULT_PROBES)
-        unknown = sorted(set(selected_probes) - set(AVAILABLE_PROBES))
+        selected_probes = tuple(probes) if probes is not None else None
+        unknown = sorted(set(selected_probes or ()) - set(AVAILABLE_PROBES))
         if unknown:
             raise ValueError(f"Unknown capability probes: {', '.join(unknown)}")
 
@@ -132,7 +139,21 @@ class CapabilityProbeRunner:
         for model_key in [ModelRef.parse(model).key for model in models]:
             card = self.registry.get(model_key)
             card_results: list[ProbeResult] = []
-            for probe_name in selected_probes:
+            card_probes = selected_probes or _applicable_probes(card)
+            for probe_name in card_probes:
+                if not _probe_is_applicable(card, probe_name):
+                    result = ProbeResult(
+                        model=model_key,
+                        provider=card.model_ref.provider,
+                        probe=probe_name,
+                        status="skipped",
+                        ok=None,
+                        error=f"Probe {probe_name!r} does not apply to model kind {card.model_kind!r}.",
+                        metadata={"capability": PROBE_CAPABILITIES[probe_name]},
+                    )
+                    report.results.append(result)
+                    card_results.append(result)
+                    continue
                 if dry_run:
                     result = ProbeResult(
                         model=model_key,
@@ -146,7 +167,7 @@ class CapabilityProbeRunner:
                 card_results.append(result)
 
             if apply and not dry_run:
-                updated = self._apply_results(card, card_results)
+                updated = self._apply_results(card, [result for result in card_results if result.status != "skipped"])
                 written = self.registry.save_card(updated)
                 if written:
                     report.written_files.append(written)
@@ -164,9 +185,19 @@ class CapabilityProbeRunner:
         return report
 
     def _readiness_item(self, card: CapabilityCard, *, strict: bool) -> ReadinessItem:
+        if card.model_kind not in {"chat", "embedding", *OPERATION_PROBES}:
+            return ReadinessItem(
+                model=card.model_ref.key,
+                provider=card.model_ref.provider,
+                status="unsupported_executor",
+                required_probes=[],
+                notes=[f"Crupier has no execution facade for model kind {card.model_kind!r}."],
+            )
         embedding_only = _embedding_only(card)
         if embedding_only:
             required = ["embeddings"]
+        elif card.model_kind in OPERATION_PROBES:
+            required = [card.model_kind]
         else:
             required = list(DEFAULT_PROBES if strict else CORE_PROBES)
         if not strict and not embedding_only:
@@ -247,13 +278,15 @@ class CapabilityProbeRunner:
             return self._probe_native(card, probe_name, capability="streaming", declared=card.supports_streaming)
         if probe_name == "embeddings":
             return self._probe_embeddings(card)
+        if probe_name in OPERATION_PROBES:
+            return self._probe_operation(card, probe_name)
         raise ValueError(f"Unknown capability probe: {probe_name}")
 
     def _probe_text_basic(self, card: CapabilityCard) -> ProbeResult:
         prompt = 'Capability probe. Reply with exactly: "crupier-probe-ok"'
         request = RequestEnvelope(
             task="Capability probe: text generation",
-            constraints={"max_output_tokens": 128, "timeout_seconds": 60},
+            constraints={"max_output_tokens": 128, "timeout_seconds": 60, "disable_thinking": True},
         )
         return self._call_and_check(
             card,
@@ -268,7 +301,7 @@ class CapabilityProbeRunner:
         prompt = 'Return exactly this JSON object and no prose: {"ok": true, "probe": "crupier"}'
         request = RequestEnvelope(
             task="Capability probe: JSON instruction adherence",
-            constraints={"max_output_tokens": 128, "timeout_seconds": 60},
+            constraints={"max_output_tokens": 512, "timeout_seconds": 60, "disable_thinking": True},
         )
 
         def check(text: str) -> bool:
@@ -288,7 +321,7 @@ class CapabilityProbeRunner:
         prompt = 'Reply with exactly one word: "ok"'
         request = RequestEnvelope(
             task="Capability probe: max output parameter",
-            constraints={"max_output_tokens": 128, "timeout_seconds": 60},
+            constraints={"max_output_tokens": 128, "timeout_seconds": 60, "disable_thinking": True},
         )
         return self._call_and_check(
             card,
@@ -325,7 +358,7 @@ class CapabilityProbeRunner:
 
         request = RequestEnvelope(
             task=f"Capability probe: {capability}",
-            constraints={"max_output_tokens": 128, "timeout_seconds": 60},
+            constraints={"max_output_tokens": 512, "timeout_seconds": 60},
         )
         started = perf_counter()
         try:
@@ -464,6 +497,67 @@ class CapabilityProbeRunner:
                 metadata={"capability": "embeddings"},
             )
 
+    def _probe_operation(self, card: CapabilityCard, operation: str) -> ProbeResult:
+        adapter = self.adapters.get(card.model_ref.provider)
+        if adapter is None:
+            return ProbeResult(
+                model=card.model_ref.key,
+                provider=card.model_ref.provider,
+                probe=operation,
+                status="unknown",
+                ok=None,
+                error="No adapter configured for provider.",
+                metadata={"capability": operation},
+            )
+        execute = getattr(adapter, "execute_operation", None)
+        supports = getattr(adapter, "supports_operation", None)
+        declared = card.model_kind == operation
+        if not callable(execute) or not callable(supports) or not supports(
+            operation=operation,
+            model=card.model_ref.model,
+        ):
+            return self._probe_declared(card, operation, capability=operation, declared=declared)
+        request = RequestEnvelope(
+            task=f"Capability probe: {operation}",
+            constraints={"timeout_seconds": 60, "max_output_tokens": 128},
+        )
+        started = perf_counter()
+        try:
+            response = execute(
+                operation=operation,
+                model=card.model_ref.model,
+                request=request,
+                payload=_operation_probe_payload(operation),
+            )
+            latency_ms = int((perf_counter() - started) * 1000)
+            ok = _operation_probe_ok(operation, response.output)
+            return ProbeResult(
+                model=card.model_ref.key,
+                provider=card.model_ref.provider,
+                probe=operation,
+                status="verified" if ok else "failed",
+                ok=ok,
+                latency_ms=latency_ms,
+                metadata={
+                    "capability": operation,
+                    "usage": response.usage,
+                    "provider_metadata": response.metadata,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - probes report provider failures without aborting the batch
+            latency_ms = int((perf_counter() - started) * 1000)
+            return ProbeResult(
+                model=card.model_ref.key,
+                provider=card.model_ref.provider,
+                probe=operation,
+                status="failed",
+                ok=False,
+                latency_ms=latency_ms,
+                error_type=exc.__class__.__name__,
+                error=str(exc),
+                metadata={"capability": operation},
+            )
+
     @staticmethod
     def _probe_declared(card: CapabilityCard, probe_name: str, *, capability: str, declared: bool) -> ProbeResult:
         return ProbeResult(
@@ -546,6 +640,8 @@ def _declared_capability(card: CapabilityCard, capability: str) -> bool:
         return card.supports_streaming
     if capability == "embeddings":
         return card.supports_embeddings
+    if capability in OPERATION_PROBES:
+        return card.model_kind == capability
     return False
 
 
@@ -553,3 +649,76 @@ def _embedding_only(card: CapabilityCard) -> bool:
     return card.model_kind == "embedding" or (
         card.supports_embeddings and card.modalities_output == ["embedding"] and not card.supports_tools
     )
+
+
+def _applicable_probes(card: CapabilityCard) -> tuple[str, ...]:
+    if _embedding_only(card):
+        return ("embeddings",)
+    if card.model_kind == "chat":
+        probes = list(DEFAULT_PROBES)
+        if card.supports_embeddings:
+            probes.append("embeddings")
+        return tuple(probes)
+    if card.model_kind in OPERATION_PROBES:
+        return (card.model_kind,)
+    return ()
+
+
+def _probe_is_applicable(card: CapabilityCard, probe_name: str) -> bool:
+    if probe_name == "embeddings":
+        return card.supports_embeddings or _embedding_only(card)
+    if probe_name in OPERATION_PROBES:
+        return card.model_kind == probe_name
+    return card.model_kind == "chat"
+
+
+def _operation_probe_payload(operation: str) -> dict[str, Any]:
+    if operation == "reranker":
+        return {
+            "query": "capital of France",
+            "documents": ["Berlin is in Germany.", "Paris is the capital of France."],
+            "top_n": 1,
+        }
+    if operation == "transcription":
+        return {
+            "file": _silent_wav(),
+            "filename": "crupier-probe.wav",
+            "response_format": "json",
+        }
+    if operation == "tts":
+        return {
+            "input": "Crupier probe.",
+            "voice": "ef_dora",
+            "response_format": "mp3",
+        }
+    if operation == "image_generation":
+        return {
+            "prompt": "A centered red circle on a white background",
+            "size": "256x256",
+            "n": 1,
+            "response_format": "b64_json",
+            "seed": 1,
+        }
+    return {}
+
+
+def _operation_probe_ok(operation: str, output: Any) -> bool:
+    if operation == "reranker":
+        return isinstance(output, list) and bool(output) and isinstance(output[0], dict)
+    if operation == "transcription":
+        return isinstance(output, dict) and "text" in output
+    if operation == "tts":
+        return isinstance(output, bytes | bytearray) and bool(output)
+    if operation == "image_generation":
+        return isinstance(output, list) and bool(output) and isinstance(output[0], dict)
+    return False
+
+
+def _silent_wav() -> bytes:
+    target = io.BytesIO()
+    with wave.open(target, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16_000)
+        wav.writeframes(b"\x00\x00" * 3_200)
+    return target.getvalue()

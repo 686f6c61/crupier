@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from .capabilities import CapabilityEvidence, capability_evidence
-from .config import CrupierConfig, ScoringSettings
+from .config import CrupierConfig, ScoringSettings, ollama_is_local
 from .costs import estimate_model_cost, estimate_tokens
 from .model_profiles import classify_task_signal_weights
 from .models import CapabilityCard, RequestEnvelope
@@ -84,11 +84,11 @@ class ModelSelector:
 
         skill_terms = []
         for signal in sorted(task_signals):
-            value = card.skill_scores.get(signal)
-            if isinstance(value, int | float) and float(value) >= self.scoring.skill_fit_min_score:
-                skill_terms.append((signal, float(value), task_signal_weights.get(signal, 1.0)))
+            skill_value = card.skill_scores.get(signal)
+            if isinstance(skill_value, int | float) and float(skill_value) >= self.scoring.skill_fit_min_score:
+                skill_terms.append((signal, float(skill_value), task_signal_weights.get(signal, 1.0)))
         if skill_terms:
-            value = min(
+            skill_fit_value = min(
                 self.scoring.skill_fit_cap,
                 sum(
                     (score - self.scoring.skill_fit_baseline) * self.scoring.skill_fit_multiplier * weight
@@ -96,7 +96,7 @@ class ModelSelector:
                 ),
             )
             detail = ", ".join(f"{signal}={score:g}x{weight:.2g}" for signal, score, weight in skill_terms[:6])
-            self._add(terms, "skill_fit", value, "decision profile skills " + detail)
+            self._add(terms, "skill_fit", skill_fit_value, "decision profile skills " + detail)
 
         if mode == "cheap":
             self._add(
@@ -112,7 +112,7 @@ class ModelSelector:
                 self._tier_weight("latency", card.latency_tier) * self.scoring.fast_mode_latency_multiplier,
                 f"latency={card.latency_tier}",
             )
-        if mode == "private" and card.model_ref.provider == "ollama":
+        if mode == "private" and card.model_ref.provider == "ollama" and ollama_is_local(self.config):
             self._add(
                 terms,
                 "private_mode_local",

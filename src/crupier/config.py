@@ -6,13 +6,30 @@ import json
 import tomllib
 import os
 from dataclasses import dataclass, field
+from ipaddress import ip_address
+from math import isfinite
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .errors import CrupierConfigError
+from .models import ModelRef
 
 OLLAMA_CLOUD_HOST = "https://ollama.com/api"
 OPENROUTER_DEFAULT_HOST = "https://openrouter.ai/api/v1"
+INFERENCE_DEFAULT_HOST = "http://127.0.0.1:8000/v1"
+NAN_DEFAULT_HOST = "https://api.nan.builders/v1"
+_ROUTE_STRATEGIES = {
+    "single",
+    "fallback",
+    "cascade",
+    "panel",
+    "fusion",
+    "critique_repair",
+    "local_first",
+    "delegate",
+    "orchestrated",
+}
 
 
 @dataclass(slots=True)
@@ -54,10 +71,12 @@ class RoutingSettings:
     allow_latest_aliases: bool = False
     allow_preview_models: bool = False
     max_cost_per_request_usd: float | None = None
-    max_latency_ms: int | None = 30000
+    max_latency_ms: int | None = 120000
     max_depth: int = 8
     max_calls: int = 40
     max_tool_rounds: int = 3
+    max_tool_calls_per_round: int = 8
+    max_tool_result_chars: int = 50_000
     max_provider_retries: int = 1
     retry_backoff_seconds: float = 0.2
     retry_jitter_seconds: float = 0.0
@@ -75,7 +94,8 @@ class OrchestratorSettings:
     temperature: float = 0.0
     require_validated_plan: bool = True
     max_repairs: int = 1
-    allow_prompt_summary_only: bool = True
+    candidate_limit: int = 6
+    allow_prompt_summary_only: bool = False
 
 
 @dataclass(slots=True)
@@ -168,42 +188,111 @@ class CrupierConfig:
         load_profile_files(config)
         load_env_file(config.root)
         apply_env_overrides(config)
+        config.validate()
         return config
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "CrupierConfig":
-        providers: dict[str, ProviderSettings] = {}
-        for name, provider_data in data.get("providers", {}).items():
-            known = {"enabled", "env_key", "host", "mode"}
-            providers[name] = ProviderSettings(
-                enabled=bool(provider_data.get("enabled", False)),
-                env_key=provider_data.get("env_key"),
-                host=provider_data.get("host"),
-                mode=provider_data.get("mode"),
-                options={key: value for key, value in provider_data.items() if key not in known},
-            )
+        if not isinstance(data, dict):
+            raise CrupierConfigError("Crupier configuration must be an object/table.")
+        try:
+            providers: dict[str, ProviderSettings] = {}
+            for name, provider_data in data.get("providers", {}).items():
+                if not isinstance(provider_data, dict):
+                    raise CrupierConfigError(f"Provider {name!r} configuration must be a table/object.")
+                known = {"enabled", "env_key", "host", "mode"}
+                providers[name] = ProviderSettings(
+                    enabled=bool(provider_data.get("enabled", False)),
+                    env_key=provider_data.get("env_key"),
+                    host=provider_data.get("host"),
+                    mode=provider_data.get("mode"),
+                    options={key: value for key, value in provider_data.items() if key not in known},
+                )
 
-        profiles: dict[str, ProfileSettings] = {}
-        for name, profile_data in data.get("profiles", {}).items():
-            known = {"prefer", "strategy"}
-            profiles[name] = ProfileSettings(
-                name=name,
-                prefer=list(profile_data.get("prefer", [])),
-                strategy=profile_data.get("strategy", "orchestrated"),
-                options={key: value for key, value in profile_data.items() if key not in known},
-            )
+            profiles: dict[str, ProfileSettings] = {}
+            for name, profile_data in data.get("profiles", {}).items():
+                if not isinstance(profile_data, dict):
+                    raise CrupierConfigError(f"Profile {name!r} configuration must be a table/object.")
+                known = {"prefer", "strategy"}
+                profiles[name] = ProfileSettings(
+                    name=name,
+                    prefer=list(profile_data.get("prefer", [])),
+                    strategy=profile_data.get("strategy", "orchestrated"),
+                    options={key: value for key, value in profile_data.items() if key not in known},
+                )
 
-        return cls(
-            project=ProjectSettings(**data.get("project", {})),
-            logging=LoggingSettings(**data.get("logging", {})),
-            providers=providers,
-            models=ModelSettings(**data.get("models", {})),
-            routing=RoutingSettings(**data.get("routing", {})),
-            orchestrator=OrchestratorSettings(**data.get("orchestrator", {})),
-            scoring=_scoring_settings_from_dict(data.get("scoring", {})),
-            policy=_policy_settings_from_dict(data.get("policy", {})),
-            profiles=profiles,
+            config = cls(
+                project=ProjectSettings(**data.get("project", {})),
+                logging=LoggingSettings(**data.get("logging", {})),
+                providers=providers,
+                models=ModelSettings(**data.get("models", {})),
+                routing=RoutingSettings(**data.get("routing", {})),
+                orchestrator=OrchestratorSettings(**data.get("orchestrator", {})),
+                scoring=_scoring_settings_from_dict(data.get("scoring", {})),
+                policy=_policy_settings_from_dict(data.get("policy", {})),
+                profiles=profiles,
+            )
+        except CrupierConfigError:
+            raise
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise CrupierConfigError(f"Invalid Crupier configuration: {exc}") from exc
+        config.validate()
+        return config
+
+    def validate(self) -> None:
+        if not isinstance(self.models.allow, list) or not isinstance(self.models.deny, list):
+            raise CrupierConfigError("[models].allow and [models].deny must be arrays of provider:model strings.")
+        for model in [*self.models.allow, *self.models.deny]:
+            try:
+                ModelRef.parse(str(model))
+            except ValueError as exc:
+                raise CrupierConfigError(str(exc)) from exc
+
+        if self.routing.default_strategy not in _ROUTE_STRATEGIES:
+            raise CrupierConfigError(f"Unsupported routing.default_strategy {self.routing.default_strategy!r}.")
+        _require_int_at_least("routing.max_calls", self.routing.max_calls, 1)
+        _require_int_at_least("routing.max_depth", self.routing.max_depth, 0)
+        _require_int_at_least("routing.max_tool_rounds", self.routing.max_tool_rounds, 1)
+        _require_int_at_least("routing.max_tool_calls_per_round", self.routing.max_tool_calls_per_round, 1)
+        _require_int_at_least("routing.max_tool_result_chars", self.routing.max_tool_result_chars, 256)
+        _require_int_at_least("routing.max_provider_retries", self.routing.max_provider_retries, 0)
+        _require_int_at_least(
+            "routing.circuit_breaker_failure_threshold",
+            self.routing.circuit_breaker_failure_threshold,
+            0,
         )
+        for name, value, allow_zero in (
+            ("routing.max_cost_per_request_usd", self.routing.max_cost_per_request_usd, True),
+            ("routing.max_latency_ms", self.routing.max_latency_ms, False),
+            ("routing.retry_backoff_seconds", self.routing.retry_backoff_seconds, True),
+            ("routing.retry_jitter_seconds", self.routing.retry_jitter_seconds, True),
+            ("routing.circuit_breaker_cooldown_seconds", self.routing.circuit_breaker_cooldown_seconds, True),
+        ):
+            _require_finite_number(name, value, allow_none=True, allow_zero=allow_zero)
+
+        if self.orchestrator.mode not in {"deterministic", "model", "hybrid"}:
+            raise CrupierConfigError(f"Unsupported orchestrator.mode {self.orchestrator.mode!r}.")
+        if self.orchestrator.fallback not in {"deterministic", "error"}:
+            raise CrupierConfigError("orchestrator.fallback must be 'deterministic' or 'error'.")
+        _require_int_at_least("orchestrator.max_repairs", self.orchestrator.max_repairs, 0)
+        _require_int_at_least("orchestrator.candidate_limit", self.orchestrator.candidate_limit, 2)
+        if self.orchestrator.candidate_limit > 32:
+            raise CrupierConfigError("orchestrator.candidate_limit must be at most 32.")
+        _require_finite_number("orchestrator.temperature", self.orchestrator.temperature)
+        for orchestrator_model in (self.orchestrator.model, self.orchestrator.fallback_model):
+            if orchestrator_model:
+                try:
+                    ModelRef.parse(orchestrator_model)
+                except ValueError as exc:
+                    raise CrupierConfigError(str(exc)) from exc
+
+        for name, profile in self.profiles.items():
+            if profile.strategy not in _ROUTE_STRATEGIES:
+                raise CrupierConfigError(f"Profile {name!r} has unsupported strategy {profile.strategy!r}.")
+        for rule in self.policy.rules:
+            if rule.effect not in {"deny", "require_capability", "require_verified_capability"}:
+                raise CrupierConfigError(f"Policy rule {rule.name!r} has unsupported effect {rule.effect!r}.")
+        _validate_scoring(self.scoring)
 
     @property
     def crupier_dir(self) -> Path:
@@ -322,6 +411,68 @@ def _float_map(value: dict[str, Any], default: dict[str, float]) -> dict[str, fl
     return merged
 
 
+def _require_int_at_least(name: str, value: Any, minimum: int) -> None:
+    if isinstance(value, bool):
+        raise CrupierConfigError(f"{name} must be an integer >= {minimum}.")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise CrupierConfigError(f"{name} must be an integer >= {minimum}.") from exc
+    if parsed != value or parsed < minimum:
+        raise CrupierConfigError(f"{name} must be an integer >= {minimum}.")
+
+
+def _require_finite_number(
+    name: str,
+    value: Any,
+    *,
+    allow_none: bool = False,
+    allow_zero: bool = True,
+) -> None:
+    if value is None and allow_none:
+        return
+    if isinstance(value, bool):
+        raise CrupierConfigError(f"{name} must be a finite number.")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise CrupierConfigError(f"{name} must be a finite number.") from exc
+    if not isfinite(parsed) or parsed < 0 or (not allow_zero and parsed == 0):
+        qualifier = "positive finite" if not allow_zero else "non-negative finite"
+        raise CrupierConfigError(f"{name} must be a {qualifier} number.")
+
+
+def _validate_scoring(scoring: ScoringSettings) -> None:
+    for field_name in ScoringSettings.__dataclass_fields__:
+        value = getattr(scoring, field_name)
+        values = value.values() if isinstance(value, dict) else [value]
+        for item in values:
+            if isinstance(item, bool):
+                raise CrupierConfigError(f"scoring.{field_name} must contain finite numbers.")
+            try:
+                parsed = float(item)
+            except (TypeError, ValueError) as exc:
+                raise CrupierConfigError(f"scoring.{field_name} must contain finite numbers.") from exc
+            if not isfinite(parsed):
+                raise CrupierConfigError(f"scoring.{field_name} must contain finite numbers.")
+
+
+def ollama_is_local(config: CrupierConfig) -> bool:
+    settings = config.providers.get("ollama")
+    if settings is None:
+        return False
+    if settings.mode == "local":
+        return True
+    host = settings.host or os.environ.get("OLLAMA_HOST") or OLLAMA_CLOUD_HOST
+    hostname = (urlparse(host).hostname or "").lower()
+    if hostname == "localhost":
+        return True
+    try:
+        return ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
 def load_profile_files(config: CrupierConfig) -> None:
     """Load optional shared profiles from .crupier/profiles/*.toml|*.json."""
 
@@ -384,6 +535,12 @@ mode = "byok"
 host = "https://openrouter.ai/api/v1"
 env_key = "OPENROUTER_API_KEY"
 
+[providers.inference]
+enabled = false
+mode = "openai_compatible"
+host = "http://127.0.0.1:8000/v1"
+auth = "none"
+
 [models]
 allow = ["openai:gpt-5.5", "openai:gpt-5.4-mini"]
 deny = []
@@ -395,10 +552,12 @@ allow_parallel = true
 allow_latest_aliases = false
 allow_preview_models = false
 max_cost_per_request_usd = 1.00
-max_latency_ms = 30000
+max_latency_ms = 120000
 max_depth = 8
 max_calls = 40
 max_tool_rounds = 3
+max_tool_calls_per_round = 8
+max_tool_result_chars = 50000
 max_provider_retries = 1
 retry_backoff_seconds = 0.2
 retry_jitter_seconds = 0
@@ -407,14 +566,15 @@ circuit_breaker_cooldown_seconds = 60
 require_operational_providers = true
 
 [orchestrator]
-mode = "deterministic"
+mode = "model"
 model = "openai:gpt-5.4-mini"
 fallback_model = "openai:gpt-5.4-mini"
 fallback = "deterministic"
 temperature = 0
 require_validated_plan = true
 max_repairs = 1
-allow_prompt_summary_only = true
+candidate_limit = 6
+allow_prompt_summary_only = false
 
 [scoring]
 quality_weight = { unknown = 0, strong = 2, frontier = 4 }
@@ -460,11 +620,11 @@ strategy = "orchestrated"
 
 [profiles.cheap]
 prefer = ["low_cost"]
-strategy = "cascade"
+strategy = "orchestrated"
 
 [profiles.fast]
 prefer = ["low_latency"]
-strategy = "single"
+strategy = "orchestrated"
 
 [profiles.private]
 prefer = ["local", "zdr", "no_prompt_logging"]
@@ -472,11 +632,11 @@ strategy = "local_first"
 
 [profiles.research]
 prefer = ["consensus", "critique"]
-strategy = "fusion"
+strategy = "orchestrated"
 
 [profiles.structured]
 prefer = ["structured_output", "schema_validity"]
-strategy = "cascade"
+strategy = "orchestrated"
 """
 
 DEFAULT_ENV_EXAMPLE = """OPENAI_API_KEY=
@@ -486,6 +646,7 @@ GEMINI_API_KEY=
 OLLAMA_API_KEY=
 OLLAMA_HOST=https://ollama.com/api
 OPENROUTER_API_KEY=
+INFERENCE_API_KEY=
 """
 
 DEFAULT_GITIGNORE_ENTRIES = [
@@ -493,6 +654,9 @@ DEFAULT_GITIGNORE_ENTRIES = [
     ".env.*",
     "!.env.example",
     ".ruff_cache/",
+    ".coverage",
+    "coverage.xml",
+    "htmlcov/",
     ".crupier/registry/models.json",
     ".crupier/registry/capability-cards/",
     ".crupier/traces/",
@@ -501,9 +665,13 @@ DEFAULT_GITIGNORE_ENTRIES = [
     ".crupier/evals/history/",
     ".crupier/evals/results/",
     ".crupier/evals/runs/",
+    ".crupier/evals/live-routing-validation.json",
+    ".crupier/evals/live-operations-validation.json",
     ".crupier/feedback/",
     ".crupier/handoffs/",
     ".crupier/packages/",
+    ".crupier/test-assets/",
+    ".crupier/audit-dist/",
 ]
 
 
@@ -632,6 +800,7 @@ def write_orchestrator_settings(
     fallback: str | None = None,
     require_validated_plan: bool | None = None,
     max_repairs: int | None = None,
+    candidate_limit: int | None = None,
     allow_prompt_summary_only: bool | None = None,
 ) -> Path:
     from .models import ModelRef
@@ -656,10 +825,14 @@ def write_orchestrator_settings(
         if require_validated_plan is None
         else bool(require_validated_plan),
         "max_repairs": config.orchestrator.max_repairs if max_repairs is None else int(max_repairs),
+        "candidate_limit": config.orchestrator.candidate_limit if candidate_limit is None else int(candidate_limit),
         "allow_prompt_summary_only": config.orchestrator.allow_prompt_summary_only
         if allow_prompt_summary_only is None
         else bool(allow_prompt_summary_only),
     }
+    for key, value in settings.items():
+        setattr(config.orchestrator, key, value)
+    config.validate()
 
     text = toml_path.read_text(encoding="utf-8")
     lines = text.splitlines()

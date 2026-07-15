@@ -7,11 +7,12 @@ from crupier.adapters import ProviderModel
 from crupier.adapters.anthropic import AnthropicAdapter
 from crupier.adapters.factory import build_default_adapters
 from crupier.adapters.google import GoogleAdapter, google_api_key
+from crupier.adapters.nan import NaNAdapter
 from crupier.adapters.ollama import OllamaAdapter
 from crupier.adapters.openai import OpenAIAdapter
 from crupier.adapters.openrouter import OpenRouterAdapter
-from crupier.config import OPENROUTER_DEFAULT_HOST, CrupierConfig, ProviderSettings
-from crupier.errors import CrupierProviderAuthError, CrupierProviderUnavailableError
+from crupier.config import NAN_DEFAULT_HOST, OPENROUTER_DEFAULT_HOST, CrupierConfig, ProviderSettings
+from crupier.errors import CrupierModelUnsupportedError, CrupierProviderAuthError, CrupierProviderUnavailableError
 from crupier.models import FileAsset, RequestEnvelope
 
 
@@ -32,6 +33,70 @@ class FakeOpenAIResponses:
 class FakeOpenAIClient:
     def __init__(self):
         self.responses = FakeOpenAIResponses()
+
+
+class FakeNaNChatCompletions:
+    def __init__(self):
+        self.payload = None
+
+    def create(self, **payload):
+        self.payload = payload
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok": true}'))],
+            usage={"prompt_tokens": 3, "completion_tokens": 4},
+        )
+
+
+class FakeNaNClient:
+    def __init__(self):
+        self.chat = SimpleNamespace(completions=FakeNaNChatCompletions())
+
+
+class FakeNaNSpecializedClient:
+    def __init__(self):
+        self.post_payload = None
+        self.transcription_payload = None
+        self.speech_payload = None
+        self.image_generate_payload = None
+        self.image_edit_payload = None
+        self.audio = SimpleNamespace(
+            transcriptions=SimpleNamespace(create=self._transcribe),
+            speech=SimpleNamespace(create=self._speech),
+        )
+        self.images = SimpleNamespace(
+            generate=self._generate_image,
+            edit=self._edit_image,
+        )
+
+    def with_options(self, **kwargs):
+        self.options = kwargs
+        return self
+
+    def post(self, **payload):
+        self.post_payload = payload
+        return {
+            "results": [
+                {"index": 1, "relevance_score": 0.9, "document": {"text": "Paris"}},
+                {"index": 0, "relevance_score": 0.2, "document": {"text": "Berlin"}},
+            ],
+            "meta": {"tokens": {"input_tokens": 12}},
+        }
+
+    def _transcribe(self, **payload):
+        self.transcription_payload = payload
+        return {"text": "hola mundo", "language": "es", "duration": 1.5}
+
+    def _speech(self, **payload):
+        self.speech_payload = payload
+        return SimpleNamespace(content=b"ID3-audio")
+
+    def _generate_image(self, **payload):
+        self.image_generate_payload = payload
+        return {"data": [{"url": "https://example.test/generated.png"}]}
+
+    def _edit_image(self, **payload):
+        self.image_edit_payload = payload
+        return {"data": [{"b64_json": "aW1hZ2U="}]}
 
 
 def test_openai_adapter_uses_responses_create():
@@ -130,6 +195,26 @@ def test_openai_adapter_sends_native_image_content(tmp_path):
     assert content[1]["image_url"].startswith("data:image/png;base64,")
 
 
+def test_openai_adapter_sends_native_pdf_content(tmp_path):
+    pdf = tmp_path / "contract.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+    adapter = OpenAIAdapter(ProviderSettings(enabled=True))
+    client = FakeOpenAIClient()
+    adapter._client = client
+
+    response = adapter.generate(
+        model="gpt-5.4-mini",
+        prompt="read PDF",
+        request=RequestEnvelope(task="x", files=[FileAsset(kind="pdf", name="contract.pdf", uri=str(pdf))]),
+    )
+
+    content = client.responses.payload["input"][0]["content"]
+    assert response.metadata["native_files"] == 1
+    assert content[1]["type"] == "input_file"
+    assert content[1]["filename"] == "contract.pdf"
+    assert content[1]["file_data"].startswith("data:application/pdf;base64,")
+
+
 def test_openai_adapter_sends_native_json_schema_format():
     schema = {
         "type": "object",
@@ -225,6 +310,242 @@ def test_openrouter_adapter_lists_models_with_openrouter_provider():
         "openrouter:anthropic/claude-sonnet-4.5",
         "openrouter:openai/gpt-4o",
     ]
+
+
+def test_nan_adapter_builds_openai_compatible_client(monkeypatch):
+    calls = {}
+
+    class FakeOpenAI:
+        def __init__(self, **kwargs):
+            calls.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
+    monkeypatch.setenv("NAN_API_KEY", "test-nan-key")
+    adapter = NaNAdapter(ProviderSettings(enabled=True, options={"timeout_seconds": 11}))
+
+    adapter._build_client()
+
+    assert calls["api_key"] == "test-nan-key"
+    assert calls["base_url"] == NAN_DEFAULT_HOST
+    assert calls["timeout"] == 11.0
+
+
+def test_nan_qwen_adapter_sends_image_schema_and_thinking_control(tmp_path):
+    image = tmp_path / "diagram.png"
+    image.write_bytes(b"image")
+    schema = {
+        "type": "object",
+        "properties": {"ok": {"type": "boolean"}},
+        "required": ["ok"],
+        "additionalProperties": False,
+    }
+    adapter = NaNAdapter(ProviderSettings(enabled=True))
+    client = FakeNaNClient()
+    adapter._client = client
+
+    response = adapter.generate(
+        model="qwen3.6",
+        prompt="classify image",
+        request=RequestEnvelope(
+            task="x",
+            files=[FileAsset(kind="image", name="diagram.png", uri=str(image))],
+            response_schema=schema,
+            constraints={"disable_thinking": True, "timeout_seconds": 7},
+        ),
+    )
+
+    payload = client.chat.completions.payload
+    assert response.text == '{"ok": true}'
+    assert response.metadata["multimodal_images"] == 1
+    assert payload["messages"][0]["content"][1]["type"] == "image_url"
+    assert payload["response_format"]["json_schema"]["schema"] == schema
+    assert payload["extra_body"] == {"chat_template_kwargs": {"enable_thinking": False}}
+    assert payload["timeout"] == 7.0
+
+
+def test_nan_mimo_adapter_sends_native_audio(tmp_path):
+    audio = tmp_path / "call.wav"
+    audio.write_bytes(b"RIFF test")
+    adapter = NaNAdapter(ProviderSettings(enabled=True))
+    client = FakeNaNClient()
+    adapter._client = client
+
+    response = adapter.generate(
+        model="mimo-v2.5",
+        prompt="summarize",
+        request=RequestEnvelope(task="x", files=[FileAsset(kind="audio", name="call.wav", uri=str(audio))]),
+    )
+
+    content = client.chat.completions.payload["messages"][0]["content"]
+    assert response.metadata["multimodal_audio"] == 1
+    assert response.metadata["reasoning_mode"] == "always"
+    assert content[1]["type"] == "input_audio"
+    assert content[1]["input_audio"]["format"] == "wav"
+
+
+def test_nan_deepseek_adapter_validates_reasoning_effort():
+    adapter = NaNAdapter(ProviderSettings(enabled=True))
+    adapter._client = FakeNaNClient()
+
+    try:
+        adapter.generate(
+            model="deepseek-v4-flash",
+            prompt="reason",
+            request=RequestEnvelope(task="x", constraints={"reasoning_effort": "maximum"}),
+        )
+    except CrupierModelUnsupportedError as exc:
+        assert "low, medium, or high" in str(exc)
+    else:
+        raise AssertionError("invalid NaN reasoning effort should fail before the provider call")
+
+
+def test_nan_embedding_adapter_enforces_fixed_dimensions():
+    adapter = NaNAdapter(ProviderSettings(enabled=True))
+
+    try:
+        adapter.embed(model="qwen3-embedding", input="hello", dimensions=512)
+    except CrupierModelUnsupportedError as exc:
+        assert "4096" in str(exc)
+    else:
+        raise AssertionError("NaN fixed embedding dimensions should not be silently truncated")
+
+
+def test_nan_adapter_executes_rerank_with_bounded_top_n():
+    adapter = NaNAdapter(ProviderSettings(enabled=True))
+    client = FakeNaNSpecializedClient()
+    adapter._client = client
+
+    response = adapter.execute_operation(
+        operation="reranker",
+        model="rerank",
+        request=RequestEnvelope(task="rank", constraints={"timeout_seconds": 4}),
+        payload={"query": "capital of France", "documents": ["Berlin", "Paris"], "top_n": 2},
+    )
+
+    assert response.output[0]["index"] == 1
+    assert response.usage == {"input_tokens": 12}
+    assert client.post_payload["path"] == "/rerank"
+    assert client.post_payload["body"]["top_n"] == 2
+    assert client.options == {"timeout": 4.0}
+
+
+def test_nan_adapter_executes_transcription_and_tts(tmp_path):
+    audio = tmp_path / "short.mp3"
+    audio.write_bytes(b"ID3-audio")
+    adapter = NaNAdapter(ProviderSettings(enabled=True))
+    client = FakeNaNSpecializedClient()
+    adapter._client = client
+
+    transcript = adapter.execute_operation(
+        operation="transcription",
+        model="whisper",
+        request=RequestEnvelope(task="transcribe"),
+        payload={
+            "file": audio,
+            "language": "es",
+            "response_format": "verbose_json",
+            "timestamp_granularities": ["segment"],
+        },
+    )
+    speech = adapter.execute_operation(
+        operation="tts",
+        model="kokoro",
+        request=RequestEnvelope(task="speak"),
+        payload={"input": "Hola", "voice": "ef_dora", "response_format": "mp3", "speed": 1.1},
+    )
+
+    assert transcript.output["text"] == "hola mundo"
+    assert client.transcription_payload["file"][0] == "short.mp3"
+    assert client.transcription_payload["timestamp_granularities"] == ["segment"]
+    assert speech.output == b"ID3-audio"
+    assert speech.metadata["bytes"] == 9
+    assert client.speech_payload["voice"] == "ef_dora"
+
+
+def test_nan_upload_limits_are_enforced_before_unbounded_reads(tmp_path):
+    oversized = tmp_path / "oversized.wav"
+    with oversized.open("wb") as handle:
+        handle.truncate(25_000_000)
+    adapter = NaNAdapter(ProviderSettings(enabled=True))
+    adapter._client = FakeNaNSpecializedClient()
+
+    try:
+        adapter.execute_operation(
+            operation="transcription",
+            model="whisper",
+            request=RequestEnvelope(task="transcribe"),
+            payload={"file": oversized},
+        )
+    except CrupierModelUnsupportedError as exc:
+        assert "smaller than 25 MB" in str(exc)
+    else:
+        raise AssertionError("oversized path must fail before its content is loaded")
+
+    class BoundedReader:
+        name = "bounded.wav"
+
+        def __init__(self):
+            self.read_size = None
+            self.position = 7
+
+        def tell(self):
+            return self.position
+
+        def seek(self, position):
+            self.position = position
+
+        def read(self, size):
+            self.read_size = size
+            self.position += 1
+            return b"RIFF"
+
+    stream = BoundedReader()
+    adapter.execute_operation(
+        operation="transcription",
+        model="whisper",
+        request=RequestEnvelope(task="transcribe"),
+        payload={"file": stream},
+    )
+
+    assert stream.read_size == 25_000_000
+    assert stream.position == 7
+
+
+def test_nan_adapter_executes_image_generation_and_edit(tmp_path):
+    reference = tmp_path / "reference.png"
+    reference.write_bytes(b"png-data")
+    adapter = NaNAdapter(ProviderSettings(enabled=True))
+    client = FakeNaNSpecializedClient()
+    adapter._client = client
+
+    generated = adapter.execute_operation(
+        operation="image_generation",
+        model="flux-2-klein",
+        request=RequestEnvelope(task="image"),
+        payload={
+            "prompt": "A lighthouse",
+            "size": "1024x768",
+            "n": 1,
+            "response_format": "url",
+            "seed": 42,
+        },
+    )
+    edited = adapter.execute_operation(
+        operation="image_generation",
+        model="flux-2-klein",
+        request=RequestEnvelope(task="edit"),
+        payload={
+            "prompt": "Add snow",
+            "images": [reference],
+            "size": "1024x1024",
+            "response_format": "b64_json",
+        },
+    )
+
+    assert generated.output == [{"url": "https://example.test/generated.png"}]
+    assert client.image_generate_payload["extra_body"] == {"seed": 42}
+    assert edited.output == [{"b64_json": "aW1hZ2U="}]
+    assert client.image_edit_payload["image"][0][0] == "reference.png"
 
 
 def test_openrouter_adapter_reports_openrouter_request_failures():

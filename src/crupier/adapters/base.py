@@ -27,6 +27,15 @@ class EmbeddingResponse:
 
 
 @dataclass(slots=True)
+class OperationResponse:
+    operation: str
+    output: Any
+    raw: Any = None
+    usage: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class ProviderModel:
     id: str
     provider: str
@@ -52,15 +61,42 @@ class ProviderAdapter(Protocol):
 
     def generate(self, *, model: str, prompt: str, request: RequestEnvelope) -> AdapterResponse:
         """Generate text for a normalized prompt."""
+        ...
 
     def list_models(self) -> list[ProviderModel]:
         """List models available to the configured account/provider."""
+        ...
 
     def probe_capability(self, *, model: str, probe: str, request: RequestEnvelope) -> AdapterResponse:
         """Run a provider-native capability probe when supported."""
+        ...
 
-    def embed(self, *, model: str, input: Any) -> EmbeddingResponse:
+
+class EmbeddingProviderAdapter(Protocol):
+    provider: str
+
+    def embed(self, *, model: str, input: Any, dimensions: int | None = None) -> EmbeddingResponse:
         """Create embeddings when the provider/model supports it."""
+        ...
+
+
+class OperationProviderAdapter(Protocol):
+    provider: str
+
+    def supports_operation(self, *, operation: str, model: str) -> bool:
+        """Return whether this adapter can execute the specialized operation."""
+        ...
+
+    def execute_operation(
+        self,
+        *,
+        operation: str,
+        model: str,
+        request: RequestEnvelope,
+        payload: dict[str, Any],
+    ) -> OperationResponse:
+        """Execute a non-chat model operation."""
+        ...
 
 
 def _jsonable(value: Any) -> Any:

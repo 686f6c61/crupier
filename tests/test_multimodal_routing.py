@@ -14,6 +14,8 @@ def make_config(tmp_path, *, allow, strategy="single"):
             "providers": {
                 "openai": {"enabled": True, "env_key": "OPENAI_API_KEY"},
                 "ollama": {"enabled": True, "host": "http://localhost:11434"},
+                "google": {"enabled": True, "env_key": "GOOGLE_API_KEY"},
+                "nan": {"enabled": True, "env_key": "NAN_API_KEY"},
             },
             "models": {"allow": allow},
             "routing": {"default_strategy": strategy, "allow_fusion": True, "allow_parallel": True},
@@ -27,12 +29,13 @@ def make_config(tmp_path, *, allow, strategy="single"):
 class FakeVisionAdapter:
     provider = "openai"
 
-    def __init__(self):
+    def __init__(self, provider="openai"):
+        self.provider = provider
         self.calls = []
 
     def generate(self, *, model, prompt, request):
         self.calls.append({"model": model, "prompt": prompt, "files": [file.to_dict() for file in request.files]})
-        return AdapterResponse(text="image says total 12.50", metadata={"provider": "openai", "model": model})
+        return AdapterResponse(text="image says total 12.50", metadata={"provider": self.provider, "model": model})
 
 
 def test_normalize_file_infers_image_kind_without_reading_contents(tmp_path):
@@ -156,29 +159,63 @@ def test_markdown_file_is_text_context(tmp_path):
     assert asset.kind == "text"
 
 
-def test_real_execution_still_blocks_native_pdf_without_mapping(tmp_path):
-    client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
+def test_real_execution_preserves_native_pdf_for_capable_adapter(tmp_path):
+    pdf = tmp_path / "contract.pdf"
+    pdf.write_bytes(b"%PDF-1.4 test")
+    adapter = FakeVisionAdapter()
+    client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]), adapters={"openai": adapter})
 
-    try:
-        client.deal(
-            "Read PDF",
-            files=[{"kind": "pdf", "name": "contract.pdf"}],
-            constraints={"require_native_file_input": True},
-            dry_run=False,
-        )
-    except CrupierModelUnsupportedError as exc:
-        assert "native_pdf" in str(exc)
-    else:
-        raise AssertionError("native PDF execution should be blocked until provider mappings exist")
+    result = client.deal(
+        "Read PDF",
+        files=[pdf],
+        constraints={"require_native_file_input": True},
+        dry_run=False,
+    )
+
+    assert result.output_text == "image says total 12.50"
+    assert adapter.calls[0]["files"][0]["kind"] == "pdf"
 
 
-def test_real_execution_blocks_unimplemented_audio_transcription(tmp_path):
+def test_real_execution_defaults_to_native_audio_when_model_supports_it(tmp_path):
+    audio = tmp_path / "call.mp3"
+    audio.write_bytes(b"fake audio")
+    adapter = FakeVisionAdapter("nan")
+    client = Crupier(make_config(tmp_path, allow=["nan:mimo-v2.5"]), adapters={"nan": adapter})
+
+    result = client.deal("Summarize the call", files=[audio], dry_run=False)
+
+    assert result.output_text == "image says total 12.50"
+    assert adapter.calls[0]["files"][0]["kind"] == "audio"
+    assert result.route.input_plan["files"]["representations"][0]["representation"] == "native_audio"
+
+
+def test_native_audio_filters_models_whose_adapter_cannot_transport_audio(tmp_path):
+    audio = tmp_path / "call.wav"
+    audio.write_bytes(b"fake audio")
+    client = Crupier(make_config(tmp_path, allow=["google:gemini-3.5-flash", "nan:mimo-v2.5"]))
+
+    result = client.deal("Transcribe this call", files=[audio], trace="summary")
+
+    assert result.route.models == ["nan:mimo-v2.5"]
+    assert result.trace is not None
+    assert any(
+        item["model"] == "google:gemini-3.5-flash" and "cannot transport" in item["reason"]
+        for item in result.trace.excluded_models
+    )
+
+
+def test_real_execution_blocks_explicit_unimplemented_audio_transcription(tmp_path):
     audio = tmp_path / "call.mp3"
     audio.write_bytes(b"fake audio")
     client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
 
     try:
-        client.deal("Summarize the call", files=[audio], dry_run=False)
+        client.deal(
+            "Summarize the call",
+            files=[audio],
+            constraints={"file_strategy": "extract"},
+            dry_run=False,
+        )
     except CrupierModelUnsupportedError as exc:
         assert "audio" in str(exc)
         assert "transcript" in str(exc)

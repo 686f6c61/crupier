@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NoReturn
 
 from crupier.config import OPENROUTER_DEFAULT_HOST, ProviderSettings
 from crupier.errors import (
@@ -40,7 +40,7 @@ class OpenRouterAdapter(OpenAIAdapter):
             kwargs["timeout"] = timeout
         return OpenAI(**kwargs)
 
-    def _raise_mapped_error(self, exc: Exception) -> None:
+    def _raise_mapped_error(self, exc: Exception) -> NoReturn:
         name = exc.__class__.__name__.lower()
         if "auth" in name or "permission" in name:
             raise CrupierProviderAuthError(str(exc), provider=self.provider, env_key=self.settings.env_key) from exc

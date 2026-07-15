@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from email import policy
+from email.parser import BytesParser
 from ipaddress import ip_address
 from collections.abc import Iterator
 from http import HTTPStatus
@@ -18,6 +20,7 @@ from .errors import (
     CrupierBudgetExceededError,
     CrupierConfigError,
     CrupierError,
+    CrupierExecutionLimitError,
     CrupierModelUnsupportedError,
     CrupierPolicyError,
     CrupierProviderAuthError,
@@ -39,6 +42,7 @@ def build_openai_compatible_server(
     compat_mode: str = "balanced",
     allow_remote: bool = False,
     cors_origin: str | None = None,
+    max_request_bytes: int = 10_000_000,
 ) -> ThreadingHTTPServer:
     """Create a stdlib HTTP server exposing a small OpenAI-compatible API."""
 
@@ -53,6 +57,7 @@ def build_openai_compatible_server(
         client = compat_client
         crupier_client = crupier
         browser_origin = cors_origin
+        request_body_limit = max(1, int(max_request_bytes))
 
     return ThreadingHTTPServer((host, port), Handler)
 
@@ -66,6 +71,7 @@ def serve_openai_compatible(
     compat_mode: str = "balanced",
     allow_remote: bool = False,
     cors_origin: str | None = None,
+    max_request_bytes: int = 10_000_000,
 ) -> None:
     server = build_openai_compatible_server(
         crupier=crupier,
@@ -75,6 +81,7 @@ def serve_openai_compatible(
         compat_mode=compat_mode,
         allow_remote=allow_remote,
         cors_origin=cors_origin,
+        max_request_bytes=max_request_bytes,
     )
     try:
         server.serve_forever()
@@ -87,6 +94,7 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
     client: OpenAI
     crupier_client: Crupier
     browser_origin: str | None = None
+    request_body_limit: int = 10_000_000
 
     def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib handler API
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -106,17 +114,38 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         try:
             path = self._request_path()
-            payload = self._read_json()
+            if path in {"/v1/audio/transcriptions", "/v1/images/edits"}:
+                payload = self._read_multipart()
+            else:
+                payload = self._read_json()
             if path == "/v1/responses":
                 self._handle_response(payload)
             elif path == "/v1/chat/completions":
                 self._handle_chat_completion(payload)
             elif path == "/v1/embeddings":
                 self._handle_embeddings(payload)
+            elif path in {"/v1/rerank", "/v2/rerank"}:
+                self._handle_rerank(payload)
+            elif path == "/v1/images/generations":
+                self._handle_image_generation(payload)
+            elif path == "/v1/images/edits":
+                self._handle_image_edit(payload)
+            elif path == "/v1/audio/speech":
+                self._handle_audio_speech(payload)
+            elif path == "/v1/audio/transcriptions":
+                self._handle_audio_transcription(payload)
             else:
                 self._write_error(HTTPStatus.NOT_FOUND, f"Unknown endpoint {path!r}.", error_type="invalid_request_error")
         except CrupierError as exc:
             self._write_crupier_error(exc)
+        except _RequestBodyTooLarge as exc:
+            self.close_connection = True
+            self._write_error(
+                HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                str(exc),
+                error_type="invalid_request_error",
+                code="request_too_large",
+            )
         except ValueError as exc:
             self._write_error(
                 HTTPStatus.BAD_REQUEST,
@@ -168,19 +197,106 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         result = self.client.embeddings.create(**payload)
         self._write_json(_plain(result))
 
+    def _handle_rerank(self, payload: dict[str, Any]) -> None:
+        if "query" not in payload or "documents" not in payload:
+            raise ValueError("Rerank requires 'query' and 'documents'.")
+        result = self.client.rerank.create(**payload)
+        self._write_json(_plain(result))
+
+    def _handle_image_generation(self, payload: dict[str, Any]) -> None:
+        if "prompt" not in payload:
+            raise ValueError("Missing required parameter: 'prompt'.")
+        result = self.client.images.generate(**payload)
+        self._write_json(_plain(result))
+
+    def _handle_image_edit(self, payload: dict[str, Any]) -> None:
+        if "prompt" not in payload or "image" not in payload:
+            raise ValueError("Image edits require 'prompt' and at least one 'image'.")
+        result = self.client.images.edit(**payload)
+        self._write_json(_plain(result))
+
+    def _handle_audio_speech(self, payload: dict[str, Any]) -> None:
+        if "input" not in payload or "voice" not in payload:
+            raise ValueError("Speech generation requires 'input' and 'voice'.")
+        result = self.client.audio.speech.create(**payload)
+        response_format = str(payload.get("response_format") or "mp3")
+        self._write_bytes(result.read(), content_type=_audio_content_type(response_format))
+
+    def _handle_audio_transcription(self, payload: dict[str, Any]) -> None:
+        if "file" not in payload:
+            raise ValueError("Missing required multipart field: 'file'.")
+        result = self.client.audio.transcriptions.create(**payload)
+        self._write_json(_plain(result))
+
     def _request_path(self) -> str:
         return urlparse(self.path).path
 
     def _read_json(self) -> dict[str, Any]:
-        length = int(self.headers.get("content-length", "0") or "0")
-        raw = self.rfile.read(length) if length else b"{}"
+        raw = self._read_body()
         try:
             data = json.loads(raw.decode("utf-8") or "{}")
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"Invalid JSON: {exc}") from exc
         if not isinstance(data, dict):
             raise ValueError("JSON request body must be an object.")
         return data
+
+    def _read_multipart(self) -> dict[str, Any]:
+        content_type = self.headers.get("content-type", "")
+        if "multipart/form-data" not in content_type.lower():
+            raise ValueError("This endpoint requires multipart/form-data.")
+        raw = self._read_body()
+        message = BytesParser(policy=policy.default).parsebytes(
+            b"Content-Type: " + content_type.encode("utf-8") + b"\r\nMIME-Version: 1.0\r\n\r\n" + raw
+        )
+        if not message.is_multipart():
+            raise ValueError("Invalid multipart/form-data body.")
+        payload: dict[str, Any] = {}
+        for part in message.iter_parts():
+            name = part.get_param("name", header="content-disposition")
+            if not name:
+                continue
+            raw_name = str(name)
+            is_array = raw_name.endswith("[]")
+            key = raw_name.removesuffix("[]")
+            filename = part.get_filename()
+            decoded_payload = part.get_payload(decode=True)
+            if decoded_payload is None:
+                raw_value = b""
+            elif isinstance(decoded_payload, bytes):
+                raw_value = decoded_payload
+            else:
+                raise ValueError(f"Multipart field {key!r} has an invalid body.")
+            if filename:
+                value: Any = (filename, raw_value, part.get_content_type())
+            else:
+                try:
+                    value = raw_value.decode(part.get_content_charset() or "utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ValueError(f"Multipart field {key!r} is not valid text.") from exc
+                value = _coerce_form_value(key, value)
+            if key in payload:
+                existing = payload[key]
+                payload[key] = [*existing, value] if isinstance(existing, list) else [existing, value]
+            elif is_array:
+                payload[key] = [value]
+            else:
+                payload[key] = value
+        return payload
+
+    def _read_body(self) -> bytes:
+        raw_length = self.headers.get("content-length", "0") or "0"
+        try:
+            length = int(raw_length)
+        except ValueError as exc:
+            raise ValueError("Invalid Content-Length header.") from exc
+        if length < 0:
+            raise ValueError("Content-Length cannot be negative.")
+        if length > self.request_body_limit:
+            raise _RequestBodyTooLarge(
+                f"Request body is {length} bytes, above the configured limit of {self.request_body_limit} bytes."
+            )
+        return self.rfile.read(length) if length else b""
 
     def _write_json(self, payload: dict[str, Any], *, status: HTTPStatus = HTTPStatus.OK) -> None:
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
@@ -190,6 +306,14 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         self.send_header("x-request-id", self._request_id())
         self.end_headers()
         self.wfile.write(body)
+
+    def _write_bytes(self, payload: bytes, *, content_type: str) -> None:
+        self.send_response(HTTPStatus.OK)
+        self._send_common_headers(content_type)
+        self.send_header("content-length", str(len(payload)))
+        self.send_header("x-request-id", self._request_id())
+        self.end_headers()
+        self.wfile.write(payload)
 
     def _write_sse(self, events: Any) -> None:
         if not isinstance(events, Iterator):
@@ -258,6 +382,10 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         return
 
 
+class _RequestBodyTooLarge(Exception):
+    pass
+
+
 def _models_payload(client: Crupier) -> dict[str, Any]:
     data = []
     for card in client.models.list(allowed_only=True):
@@ -292,6 +420,31 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def _coerce_form_value(name: str, value: str) -> Any:
+    if name in {"n", "seed", "top_n"}:
+        try:
+            return int(value)
+        except ValueError as exc:
+            raise ValueError(f"Multipart field {name!r} must be an integer.") from exc
+    if name in {"guidance", "speed", "temperature"}:
+        try:
+            return float(value)
+        except ValueError as exc:
+            raise ValueError(f"Multipart field {name!r} must be a number.") from exc
+    return value
+
+
+def _audio_content_type(response_format: str) -> str:
+    return {
+        "aac": "audio/aac",
+        "flac": "audio/flac",
+        "mp3": "audio/mpeg",
+        "opus": "audio/ogg",
+        "pcm": "audio/L16",
+        "wav": "audio/wav",
+    }.get(response_format.lower(), "application/octet-stream")
+
+
 def _error_contract(exc: Exception) -> tuple[HTTPStatus, str, str]:
     if isinstance(exc, CrupierProviderAuthError):
         return HTTPStatus.UNAUTHORIZED, "authentication_error", "invalid_api_key"
@@ -303,6 +456,8 @@ def _error_contract(exc: Exception) -> tuple[HTTPStatus, str, str]:
         return HTTPStatus.BAD_REQUEST, "invalid_request_error", "model_not_supported"
     if isinstance(exc, CrupierBudgetExceededError):
         return HTTPStatus.BAD_REQUEST, "invalid_request_error", "budget_exceeded"
+    if isinstance(exc, CrupierExecutionLimitError):
+        return HTTPStatus.REQUEST_TIMEOUT, "server_error", "execution_limit_exceeded"
     if isinstance(exc, CrupierToolApprovalRequired):
         return HTTPStatus.BAD_REQUEST, "invalid_request_error", "tool_approval_required"
     if isinstance(exc, CrupierStructuredOutputError):

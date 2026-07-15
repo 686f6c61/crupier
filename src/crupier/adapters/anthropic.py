@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NoReturn
 
 from crupier.config import ProviderSettings
 from crupier.errors import (
@@ -30,6 +30,11 @@ class AnthropicAdapter:
     def __init__(self, settings: ProviderSettings):
         self.settings = settings
         self._client: Any = None
+
+    @staticmethod
+    def supports_file_kind(*, model: str, kind: str) -> bool:
+        del model
+        return kind == "image"
 
     def generate(self, *, model: str, prompt: str, request: RequestEnvelope) -> AdapterResponse:
         client = self._client or self._build_client()
@@ -158,7 +163,7 @@ class AnthropicAdapter:
         try:
             payload: dict[str, Any] = {
                 "model": model,
-                "max_tokens": 16,
+                "max_tokens": int(request.constraints.get("max_output_tokens", 256)),
                 "messages": [{"role": "user", "content": 'Reply with exactly: "stream-ok"'}],
                 "stream": True,
             }
@@ -176,7 +181,7 @@ class AnthropicAdapter:
                     break
         except Exception as exc:  # noqa: BLE001
             self._raise_mapped_error(exc)
-        ok = event_count > 0
+        ok = event_count > 0 and text_seen
         return AdapterResponse(
             text="",
             raw=None,
@@ -222,7 +227,7 @@ class AnthropicAdapter:
                     self._raise_mapped_error(repaired_exc)
             self._raise_mapped_error(exc)
 
-    def _raise_mapped_error(self, exc: Exception) -> None:
+    def _raise_mapped_error(self, exc: Exception) -> NoReturn:
         name = exc.__class__.__name__.lower()
         if "auth" in name or "permission" in name:
             raise CrupierProviderAuthError(str(exc), provider=self.provider, env_key=self.settings.env_key) from exc

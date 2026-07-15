@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import mimetypes
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import unquote_to_bytes, urlparse
 
 from .errors import CrupierModelUnsupportedError
 from .models import FileAsset, FileRepresentation, FileRoutingPlan
@@ -109,38 +110,120 @@ def can_execute_native_images(file_plan: FileRoutingPlan | None) -> bool:
     return all(item.representation == "native_vision" for item in file_plan.representations)
 
 
+def split_file_execution_inputs(
+    file_plan: FileRoutingPlan,
+) -> tuple[list[FileAsset], FileRoutingPlan | None]:
+    """Separate provider-native assets from assets that need local extraction."""
+
+    native_images: list[FileAsset] = []
+    extraction_assets: list[FileAsset] = []
+    extraction_representations: list[FileRepresentation] = []
+    for asset, representation in zip(file_plan.assets, file_plan.representations, strict=True):
+        if representation.representation.startswith("native_") and not representation.pipeline:
+            native_images.append(asset)
+            continue
+        extraction_assets.append(asset)
+        extraction_representations.append(representation)
+    if not extraction_assets:
+        return native_images, None
+    extraction_plan = FileRoutingPlan(
+        assets=extraction_assets,
+        representations=extraction_representations,
+        required_model_modalities=_sorted_unique(
+            modality for item in extraction_representations for modality in item.required_model_modalities
+        ),
+        required_model_capabilities=_sorted_unique(
+            capability
+            for item in extraction_representations
+            for capability in item.required_model_capabilities
+        ),
+        extraction_required=any(item.pipeline for item in extraction_representations),
+        warnings=_sorted_unique(warning for item in extraction_representations for warning in item.warnings),
+    )
+    return native_images, extraction_plan
+
+
 def native_image_payloads(files: list[FileAsset], *, max_bytes: int = 20_000_000) -> list[dict[str, str]]:
     """Read local image files for provider-native multimodal requests."""
 
+    return native_file_payloads(files, allowed_kinds={"image"}, max_bytes=max_bytes)
+
+
+def native_file_payloads(
+    files: list[FileAsset],
+    *,
+    allowed_kinds: set[str],
+    max_bytes: int = 20_000_000,
+) -> list[dict[str, str]]:
+    """Read bounded local/data-URL assets for a provider-native request."""
+
     payloads: list[dict[str, str]] = []
     for asset in files:
-        if asset.kind != "image":
-            raise CrupierModelUnsupportedError(f"File {asset.name or '<unnamed>'!r} is not an image input.")
+        if asset.kind not in allowed_kinds:
+            expected = ", ".join(sorted(allowed_kinds))
+            raise CrupierModelUnsupportedError(
+                f"File {asset.name or '<unnamed>'!r} has kind {asset.kind!r}; expected one of: {expected}."
+            )
+        if asset.uri and asset.uri.startswith("data:"):
+            payloads.append(_data_file_payload(asset, allowed_kinds=allowed_kinds, max_bytes=max_bytes))
+            continue
         if not asset.uri or not _looks_local(asset.uri):
             raise CrupierModelUnsupportedError(
-                f"Image {asset.name or '<unnamed>'!r} must be a local file path for real execution."
+                f"File {asset.name or '<unnamed>'!r} must be a local file path or data URL for real execution."
             )
         path = Path(asset.uri).expanduser()
         if not path.exists() or not path.is_file():
-            raise CrupierModelUnsupportedError(f"Image file {asset.name or str(path)!r} does not exist.")
+            raise CrupierModelUnsupportedError(f"File {asset.name or str(path)!r} does not exist.")
         size = path.stat().st_size
         if size > max_bytes:
             raise CrupierModelUnsupportedError(
-                f"Image file {asset.name or str(path)!r} is {size} bytes, above max {max_bytes} bytes."
+                f"File {asset.name or str(path)!r} is {size} bytes, above max {max_bytes} bytes."
             )
         mime_type = asset.mime_type or _guess_mime(asset.name or str(path)) or "application/octet-stream"
-        if not mime_type.startswith("image/"):
-            raise CrupierModelUnsupportedError(f"File {asset.name or str(path)!r} is not an image MIME type.")
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         payloads.append(
             {
                 "name": asset.name or path.name,
+                "kind": asset.kind,
                 "mime_type": mime_type,
                 "base64": encoded,
                 "data_url": f"data:{mime_type};base64,{encoded}",
             }
         )
     return payloads
+
+
+def _data_file_payload(asset: FileAsset, *, allowed_kinds: set[str], max_bytes: int) -> dict[str, str]:
+    assert asset.uri is not None
+    header, separator, payload = asset.uri.partition(",")
+    if not separator or not header.startswith("data:"):
+        raise CrupierModelUnsupportedError(f"Image {asset.name or '<unnamed>'!r} has an invalid data URL.")
+    media_parts = header[5:].split(";")
+    mime_type = media_parts[0] or asset.mime_type or "application/octet-stream"
+    inferred_kind = _kind_for(mime_type, "")
+    if inferred_kind not in allowed_kinds:
+        expected = ", ".join(sorted(allowed_kinds))
+        raise CrupierModelUnsupportedError(
+            f"Data URL uses MIME type {mime_type!r} ({inferred_kind}); expected one of: {expected}."
+        )
+    try:
+        raw = base64.b64decode(payload, validate=True) if "base64" in media_parts[1:] else unquote_to_bytes(payload)
+    except (ValueError, binascii.Error) as exc:
+        raise CrupierModelUnsupportedError(
+            f"File {asset.name or '<unnamed>'!r} has invalid data URL encoding."
+        ) from exc
+    if len(raw) > max_bytes:
+        raise CrupierModelUnsupportedError(
+            f"File data URL is {len(raw)} bytes, above max {max_bytes} bytes."
+        )
+    encoded = base64.b64encode(raw).decode("ascii")
+    return {
+        "name": asset.name or inferred_kind,
+        "kind": inferred_kind,
+        "mime_type": mime_type,
+        "base64": encoded,
+        "data_url": f"data:{mime_type};base64,{encoded}",
+    }
 
 
 def prepare_extracted_file_context(
@@ -161,8 +244,10 @@ def prepare_extracted_file_context(
     remaining_chars = max_chars
 
     for index, asset in enumerate(files, start=1):
-        representation = representations.get(asset.name) or (
-            file_plan.representations[index - 1] if index - 1 < len(file_plan.representations) else None
+        representation = (
+            file_plan.representations[index - 1]
+            if index - 1 < len(file_plan.representations)
+            else representations.get(asset.name)
         )
         if representation is None:
             raise CrupierModelUnsupportedError(f"No file representation is available for {asset.name or index!r}.")
@@ -210,7 +295,7 @@ def prepare_extracted_file_context(
 def _asset_from_dict(data: dict[str, Any]) -> FileAsset:
     uri = data.get("uri") or data.get("path") or data.get("url")
     name = data.get("name") or _name_from_uri(uri)
-    mime_type = data.get("mime_type") or _guess_mime(name or uri)
+    mime_type = data.get("mime_type") or _data_uri_mime(uri) or _guess_mime(name or uri)
     kind = data.get("kind") or _kind_for(mime_type, _suffix(name or uri))
     size_bytes = data.get("size_bytes")
     exists = data.get("exists")
@@ -233,6 +318,15 @@ def _asset_from_dict(data: dict[str, Any]) -> FileAsset:
 
 
 def _asset_from_reference(reference: str) -> FileAsset:
+    data_mime = _data_uri_mime(reference)
+    if data_mime:
+        return FileAsset(
+            kind=_kind_for(data_mime, ""),
+            name="image" if data_mime.startswith("image/") else "data",
+            uri=reference,
+            mime_type=data_mime,
+            exists=True,
+        )
     name = _name_from_uri(reference)
     mime_type = _guess_mime(name or reference)
     path = Path(reference).expanduser() if _looks_local(reference) else None
@@ -294,19 +388,23 @@ def _plan_asset(asset: FileAsset, *, task: str, constraints: dict[str, Any]) -> 
         )
 
     if asset.kind == "audio":
-        if require_native:
+        if not force_extract:
             return _representation(
                 asset,
                 "native_audio",
                 modalities=["audio"],
                 model_capabilities=["audio_input"],
-                reason="Audio native input was requested by constraints.",
+                reason=(
+                    "Audio native input was requested by constraints."
+                    if require_native
+                    else "Audio defaults to native input while transcript preprocessing is unavailable."
+                ),
             )
         return _representation(
             asset,
             "transcript",
             pipeline=["audio_transcription"],
-            reason="Audio is planned as transcript-first unless native audio input is required.",
+            reason="Audio transcript preprocessing was explicitly requested.",
             warnings=["audio_transcription_not_implemented"],
         )
 
@@ -437,12 +535,22 @@ def _name_from_uri(uri: str | None) -> str | None:
     return Path(uri).name or None
 
 
+def _data_uri_mime(uri: Any) -> str | None:
+    if not isinstance(uri, str) or not uri.startswith("data:"):
+        return None
+    header = uri.partition(",")[0]
+    mime_type = header[5:].split(";", 1)[0]
+    return mime_type or None
+
+
 def _suffix(name: str | None) -> str:
     return Path(name or "").suffix.lower()
 
 
 def _looks_local(reference: str) -> bool:
-    return "://" not in reference
+    if len(reference) >= 2 and reference[0].isalpha() and reference[1] == ":":
+        return True
+    return not urlparse(reference).scheme
 
 
 def _sorted_unique(values: Any) -> list[str]:

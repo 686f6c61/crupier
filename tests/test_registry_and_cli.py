@@ -1,7 +1,7 @@
 import json
 
 from crupier import Crupier
-from crupier.adapters import AdapterResponse, EmbeddingResponse, ProviderModel
+from crupier.adapters import AdapterResponse, EmbeddingResponse, OperationResponse, ProviderModel
 from crupier.cli import _smoke_model_refs, _verify_provider, _verify_provider_names, main
 from crupier.config import CrupierConfig, write_default_project, write_models_allow
 from crupier.model_profiles import apply_decision_profile
@@ -36,6 +36,24 @@ class FakeDiscoveryAdapter:
 
     def generate(self, *, model, prompt, request):
         raise AssertionError("update online should not generate")
+
+
+class FakeSpecializedVerifyAdapter:
+    provider = "nan"
+
+    def list_models(self):
+        return [ProviderModel(id="rerank", provider="nan")]
+
+    @staticmethod
+    def supports_operation(*, operation, model):
+        return operation == "reranker" and model == "rerank"
+
+    def execute_operation(self, *, operation, model, request, payload):
+        return OperationResponse(
+            operation=operation,
+            output=[{"index": 1, "relevance_score": 0.9}],
+            metadata={"provider": "nan", "model": model},
+        )
 
 
 class FakeVerifyAdapter:
@@ -113,6 +131,49 @@ def test_registry_update_online_classifies_embedding_models(tmp_path):
     assert card["modalities_output"] == ["embedding"]
     assert card["embedding_dimensions"] == 1536
     assert card["routing_hints"]["routing_status"] == "specialized"
+
+
+def test_registry_update_online_preserves_nan_model_kinds(tmp_path):
+    class FakeNaNDiscoveryAdapter:
+        provider = "nan"
+
+        def list_models(self):
+            return [
+                ProviderModel(id="qwen3.6", provider="nan"),
+                ProviderModel(id="qwen3-embedding", provider="nan"),
+                ProviderModel(id="whisper", provider="nan"),
+            ]
+
+    config = CrupierConfig.from_dict(
+        {
+            "providers": {"nan": {"enabled": True, "env_key": "NAN_API_KEY"}},
+            "models": {"allow": []},
+        }
+    )
+    config.root = tmp_path
+    client = Crupier(config, adapters={"nan": FakeNaNDiscoveryAdapter()})
+
+    client.update(dry_run=False, online=True, provider="nan")
+
+    card_dir = tmp_path / ".crupier" / "registry" / "capability-cards"
+    chat = json.loads((card_dir / "nan__qwen3.6.json").read_text(encoding="utf-8"))
+    embedding = json.loads((card_dir / "nan__qwen3-embedding.json").read_text(encoding="utf-8"))
+    transcription = json.loads((card_dir / "nan__whisper.json").read_text(encoding="utf-8"))
+    assert chat["model_kind"] == "chat"
+    assert chat["modalities_input"] == ["text", "image"]
+    assert embedding["model_kind"] == "embedding"
+    assert embedding["embedding_dimensions"] == 4096
+    assert transcription["model_kind"] == "transcription"
+
+
+def test_nan_curated_profiles_preserve_reasoning_behavior():
+    cards = ModelRegistry.builtin_cards()
+
+    assert cards["nan:qwen3.6"].routing_hints["routing_status"] == "recommended"
+    assert cards["nan:qwen3.6"].routing_hints["reasoning"] == "enabled_by_default"
+    assert cards["nan:mimo-v2.5"].routing_hints["routing_status"] == "opt_in"
+    assert cards["nan:mimo-v2.5"].routing_hints["reasoning"] == "always_enabled"
+    assert cards["nan:deepseek-v4-flash"].routing_hints["reasoning_effort"] == ["low", "medium", "high"]
 
 
 def test_registry_update_online_enriches_decision_profiles(tmp_path):
@@ -418,6 +479,8 @@ def test_cli_orchestrator_set_updates_config(tmp_path, capsys):
                 "anthropic:claude-opus-4-8",
                 "--max-repairs",
                 "4",
+                "--candidate-limit",
+                "9",
                 "--no-allow-prompt-summary-only",
             ]
         )
@@ -429,6 +492,7 @@ def test_cli_orchestrator_set_updates_config(tmp_path, capsys):
     assert config.orchestrator.model == "ollama:glm-5.2"
     assert config.orchestrator.fallback_model == "anthropic:claude-opus-4-8"
     assert config.orchestrator.max_repairs == 4
+    assert config.orchestrator.candidate_limit == 9
     assert config.orchestrator.allow_prompt_summary_only is False
     assert "Updated [orchestrator]" in capsys.readouterr().out
 
@@ -642,6 +706,25 @@ def test_verify_provider_uses_embedding_smoke_for_embedding_models(tmp_path, mon
     assert item["smoke"][0]["ok"] is True
     assert item["smoke"][0]["kind"] == "embeddings"
     assert item["smoke"][0]["embedding_dimensions"] == 3
+    assert item["status"] == "needs_probes"
+
+
+def test_verify_provider_runs_specialized_operation_smoke(tmp_path, monkeypatch):
+    monkeypatch.setenv("NAN_API_KEY", "test-key")
+    config = CrupierConfig.from_dict(
+        {
+            "providers": {"nan": {"enabled": True, "env_key": "NAN_API_KEY"}},
+            "models": {"allow": ["nan:rerank"]},
+        }
+    )
+    config.root = tmp_path
+    client = Crupier(config, adapters={"nan": FakeSpecializedVerifyAdapter()})
+
+    item = _verify_provider(client, "nan", run_smoke=True, all_models=True)
+
+    assert item["smoke"][0]["ok"] is True
+    assert item["smoke"][0]["kind"] == "reranker"
+    assert item["smoke"][0]["model"] == "nan:rerank"
     assert item["status"] == "needs_probes"
 
 

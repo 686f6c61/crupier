@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import re
+from time import perf_counter
 from typing import Any, Protocol
 
 from .adapters import ProviderAdapter
-from .config import CrupierConfig, ProfileSettings
+from .budgets import ExecutionBudget, request_with_timeout
+from .config import CrupierConfig, ProfileSettings, ollama_is_local
 from .costs import estimate_route_cost
-from .errors import CrupierRouteValidationError
+from .errors import CrupierBudgetExceededError, CrupierExecutionLimitError, CrupierRouteValidationError
+from .model_profiles import classify_task_signal_weights
 from .models import (
     CapabilityCard,
     CostEstimate,
@@ -25,6 +29,8 @@ from .prompts import (
     build_orchestrator_repair_prompt,
 )
 from .route_schema import ALLOWED_STRATEGIES, validate_route_plan_shape
+from .registry import ModelRegistry
+from .runtime_policy import apply_runtime_policy
 from .selector import ModelSelector
 
 
@@ -81,8 +87,13 @@ class DeterministicOrchestrator:
 
     def _finalize_plan(self, plan: RoutePlan, context: PlanningContext) -> RoutePlan:
         plan.policy_filters_applied = list(context.filters_applied)
-        # The orchestrator may suggest a cost, but Crupier owns budget math.
+        # The orchestrator may suggest estimates, but Crupier owns budget math.
         plan.estimated_cost = estimate_route_cost(plan, context.request, context.candidates)
+        plan.estimated_latency_ms = self._plan_latency_estimate(
+            plan,
+            context.candidates,
+            request=context.request,
+        )
         self._attach_input_plan(plan, context.request)
         self._attach_selection_scores(plan, context)
         return plan
@@ -203,7 +214,7 @@ class DeterministicOrchestrator:
         )
 
     def _fallback(self, request: RequestEnvelope, candidates: list[CapabilityCard]) -> RoutePlan:
-        ranked = candidates[:3]
+        ranked = self._rank(request, candidates)[:3]
         return RoutePlan(
             strategy="fallback",
             steps=[RouteStep(role="fallback", models=[card.model_ref.key for card in ranked])],
@@ -215,9 +226,16 @@ class DeterministicOrchestrator:
         )
 
     def _cascade(self, request: RequestEnvelope, candidates: list[CapabilityCard]) -> RoutePlan:
-        cheap_first = sorted(self._rank(request, candidates), key=lambda card: self._cost_sort(card))
+        ranked = self._rank(request, candidates)
+        cheap_first = [
+            card
+            for _, card in sorted(
+                enumerate(ranked),
+                key=lambda item: (self._cost_sort(item[1])[0], item[0]),
+            )
+        ]
         first = cheap_first[0]
-        best = self._rank(request, candidates)[0]
+        best = ranked[0]
         steps = [RouteStep(role="primary", model=first.model_ref.key)]
         if best.model_ref.key != first.model_ref.key:
             steps.append(RouteStep(role="escalation", model=best.model_ref.key))
@@ -232,7 +250,8 @@ class DeterministicOrchestrator:
         )
 
     def _panel(self, request: RequestEnvelope, candidates: list[CapabilityCard]) -> RoutePlan:
-        panel = self._rank(request, candidates)[: self._panel_size(request, candidates)]
+        ranked = self._rank(request, candidates)
+        panel = self._provider_diverse(ranked, self._panel_size(request, candidates))
         return RoutePlan(
             strategy="panel",
             steps=[RouteStep(role="panel", models=[card.model_ref.key for card in panel])],
@@ -247,7 +266,7 @@ class DeterministicOrchestrator:
         if len(candidates) < 2:
             return self._single(request, candidates)
         ranked = self._rank(request, candidates)
-        panel = ranked[: self._panel_size(request, candidates)]
+        panel = self._provider_diverse(ranked, self._panel_size(request, candidates))
         judge = self._prefer_different_provider(panel[0], ranked[1:]) or panel[0]
         writer = ranked[0]
         return RoutePlan(
@@ -285,7 +304,11 @@ class DeterministicOrchestrator:
 
     def _local_first(self, request: RequestEnvelope, candidates: list[CapabilityCard]) -> RoutePlan:
         ranked = self._rank(request, candidates)
-        local = [card for card in ranked if card.model_ref.provider == "ollama"]
+        local = [
+            card
+            for card in ranked
+            if card.model_ref.provider == "ollama" and ollama_is_local(self.config)
+        ]
         first = local[0] if local else ranked[0]
         fallback = next((card for card in ranked if card.model_ref.key != first.model_ref.key), None)
         steps = [RouteStep(role="primary", model=first.model_ref.key)]
@@ -296,7 +319,11 @@ class DeterministicOrchestrator:
             steps=steps,
             estimated_cost=CostEstimate(0.0),
             estimated_latency_ms=self._latency_estimate([first]),
-            reason="Private/local-first profile prefers configured Ollama candidates before other providers.",
+            reason=(
+                "Private/local-first profile prefers a configured local Ollama endpoint."
+                if local
+                else "No local Ollama endpoint is configured; selected the best policy-allowed candidate."
+            ),
             risk_level=self._risk_level(request, "local_first"),
             summary="Local-first route: " + " -> ".join(step.model or "" for step in steps),
         )
@@ -357,6 +384,25 @@ class DeterministicOrchestrator:
         return candidates[0] if candidates else None
 
     @staticmethod
+    def _provider_diverse(candidates: list[CapabilityCard], limit: int) -> list[CapabilityCard]:
+        selected: list[CapabilityCard] = []
+        providers: set[str] = set()
+        for card in candidates:
+            if card.model_ref.provider in providers:
+                continue
+            selected.append(card)
+            providers.add(card.model_ref.provider)
+            if len(selected) >= limit:
+                return selected
+        for card in candidates:
+            if card in selected:
+                continue
+            selected.append(card)
+            if len(selected) >= limit:
+                break
+        return selected
+
+    @staticmethod
     def _cost_sort(card: CapabilityCard) -> tuple[int, str]:
         order = {"low": 0, "medium": 1, "unknown": 2, "high": 3}
         return (order.get(card.cost_tier, 2), card.model_ref.key)
@@ -365,12 +411,77 @@ class DeterministicOrchestrator:
     def _latency_estimate(cards: list[CapabilityCard]) -> int:
         if not cards:
             return 0
-        tiers = {"fast": 2500, "medium": 6000, "slow": 12000, "unknown": 8000}
+        tiers = {"fast": 5000, "medium": 12000, "slow": 25000, "unknown": 15000}
         return max(tiers.get(card.latency_tier, 8000) for card in cards)
+
+    def _plan_latency_estimate(
+        self,
+        plan: RoutePlan,
+        candidates: list[CapabilityCard],
+        *,
+        request: RequestEnvelope | None = None,
+    ) -> int:
+        by_key = {card.model_ref.key: card for card in candidates}
+
+        def estimate(model: str | None) -> int:
+            if not model:
+                return 0
+            card = by_key.get(model)
+            return self._latency_estimate([card]) if card is not None else 15000
+
+        if request is not None and request.tools:
+            try:
+                max_rounds = max(
+                    1,
+                    int(request.constraints.get("max_tool_rounds", self.config.routing.max_tool_rounds)),
+                )
+            except (TypeError, ValueError):
+                max_rounds = self.config.routing.max_tool_rounds
+            tool_model = plan.models[0] if plan.models else None
+            tool_total = estimate(tool_model) * (max_rounds + 1)
+            if plan.strategy == "critique_repair":
+                critic = next((step.model for step in plan.steps if step.role == "critic"), None)
+                repair = next((step.model for step in plan.steps if step.role == "repair"), None)
+                return tool_total + estimate(critic) + estimate(repair)
+            return tool_total
+
+        if plan.strategy in {"single", "local_first"}:
+            primary = next((step.model for step in plan.steps if step.role == "primary"), None)
+            return estimate(primary)
+        if plan.strategy == "fallback":
+            step = next((item for item in plan.steps if item.role == "fallback"), None)
+            first = step.model if step and step.model else step.models[0] if step and step.models else None
+            return estimate(first)
+        if plan.strategy == "cascade":
+            return sum(estimate(model) for model in plan.models)
+        if plan.strategy == "panel":
+            panel = next((step.models for step in plan.steps if step.role == "panel"), [])
+            latencies = [estimate(model) for model in panel]
+            return max(latencies, default=0) if self.config.routing.allow_parallel else sum(latencies)
+        if plan.strategy == "fusion":
+            panel = next((step.models for step in plan.steps if step.role == "panel"), [])
+            panel_latencies = [estimate(model) for model in panel]
+            panel_total = (
+                max(panel_latencies, default=0)
+                if self.config.routing.allow_parallel
+                else sum(panel_latencies)
+            )
+            judge = next((step.model for step in plan.steps if step.role == "judge"), None)
+            writer = next((step.model for step in plan.steps if step.role == "final_writer"), None)
+            return panel_total + estimate(judge) + estimate(writer)
+        if plan.strategy == "critique_repair":
+            return sum(estimate(model) for model in plan.models)
+        if plan.strategy == "delegate":
+            anchor = next((step.model for step in plan.steps if step.role == "delegate"), None)
+            return estimate(anchor) * 2
+        return sum(estimate(model) for model in plan.models)
 
     @staticmethod
     def _panel_size(request: RequestEnvelope, candidates: list[CapabilityCard]) -> int:
-        requested = int(request.constraints.get("max_panel_size", 3))
+        try:
+            requested = int(request.constraints.get("max_panel_size", 3))
+        except (TypeError, ValueError):
+            requested = 3
         return max(1, min(requested, len(candidates)))
 
     @staticmethod
@@ -408,6 +519,10 @@ class ModelOrchestrator:
         self.adapters = adapters
         self.fallback = fallback or DeterministicOrchestrator(config, selector=selector)
         self.policy = PolicyEngine(config)
+        try:
+            self._cards = ModelRegistry(config).load()
+        except Exception:  # noqa: BLE001 - orchestration still validates without optional runtime hints
+            self._cards = {}
 
     def plan(self, context: PlanningContext) -> RoutePlan:
         model_key = self.config.orchestrator.model
@@ -426,6 +541,8 @@ class ModelOrchestrator:
                         + f" Fallback orchestrator {candidate_model} was used after primary orchestrator failure."
                     ).strip()
                 return plan
+            except (CrupierBudgetExceededError, CrupierExecutionLimitError):
+                raise
             except Exception as exc:  # noqa: BLE001 - invalid model plans fall back safely
                 last_error = str(exc)
 
@@ -433,6 +550,8 @@ class ModelOrchestrator:
         reason = last_error or "model plan was invalid"
         if attempted:
             reason = f"{reason}; attempted orchestrators: {attempted}"
+        if self.config.orchestrator.fallback == "error":
+            raise CrupierRouteValidationError(reason)
         return self._deterministic_fallback(context, reason)
 
     def _plan_with_model(self, model_key: str, context: PlanningContext) -> RoutePlan:
@@ -445,10 +564,26 @@ class ModelOrchestrator:
                 plan = self._plan_from_text(raw_text)
                 self._validate_model_plan(plan, context)
                 plan = self.fallback._finalize_plan(plan, context)
+                plan.estimated_latency_ms = (plan.estimated_latency_ms or 0) + self._planning_latency_ms(context)
+                plan.estimated_cost = CostEstimate(
+                    plan.estimated_cost.estimated_usd + self._planning_cost_usd(context)
+                )
+                self._annotate_last_orchestrator_call(
+                    context,
+                    plan_status="validated",
+                    repair_attempt=attempt,
+                    strategy=plan.strategy,
+                )
                 plan.reason = (plan.reason + " Model orchestrator proposed and validated this route.").strip()
                 return plan
             except Exception as exc:  # noqa: BLE001 - invalid model plans are repaired or escalated
                 last_error = str(exc)
+                self._annotate_last_orchestrator_call(
+                    context,
+                    plan_status="invalid",
+                    repair_attempt=attempt,
+                    validation_error=last_error,
+                )
                 if attempt >= max_repairs:
                     break
                 raw_text = self._call_orchestrator(
@@ -470,6 +605,10 @@ class ModelOrchestrator:
 
     def _deterministic_fallback(self, context: PlanningContext, reason: str) -> RoutePlan:
         plan = self.fallback.plan(context)
+        plan.estimated_latency_ms = (plan.estimated_latency_ms or 0) + self._planning_latency_ms(context)
+        plan.estimated_cost = CostEstimate(
+            plan.estimated_cost.estimated_usd + self._planning_cost_usd(context)
+        )
         plan.reason = (
             plan.reason + f" Model orchestrator unavailable or invalid; deterministic fallback used ({reason})."
         ).strip()
@@ -493,8 +632,78 @@ class ModelOrchestrator:
             },
             metadata={"purpose": "crupier_orchestrator"},
         )
-        response = adapter.generate(model=model_ref.model, prompt=prompt, request=request)
+        started = perf_counter()
+        effective_request, runtime_policy = apply_runtime_policy(model_ref.key, request, self._cards.get(model_ref.key))
+        budget = context.request.metadata.get("_crupier_execution_budget")
+        reservation = None
+        if isinstance(budget, ExecutionBudget):
+            reservation = budget.reserve(model=model_ref.key, prompt=prompt, request=effective_request)
+            effective_request = request_with_timeout(effective_request, reservation.timeout_seconds)
+        try:
+            response = adapter.generate(model=model_ref.model, prompt=prompt, request=effective_request)
+        except Exception as exc:
+            self._record_orchestrator_call(
+                context,
+                {
+                    "role": "orchestrator",
+                    "provider": model_ref.provider,
+                    "model": model_ref.key,
+                    "latency_ms": int((perf_counter() - started) * 1000),
+                    "error_type": exc.__class__.__name__,
+                    "error": str(exc),
+                    "estimated_usd_reserved": reservation.estimated_usd if reservation else None,
+                },
+            )
+            raise
+        if isinstance(budget, ExecutionBudget):
+            budget.ensure_deadline()
+        self._record_orchestrator_call(
+            context,
+            {
+                "role": "orchestrator",
+                "provider": model_ref.provider,
+                "model": model_ref.key,
+                "latency_ms": int((perf_counter() - started) * 1000),
+                "usage": response.usage,
+                "estimated_usd_reserved": reservation.estimated_usd if reservation else None,
+                "metadata": response.metadata | ({"runtime_policy": runtime_policy} if runtime_policy else {}),
+            },
+        )
         return response.text
+
+    @staticmethod
+    def _record_orchestrator_call(context: PlanningContext, record: dict[str, Any]) -> None:
+        calls = context.request.metadata.setdefault("_crupier_orchestrator_calls", [])
+        if isinstance(calls, list):
+            calls.append(record)
+
+    @staticmethod
+    def _annotate_last_orchestrator_call(context: PlanningContext, **updates: Any) -> None:
+        calls = context.request.metadata.get("_crupier_orchestrator_calls")
+        if isinstance(calls, list) and calls and isinstance(calls[-1], dict):
+            calls[-1].update(updates)
+
+    @staticmethod
+    def _planning_latency_ms(context: PlanningContext) -> int:
+        calls = context.request.metadata.get("_crupier_orchestrator_calls")
+        if not isinstance(calls, list):
+            return 0
+        return sum(
+            max(0, int(call.get("latency_ms", 0)))
+            for call in calls
+            if isinstance(call, dict)
+        )
+
+    @staticmethod
+    def _planning_cost_usd(context: PlanningContext) -> float:
+        calls = context.request.metadata.get("_crupier_orchestrator_calls")
+        if not isinstance(calls, list):
+            return 0.0
+        return sum(
+            max(0.0, float(call.get("estimated_usd_reserved", 0.0) or 0.0))
+            for call in calls
+            if isinstance(call, dict)
+        )
 
     def _planning_prompt(self, context: PlanningContext) -> str:
         return build_orchestrator_planning_prompt(self._planning_payload(context))
@@ -503,18 +712,82 @@ class ModelOrchestrator:
         return build_orchestrator_repair_prompt(self._planning_payload(context), raw_text=raw_text, error=error)
 
     def _planning_payload(self, context: PlanningContext) -> dict[str, Any]:
+        planning_candidates = self._planning_candidates(context)
+        planning_keys = {card.model_ref.key for card in planning_candidates}
         payload = context.to_dict(summary=True)
-        payload["candidate_cards"] = [_candidate_summary(card) for card in context.candidates]
+        payload["candidate_models"] = [card.model_ref.key for card in planning_candidates]
+        payload["candidate_cards"] = [_candidate_summary(card) for card in planning_candidates]
+        payload["candidate_pool_total"] = len(context.candidates)
+        payload["candidate_pool_shown"] = len(planning_candidates)
+        payload["deterministic_scores"] = _compact_deterministic_scores(
+            [
+                score.to_dict()
+                for score in self.fallback.selector.score_all(context.request, planning_candidates)
+            ],
+            planning_keys,
+        )
         payload["max_calls"] = int(context.request.constraints.get("max_calls", self.config.routing.max_calls))
-        payload["allowed_strategies"] = sorted(self.ALLOWED_STRATEGIES)
+        required_strategy = self._profile_strategy(context)
+        sensitive_strategies = self._sensitive_allowed_strategies(context)
+        if required_strategy:
+            allowed_strategies = [required_strategy]
+        elif sensitive_strategies:
+            allowed_strategies = sorted(sensitive_strategies)
+        else:
+            allowed_strategies = sorted(self.ALLOWED_STRATEGIES)
+        payload["allowed_strategies"] = allowed_strategies
+        payload["required_strategy"] = required_strategy
+        payload["route_step_contract"] = {
+            "single": ["primary"],
+            "fallback": ["fallback"],
+            "cascade": ["primary", "escalation?"],
+            "panel": ["panel"],
+            "fusion": ["panel", "judge", "final_writer"],
+            "critique_repair": ["generator", "critic", "repair"],
+            "local_first": ["primary", "fallback?"],
+            "delegate": ["delegate"],
+        }
         payload["prompt_version"] = ORCHESTRATOR_ROUTE_PLAN_PROMPT_VERSION
-        sensitive = self._sensitive_allowed_strategies(context)
-        if sensitive:
+        payload["task_signal_weights"] = classify_task_signal_weights(context.request)
+        payload["request_shape"] = _request_shape(context.request)
+        payload["strict_plan_validation"] = bool(self.config.orchestrator.require_validated_plan)
+        if not self.config.orchestrator.allow_prompt_summary_only:
+            payload["request_content"] = _request_content(context.request)
+        if sensitive_strategies:
             payload["strategy_guardrail"] = {
                 "reason": "agentic high-risk/tool request",
-                "allowed_strategies": sorted(sensitive),
+                "allowed_strategies": sorted(sensitive_strategies),
             }
         return payload
+
+    def _planning_candidates(self, context: PlanningContext) -> list[CapabilityCard]:
+        try:
+            requested_limit = int(
+                context.request.constraints.get(
+                    "orchestrator_candidate_limit",
+                    self.config.orchestrator.candidate_limit,
+                )
+            )
+        except (TypeError, ValueError):
+            requested_limit = self.config.orchestrator.candidate_limit
+        limit = max(2, min(32, requested_limit, len(context.candidates)))
+        ranked = self.fallback.selector.rank(context.request, context.candidates)
+        selected: list[CapabilityCard] = []
+        providers: set[str] = set()
+        for card in ranked:
+            if card.model_ref.provider in providers:
+                continue
+            selected.append(card)
+            providers.add(card.model_ref.provider)
+            if len(selected) >= limit:
+                return selected
+        for card in ranked:
+            if card in selected:
+                continue
+            selected.append(card)
+            if len(selected) >= limit:
+                break
+        return selected
 
     def _plan_from_text(self, text: str) -> RoutePlan:
         data = _extract_json_object(text)
@@ -527,25 +800,26 @@ class ModelOrchestrator:
         max_calls = int(context.request.constraints.get("max_calls", self.config.routing.max_calls))
         validate_route_plan_shape(plan, max_calls=max_calls)
         expected_strategy = self._profile_strategy(context)
-        if expected_strategy and plan.strategy != expected_strategy:
+        strict_validation = bool(self.config.orchestrator.require_validated_plan)
+        if strict_validation and expected_strategy and plan.strategy != expected_strategy:
             # Profile strategies are project policy, not model suggestions.
             raise CrupierRouteValidationError(
                 f"Route strategy {plan.strategy!r} does not match required profile strategy {expected_strategy!r}."
             )
         allowed_sensitive_strategies = self._sensitive_allowed_strategies(context)
-        if allowed_sensitive_strategies and plan.strategy not in allowed_sensitive_strategies:
+        if strict_validation and allowed_sensitive_strategies and plan.strategy not in allowed_sensitive_strategies:
             raise CrupierRouteValidationError(
                 f"Route strategy {plan.strategy!r} is not allowed for this sensitive request; "
                 f"expected one of {sorted(allowed_sensitive_strategies)!r}."
             )
         policy_result = PolicyResult(
-            allowed=list(context.candidates),
+            allowed=self._planning_candidates(context),
             filters_applied=list(context.filters_applied),
         )
         self.policy.validate_route(plan, policy_result, context.request)
 
     def _profile_strategy(self, context: PlanningContext) -> str | None:
-        if context.request.strategy:
+        if context.request.strategy and context.request.strategy != "orchestrated":
             return context.request.strategy
         mode = context.request.mode or self.config.project.default_profile
         profile = self.config.profiles.get(mode)
@@ -570,40 +844,176 @@ def _candidate_summary(card: CapabilityCard) -> dict[str, Any]:
             card.skill_scores.items(),
             key=lambda item: (float(item[1]) if isinstance(item[1], int | float) else 0.0, item[0]),
             reverse=True,
-        )[:8]
+        )[:5]
         if isinstance(value, int | float)
     }
-    return {
-        "model": card.model_ref.key,
-        "provider": card.model_ref.provider,
-        "stability": card.model_ref.stability,
-        "model_kind": card.model_kind,
-        "modalities_input": card.modalities_input,
-        "modalities_output": card.modalities_output,
-        "supports_embeddings": card.supports_embeddings,
-        "supports_tools": card.supports_tools,
-        "supports_structured_output": card.supports_structured_output,
-        "supports_streaming": card.supports_streaming,
-        "supports_file_input": card.supports_file_input,
-        "cost_tier": card.cost_tier,
-        "latency_tier": card.latency_tier,
-        "quality_tier": card.quality_tier,
-        "routing_status": card.routing_hints.get("routing_status"),
-        "lifecycle": card.routing_hints.get("lifecycle"),
-        "production_default": card.routing_hints.get("production_default"),
-        "requires_opt_in": card.routing_hints.get("requires_opt_in"),
-        "natural_summary": card.natural_profile.get("summary"),
-        "status_reason": card.natural_profile.get("status_reason"),
-        "best_skills": best_skills,
-        "routing_hints": {
-            "preferred_when": card.routing_hints.get("preferred_when", []),
-            "avoid_when": card.routing_hints.get("avoid_when", []),
-            "strategy_bias": card.routing_hints.get("strategy_bias", []),
-        },
-        "strengths": card.strengths,
-        "local_eval_scores": card.local_eval_scores,
-        "capability_status": card.capability_status,
+    capabilities = [
+        name
+        for name, supported in (
+            ("embeddings", card.supports_embeddings),
+            ("file_input", card.supports_file_input),
+            ("streaming", card.supports_streaming),
+            ("structured_output", card.supports_structured_output),
+            ("tools", card.supports_tools),
+        )
+        if supported
+    ]
+    numeric_pricing: dict[str, Any] = {
+        key: value
+        for key, value in card.pricing.items()
+        if key in {"input_per_million_usd", "output_per_million_usd", "cached_input_per_million_usd"}
+        and isinstance(value, int | float)
     }
+    if numeric_pricing and card.pricing.get("confidence"):
+        numeric_pricing["confidence"] = card.pricing["confidence"]
+    return _drop_empty(
+        {
+            "model": card.model_ref.key,
+            "provider": card.model_ref.provider,
+            "stability": card.model_ref.stability,
+            "model_kind": card.model_kind,
+            "limits": {
+                "context_window": card.context_window,
+                "max_output_tokens": card.max_output_tokens,
+            },
+            "modalities": {
+                "input": card.modalities_input,
+                "output": card.modalities_output,
+            },
+            "capabilities": capabilities,
+            "tiers": {
+                "quality": card.quality_tier,
+                "cost": card.cost_tier,
+                "latency": card.latency_tier,
+            },
+            "routing": {
+                "routing_status": card.routing_hints.get("routing_status"),
+                "lifecycle": card.routing_hints.get("lifecycle"),
+                "production_default": card.routing_hints.get("production_default"),
+                "requires_opt_in": card.routing_hints.get("requires_opt_in"),
+                "strategy_bias": card.routing_hints.get("strategy_bias", []),
+                "reasoning": card.routing_hints.get("reasoning"),
+                "reasoning_effort": card.routing_hints.get("reasoning_effort"),
+            },
+            "profile": {
+                "natural_summary": card.natural_profile.get("summary"),
+                "best_for": card.natural_profile.get("best_for", [])[:6],
+                "avoid_for": card.natural_profile.get("avoid_for", [])[:3],
+                "best_skills": best_skills,
+                "strengths": card.strengths[:8],
+            },
+            "unsupported_params": card.unsupported_params,
+            "known_edge_cases": card.known_edge_cases[:2],
+            "pricing": numeric_pricing,
+            "verified_capabilities": sorted(
+                key for key, value in card.capability_status.items() if value.get("status") == "verified"
+            ),
+            "failed_capabilities": sorted(
+                key for key, value in card.capability_status.items() if value.get("status") == "failed"
+            ),
+        }
+    )
+
+
+def _drop_empty(value: dict[str, Any]) -> dict[str, Any]:
+    compact: dict[str, Any] = {}
+    for key, item in value.items():
+        if isinstance(item, dict):
+            item = _drop_empty(item)
+        if item is None or item == "" or item == [] or item == {}:
+            continue
+        compact[key] = item
+    return compact
+
+
+def _compact_deterministic_scores(
+    scores: list[dict[str, Any]],
+    candidate_keys: set[str],
+) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for score in scores:
+        model = str(score.get("model") or "")
+        if model not in candidate_keys:
+            continue
+        raw_terms = score.get("terms")
+        terms: list[Any] = raw_terms if isinstance(raw_terms, list) else []
+        ranked_terms = sorted(
+            (term for term in terms if isinstance(term, dict)),
+            key=lambda term: abs(float(term.get("value", 0.0))),
+            reverse=True,
+        )
+        compact.append(
+            {
+                "model": model,
+                "score": score.get("score"),
+                "top_terms": [
+                    {"name": term.get("name"), "value": term.get("value")}
+                    for term in ranked_terms[:5]
+                ],
+            }
+        )
+    return compact
+
+
+def _request_shape(request: RequestEnvelope) -> dict[str, Any]:
+    return {
+        "input_type": type(request.input).__name__ if request.input is not None else None,
+        "input_chars": len(_json_text(request.input)) if request.input is not None else 0,
+        "message_count": len(request.messages),
+        "message_chars": sum(len(_json_text(message.get("content"))) for message in request.messages),
+        "file_kinds": sorted({asset.kind for asset in (request.file_plan.assets if request.file_plan else request.files)}),
+        "tool_names": [_tool_name(tool) for tool in request.tools],
+        "has_response_schema": request.response_schema is not None
+        or bool(request.constraints.get("response_schema")),
+    }
+
+
+def _request_content(request: RequestEnvelope, *, limit: int = 6000) -> dict[str, Any]:
+    """Return bounded, redacted request content only when the project opts in."""
+
+    remaining = max(0, limit)
+    result: dict[str, Any] = {}
+    for key, value in (("input", request.input), ("messages", request.messages)):
+        if value in (None, [], {}):
+            continue
+        text = _redact_planning_text(_json_text(value))
+        clipped = text[:remaining]
+        result[key] = clipped
+        remaining -= len(clipped)
+        if len(clipped) < len(text):
+            result[f"{key}_truncated"] = True
+        if remaining <= 0:
+            break
+    return result
+
+
+def _tool_name(tool: Any) -> str:
+    if isinstance(tool, dict):
+        function = tool.get("function") if tool.get("type") == "function" else tool
+        if isinstance(function, dict) and function.get("name"):
+            return str(function["name"])
+    return str(getattr(tool, "__name__", type(tool).__name__))
+
+
+def _json_text(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=repr)
+    except (TypeError, ValueError):
+        return repr(value)
+
+
+def _redact_planning_text(text: str) -> str:
+    redacted = text
+    for pattern, replacement in _PLANNING_SECRET_REPLACERS:
+        redacted = pattern.sub(replacement, redacted)
+    return redacted
+
+
+_PLANNING_SECRET_REPLACERS = (
+    (re.compile(("s" + "k-") + r"[A-Za-z0-9_\-]{10,}"), "[redacted]"),
+    (re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]{12,}", re.IGNORECASE), r"\1[redacted]"),
+    (re.compile(r"([A-Z][A-Z0-9_]*_API_KEY=)[^\s]+"), r"\1[redacted]"),
+)
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
@@ -612,7 +1022,7 @@ def _extract_json_object(text: str) -> dict[str, Any]:
         lines = stripped.splitlines()
         if lines and lines[0].startswith("```"):
             lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
+        if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         stripped = "\n".join(lines).strip()
     try:

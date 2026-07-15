@@ -8,6 +8,10 @@ class CrupierError(Exception):
 class CrupierConfigError(CrupierError):
     """Raised when project or runtime configuration is invalid."""
 
+    def __init__(self, message: str, *, hint: str | None = None):
+        super().__init__(message)
+        self.hint = hint
+
 
 class CrupierPolicyError(CrupierError):
     """Raised when a request or route violates configured policy."""
@@ -45,6 +49,10 @@ class CrupierRouteValidationError(CrupierError):
 
 class CrupierBudgetExceededError(CrupierError):
     """Raised when estimated or actual cost exceeds a hard budget."""
+
+
+class CrupierExecutionLimitError(CrupierError):
+    """Raised when a live route exhausts its call or latency budget."""
 
 
 class CrupierToolApprovalRequired(CrupierError):

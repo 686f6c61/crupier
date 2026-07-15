@@ -447,7 +447,10 @@ def import_human_decisions(
         models = [str(model) for model in item.get("models") or []]
         if not models:
             raise CrupierError(f"Decision {item.get('id') or index!r} has no models to score.")
-        rating = _validate_rating(item.get("rating"))
+        raw_rating = item.get("rating")
+        if not isinstance(raw_rating, int):
+            raise CrupierError(f"Decision {item.get('id') or index!r} rating must be an integer from 1 to 5.")
+        rating = _validate_rating(raw_rating)
         verdict = _validate_verdict(str(item.get("verdict") or "unknown"))
         tags = [str(tag) for tag in item.get("tags") or []]
         if "decision_import" not in tags:
@@ -596,7 +599,7 @@ def _review_items_from_report(
     if source_type == "compare":
         dry_run = bool(data.get("dry_run", True))
         comparison = data
-        items = _review_items_from_comparison(
+        comparison_items = _review_items_from_comparison(
             comparison,
             report_path=report_path,
             case_id=None,
@@ -606,7 +609,7 @@ def _review_items_from_report(
             variant=variant,
             include_output_preview=include_output_preview,
         )
-        return items, dry_run
+        return comparison_items, dry_run
 
     cases = data.get("cases") or []
     if not isinstance(cases, list):
@@ -619,17 +622,17 @@ def _review_items_from_report(
         current_case_id = str(case.get("id") or "")
         if case_id and current_case_id != case_id:
             continue
-        comparison = case.get("comparison")
-        if not isinstance(comparison, dict):
+        case_comparison = case.get("comparison")
+        if not isinstance(case_comparison, dict):
             continue
         items.extend(
             _review_items_from_comparison(
-                comparison,
+                case_comparison,
                 report_path=report_path,
                 case_id=current_case_id,
-                task=str(case.get("task") or comparison.get("task") or ""),
-                winner=case.get("winner") or comparison.get("winner"),
-                dry_run=bool(comparison.get("dry_run", dry_run)),
+                task=str(case.get("task") or case_comparison.get("task") or ""),
+                winner=case.get("winner") or case_comparison.get("winner"),
+                dry_run=bool(case_comparison.get("dry_run", dry_run)),
                 variant=variant,
                 include_output_preview=include_output_preview,
             )

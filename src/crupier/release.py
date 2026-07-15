@@ -14,6 +14,7 @@ import tarfile
 import tempfile
 import tomllib
 import zipfile
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from email.parser import Parser
 from pathlib import Path, PurePosixPath
@@ -26,6 +27,7 @@ from .config import (
     DEFAULT_ENV_EXAMPLE,
     DEFAULT_GITIGNORE_ENTRIES,
     DEFAULT_TOML,
+    INFERENCE_DEFAULT_HOST,
     OLLAMA_CLOUD_HOST,
     OPENROUTER_DEFAULT_HOST,
     CrupierConfig,
@@ -44,6 +46,8 @@ _EXPECTED_EXAMPLE_FILES = {
     "examples/agentic_pr_review.py",
     "examples/customer_support_triage.py",
     "examples/drop_in_agent_boundary.py",
+    "examples/live_operations_validation.py",
+    "examples/live_routing_validation.py",
     "examples/model-compare-eval.json",
     "examples/multimodal_claim_review.py",
     "examples/routing-eval.json",
@@ -593,9 +597,9 @@ def _public_repository_surface_check(root: Path) -> ReleaseCheck:
 
 
 def _public_secret_scan_check(root: Path) -> ReleaseCheck:
-    tracked = _git_tracked_files(root)
-    include_env_files = bool(tracked)
-    candidates = tracked if tracked else _public_secret_scan_fallback_files(root)
+    release_files = _git_tracked_files(root, include_untracked=True)
+    include_env_files = bool(release_files)
+    candidates = release_files if release_files else _public_secret_scan_fallback_files(root)
     checked: list[str] = []
     skipped_large: list[str] = []
     findings: list[dict[str, Any]] = []
@@ -649,7 +653,8 @@ def _public_secret_scan_check(root: Path) -> ReleaseCheck:
             "skipped_large": skipped_large,
             "finding_count": len(findings),
             "findings": findings,
-            "scanned_git_tracked_files": bool(tracked),
+            "scanned_git_tracked_files": bool(release_files),
+            "included_untracked_release_files": bool(release_files),
         },
         actions=[
             "Remove committed provider keys/tokens, rotate any exposed credentials, and rerun the release check before opening the repository publicly."
@@ -758,8 +763,10 @@ def _readme_check(root: Path, project: dict[str, Any]) -> ReleaseCheck:
         "crupier release check",
         "crupier release check --strict-public --verify-project-urls --check-pypi-name",
         "crupier capabilities probe --provider google --apply",
-        "crupier release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama",
+        "crupier capabilities probe --provider inference --apply",
+        "crupier release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference",
         "OpenAI, Anthropic Claude, Google Gemini, and Ollama adapters",
+        "configurable OpenAI-compatible inference servers",
     ]
     missing_markers = [marker for marker in required_markers if marker not in text]
     ok = path.exists() and path.stat().st_size > 500 and not missing_markers
@@ -843,7 +850,7 @@ def _public_markdown_check(root: Path) -> ReleaseCheck:
 
 def _public_yaml_check(root: Path) -> ReleaseCheck:
     try:
-        import yaml  # type: ignore[import-not-found]
+        import yaml  # type: ignore[import-untyped]
     except ModuleNotFoundError:
         return ReleaseCheck(
             id="public_yaml",
@@ -978,7 +985,8 @@ def _contributing_check(root: Path) -> ReleaseCheck:
         "crupier release check",
         "crupier release check --strict-public --verify-project-urls --check-pypi-name",
         "GEMINI_API_KEY",
-        "crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama",
+        "INFERENCE_API_KEY",
+        "crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference",
         "Never commit provider keys",
         "Dependabot security updates",
         "Protect `main`",
@@ -1127,7 +1135,9 @@ def _ci_check(root: Path) -> ReleaseCheck:
         "actions/checkout@v7",
         "actions/setup-python@v6",
         "python -m pytest",
-        "python -m ruff check src tests --select E9,F63,F7,F82",
+        "--cov-fail-under=95",
+        "python -m ruff check src tests",
+        "python -m mypy src/crupier",
         "python -m pip_audit --skip-editable --progress-spinner off",
         "crupier release check",
     ]
@@ -1211,7 +1221,9 @@ def _publish_workflow_check(root: Path) -> ReleaseCheck:
         "FIRST_PUBLIC_RELEASE_VERSION",
         "crupier release check --strict-public --verify-project-urls --check-pypi-name",
         "--allow-existing-pypi-project",
-        "python -m ruff check src tests --select E9,F63,F7,F82",
+        "--cov-fail-under=95",
+        "python -m ruff check src tests",
+        "python -m mypy src/crupier",
         "python -m pip_audit --skip-editable --progress-spinner off",
         "python -m build --sdist --wheel --outdir dist",
         "actions/upload-artifact@v7",
@@ -1251,12 +1263,23 @@ def _script_check(project: dict[str, Any]) -> ReleaseCheck:
 
 def _optional_dependencies_check(project: dict[str, Any]) -> ReleaseCheck:
     optional = project.get("optional-dependencies", {})
-    expected = {"openai", "anthropic", "google", "ollama", "openrouter", "pdf", "all", "dev"}
+    expected = {
+        "openai",
+        "anthropic",
+        "google",
+        "ollama",
+        "openrouter",
+        "inference-server",
+        "pdf",
+        "all",
+        "dev",
+    }
     expected_dependency_prefixes = {
         "openai": ["openai"],
         "anthropic": ["anthropic"],
         "google": ["google-genai"],
         "openrouter": ["openai"],
+        "inference-server": ["openai"],
         "pdf": ["pypdf"],
         "all": ["openai", "anthropic", "google-genai", "pypdf"],
     }
@@ -1328,6 +1351,7 @@ def _default_config_check() -> ReleaseCheck:
     config = CrupierConfig.from_dict(data)
     ollama = config.providers.get("ollama")
     openrouter = config.providers.get("openrouter")
+    inference = config.providers.get("inference")
     failures: list[str] = []
     builtin_model_keys = {
         f"{card['model_ref']['provider']}:{card['model_ref']['model']}" for card in BUILTIN_CAPABILITY_CARDS
@@ -1337,6 +1361,8 @@ def _default_config_check() -> ReleaseCheck:
         failures.append("default allowed models must have built-in capability cards: " + ", ".join(missing_builtin_cards))
     if config.orchestrator.model and config.orchestrator.model not in config.models.allow:
         failures.append("orchestrator.model must be included in the default allowlist")
+    if config.orchestrator.mode != "model":
+        failures.append("orchestrator.mode must default to model-powered routing")
     if config.orchestrator.fallback_model and config.orchestrator.fallback_model not in config.models.allow:
         failures.append("orchestrator.fallback_model must be included in the default allowlist")
     if not ollama:
@@ -1357,6 +1383,17 @@ def _default_config_check() -> ReleaseCheck:
             failures.append("providers.openrouter.host must default to OpenRouter OpenAI-compatible API")
         if openrouter.env_key != "OPENROUTER_API_KEY":
             failures.append("providers.openrouter.env_key must be OPENROUTER_API_KEY")
+    if not inference:
+        failures.append("providers.inference missing from default config")
+    else:
+        if inference.enabled:
+            failures.append("providers.inference must default to disabled")
+        if inference.mode != "openai_compatible":
+            failures.append("providers.inference.mode must be openai_compatible")
+        if inference.host != INFERENCE_DEFAULT_HOST:
+            failures.append("providers.inference.host must default to a loopback inference endpoint")
+        if inference.options.get("auth") != "none":
+            failures.append("providers.inference.auth must default to none for the loopback endpoint")
     if config.logging.persist_traces:
         failures.append("logging.persist_traces must default to false")
     if config.logging.store_prompts:
@@ -1371,6 +1408,8 @@ def _default_config_check() -> ReleaseCheck:
         failures.append("routing.allow_preview_models must default to false")
     if config.routing.max_provider_retries != 1:
         failures.append("routing.max_provider_retries must default to 1")
+    if config.routing.max_latency_ms is None or config.routing.max_latency_ms < 120000:
+        failures.append("routing.max_latency_ms must allow bounded multi-step routes")
     if config.routing.retry_backoff_seconds != 0.2:
         failures.append("routing.retry_backoff_seconds must default to 0.2")
     if not config.routing.require_operational_providers:
@@ -1379,6 +1418,8 @@ def _default_config_check() -> ReleaseCheck:
         failures.append(".env.example must advertise Ollama Cloud host")
     if "OPENROUTER_API_KEY=" not in DEFAULT_ENV_EXAMPLE:
         failures.append(".env.example must advertise optional OpenRouter BYOK env key")
+    if "INFERENCE_API_KEY=" not in DEFAULT_ENV_EXAMPLE:
+        failures.append(".env.example must advertise the optional configurable inference env key")
     ok = not failures
     return ReleaseCheck(
         id="default_config",
@@ -1397,17 +1438,20 @@ def _default_config_check() -> ReleaseCheck:
             "allow_latest_aliases": config.routing.allow_latest_aliases,
             "allow_preview_models": config.routing.allow_preview_models,
             "max_provider_retries": config.routing.max_provider_retries,
+            "max_latency_ms": config.routing.max_latency_ms,
             "retry_backoff_seconds": config.routing.retry_backoff_seconds,
             "require_operational_providers": config.routing.require_operational_providers,
             "openrouter_host": openrouter.host if openrouter else None,
             "openrouter_mode": openrouter.mode if openrouter else None,
+            "inference_host": inference.host if inference else None,
             "missing_builtin_cards": missing_builtin_cards,
             "default_allowlist": config.models.allow,
             "orchestrator_model": config.orchestrator.model,
             "orchestrator_fallback_model": config.orchestrator.fallback_model,
+            "orchestrator_mode": config.orchestrator.mode,
         },
         actions=[
-            "Keep `crupier init` defaults pointed at Ollama Cloud, keep OpenRouter disabled BYOK with an explicit OpenAI-compatible host, and keep prompt/response storage opt-in."
+            "Keep `crupier init` model-powered with deterministic fallback, keep defaults pointed at Ollama Cloud, keep OpenRouter disabled BYOK with an explicit OpenAI-compatible host, and keep prompt/response storage opt-in."
         ]
         if not ok
         else [],
@@ -1452,7 +1496,7 @@ def _runtime_safety_defaults_check() -> ReleaseCheck:
     )
 
 
-def _signature_default(parameters: dict[str, inspect.Parameter], name: str) -> Any:
+def _signature_default(parameters: Mapping[str, inspect.Parameter], name: str) -> Any:
     parameter = parameters.get(name)
     if parameter is None or parameter.default is inspect.Parameter.empty:
         return None
@@ -1547,10 +1591,12 @@ def _build_distribution_checks(root: Path) -> tuple[list[ReleaseCheck], dict[str
 def _copy_release_source(root: Path, destination: Path) -> Path:
     """Copy release source into a clean build tree so local artifacts cannot leak."""
 
-    tracked = _git_tracked_files(root)
-    if tracked:
+    release_files = _git_tracked_files(root, include_untracked=True)
+    if release_files:
         destination.mkdir(parents=True)
-        for relative in tracked:
+        for relative in release_files:
+            if _release_source_path_ignored(relative):
+                continue
             source = root / relative
             target = destination / relative
             if source.is_symlink():
@@ -1564,10 +1610,24 @@ def _copy_release_source(root: Path, destination: Path) -> Path:
     return destination
 
 
-def _git_tracked_files(root: Path) -> list[Path]:
+def _release_source_path_ignored(relative: Path) -> bool:
+    for name in relative.parts:
+        if name in _RELEASE_SOURCE_IGNORED_NAMES:
+            return True
+        if name == ".env" or (name.startswith(".env.") and name != ".env.example"):
+            return True
+        if any(fnmatch.fnmatch(name, pattern) for pattern in _RELEASE_SOURCE_IGNORED_PATTERNS):
+            return True
+    return False
+
+
+def _git_tracked_files(root: Path, *, include_untracked: bool = False) -> list[Path]:
+    command = ["git", "-C", str(root), "ls-files", "-z", "--cached"]
+    if include_untracked:
+        command.extend(["--others", "--exclude-standard"])
     try:
         result = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "-z"],
+            command,
             text=False,
             capture_output=True,
             check=False,
@@ -1680,7 +1740,7 @@ def _artifact_metadata_check(artifacts: list[Path], project: dict[str, Any]) -> 
     expected_extras = sorted(project.get("optional-dependencies", {})) if isinstance(project.get("optional-dependencies"), dict) else []
 
     inspected: list[dict[str, Any]] = []
-    failures: list[dict[str, str]] = []
+    failures: list[dict[str, object]] = []
     for artifact in artifacts:
         try:
             metadata_text = _read_artifact_metadata(artifact)
@@ -2267,8 +2327,12 @@ def _installed_init_smoke(script: Path, python: Path, project_dir: Path) -> tupl
         and gitignore_path.exists()
         and 'host = "https://ollama.com/api"' in toml_text
         and 'host = "https://openrouter.ai/api/v1"' in toml_text
+        and '[providers.inference]' in toml_text
+        and 'mode = "openai_compatible"' in toml_text
+        and f'host = "{INFERENCE_DEFAULT_HOST}"' in toml_text
         and "OLLAMA_HOST=https://ollama.com/api" in env_text
         and "OPENROUTER_API_KEY=" in env_text
+        and "INFERENCE_API_KEY=" in env_text
         and ".env" in gitignore_text
         and "!.env.example" in gitignore_text
     )

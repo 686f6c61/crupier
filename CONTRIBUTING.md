@@ -32,6 +32,7 @@ OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
 GOOGLE_API_KEY=
 GEMINI_API_KEY=
+INFERENCE_API_KEY=
 OLLAMA_API_KEY=
 OLLAMA_HOST=https://ollama.com/api
 ```
@@ -39,8 +40,28 @@ OLLAMA_HOST=https://ollama.com/api
 Use real provider checks only when keys are intentionally loaded:
 
 ```bash
-crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama
+crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference
 ```
+
+For changes to routing, role execution, tools, or multimodal behavior, run the public end-to-end matrix as well:
+
+```bash
+env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY \
+  -u GOOGLE_API_KEY -u GEMINI_API_KEY \
+  -u OLLAMA_API_KEY -u OLLAMA_HOST \
+  python examples/live_routing_validation.py --real --project . --write-report
+```
+
+The command must finish with every selected case passing. Keep the generated `.crupier/evals/` report local; summarize only sanitized routing evidence in public changes.
+
+For changes to operation classification, embeddings, reranking, audio, images, Python compatibility, or the HTTP server, run the operations matrix against an ignored local project containing executable models for every required model kind:
+
+```bash
+python examples/live_operations_validation.py \
+  --real --project . --write-report
+```
+
+The command must finish with `7/7` cases passing. Its report is local evidence only and must never be committed.
 
 `--env-file` loads missing variables only; exported shell or CI variables keep precedence.
 
@@ -50,7 +71,9 @@ Before opening a PR, run:
 
 ```bash
 python -m pytest
-python -m ruff check src tests --select E9,F63,F7,F82
+python -m pytest --cov=crupier --cov-fail-under=95
+python -m ruff check src tests
+python -m mypy src/crupier
 python -m pip_audit --skip-editable --progress-spinner off
 crupier release check
 ```
@@ -88,21 +111,20 @@ After the visibility change, rerun:
 
 ```bash
 crupier release check --strict-public --verify-project-urls --check-pypi-name
-crupier release check --strict-public --verify-providers --provider openai --provider anthropic --provider google --provider ollama
+crupier release check --strict-public --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference
 ```
 
-Publish `0.1.0` from a GitHub Release tagged `v0.1.0` or `0.1.0` only after
+Publish `0.4.0` from a GitHub Release tagged `v0.4.0` or `0.4.0` only after
 PyPI trusted publishing is configured for this repository and the `pypi`
 environment. The publish workflow checks the release tag against the package
 version before building or uploading distributions. Manual workflow dispatch
-must provide `version=0.1.0` and `confirm_publish=true`; use it only to retry an
+must provide `version=0.4.0` and `confirm_publish=true`; use it only to retry an
 intentional release operation.
-For `0.1.0`, the workflow requires the PyPI project name to be unclaimed. For
-later package versions, the workflow allows the existing PyPI project name so
-maintenance releases can publish after the first upload establishes ownership.
+The workflow accepts the existing PyPI project for maintenance releases after
+the first upload has established ownership.
 
 ## Release Discipline
 
-Crupier public releases use final numeric versions such as `0.1.0`. Do not
+Crupier public releases use final numeric versions such as `0.4.0`. Do not
 publish non-final, development, or local build versions unless the release
 policy is intentionally changed.

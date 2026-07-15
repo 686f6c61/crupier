@@ -11,7 +11,9 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any, Callable
 
 from .adapters.common import build_prompt
@@ -60,7 +62,7 @@ class ToolExecution:
             "name": self.name,
             "arguments": self.arguments,
             "status": self.status,
-            "result": self.result,
+            "result": _jsonable(self.result),
             "error": self.error,
             "requires_approval": self.requires_approval,
         }
@@ -170,11 +172,26 @@ def parse_tool_plan(text: str) -> tuple[list[ToolCallRequest], str | None]:
                 try:
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError:
-                    arguments = {"value": arguments}
+                    raise CrupierRouteValidationError(
+                        f"Tool {name or '<unknown>'!r} arguments must be a JSON object."
+                    )
             if name:
-                calls.append(ToolCallRequest(name=str(name), arguments=dict(arguments or {})))
+                if not isinstance(arguments, dict):
+                    raise CrupierRouteValidationError(f"Tool {name!r} arguments must be a JSON object.")
+                calls.append(ToolCallRequest(name=str(name), arguments=dict(arguments)))
     final = data.get("final") if isinstance(data.get("final"), str) else None
     return calls, final
+
+
+def extract_final_answer(text: str) -> str:
+    opening = "<final_answer>"
+    closing = "</final_answer>"
+    if opening in text:
+        remainder = text.split(opening, 1)[1]
+        final = remainder.split(closing, 1)[0] if closing in remainder else remainder
+        return final.strip()
+    _, parsed_final = parse_tool_plan(text)
+    return parsed_final.strip() if parsed_final and parsed_final.strip() else text.strip()
 
 
 def execute_tool_plan(
@@ -183,12 +200,13 @@ def execute_tool_plan(
     request: RequestEnvelope,
     *,
     previous_executions: list[ToolExecution] | None = None,
+    max_result_chars: int = 50_000,
 ) -> list[ToolExecution]:
     by_name = {tool.name: tool for tool in tools}
-    allowed_tools = set(request.constraints.get("allowed_tools", by_name))
-    approved_tools = set(request.constraints.get("approved_tools", []))
+    allowed_tools = _name_set(request.constraints.get("allowed_tools"), default=set(by_name))
+    approved_tools = _name_set(request.constraints.get("approved_tools"), default=set())
     approve_all = bool(request.constraints.get("approve_tool_calls", False))
-    require_approval_for = set(request.constraints.get("require_approval_for", []))
+    require_approval_for = _name_set(request.constraints.get("require_approval_for"), default=set())
 
     executions: list[ToolExecution] = []
     completed_by_key: dict[str, ToolExecution] = {
@@ -224,7 +242,7 @@ def execute_tool_plan(
         if spec.handler is None:
             raise CrupierModelUnsupportedError(f"Tool {call.name!r} has no local handler.")
         try:
-            result = spec.handler(**call.arguments)
+            result = _bounded_tool_result(spec.handler(**call.arguments), max_chars=max_result_chars)
             execution = ToolExecution(
                 idempotency_key=key,
                 name=call.name,
@@ -239,7 +257,7 @@ def execute_tool_plan(
                 name=call.name,
                 arguments=call.arguments,
                 status="failed",
-                error=str(exc),
+                error=_truncate(str(exc), 4000),
                 requires_approval=requires_approval,
             )
         executions.append(execution)
@@ -268,10 +286,13 @@ def _spec_from_dict(data: dict[str, Any]) -> ToolSpec:
     handler = function_data.get("handler") or data.get("handler") or data.get("callable")
     if handler is not None and not callable(handler):
         handler = None
+    parameters = function_data.get("parameters", {"type": "object", "properties": {}})
+    if not isinstance(parameters, dict):
+        raise CrupierModelUnsupportedError("Function tool parameters must be a JSON Schema object.")
     return ToolSpec(
         name=str(function_data.get("name", "")),
         description=str(function_data.get("description", "")),
-        parameters=dict(function_data.get("parameters", {"type": "object", "properties": {}})),
+        parameters=dict(parameters),
         handler=handler,
         requires_approval=bool(function_data.get("requires_approval", data.get("requires_approval", False))),
         side_effects=bool(function_data.get("side_effects", data.get("side_effects", False))),
@@ -309,9 +330,9 @@ def _extract_json_object(text: str) -> dict[str, Any]:
     stripped = text.strip()
     if stripped.startswith("```"):
         lines = stripped.splitlines()
-        if lines and lines[0].startswith("```"):
+        if lines and lines[0].strip().startswith("```"):
             lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
+        if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         stripped = "\n".join(lines).strip()
     try:
@@ -321,7 +342,58 @@ def _extract_json_object(text: str) -> dict[str, Any]:
         end = stripped.rfind("}")
         if start < 0 or end <= start:
             raise CrupierRouteValidationError("Tool plan did not contain a JSON object.")
-        data = json.loads(stripped[start : end + 1])
+        try:
+            data = json.loads(stripped[start : end + 1])
+        except json.JSONDecodeError as exc:
+            raise CrupierRouteValidationError(f"Tool plan JSON parse failed: {exc}") from exc
     if not isinstance(data, dict):
         raise CrupierRouteValidationError("Tool plan must be a JSON object.")
     return data
+
+
+def _name_set(value: Any, *, default: set[str]) -> set[str]:
+    if value is None:
+        return set(default)
+    if isinstance(value, str):
+        return {value}
+    try:
+        return {str(item) for item in value}
+    except TypeError as exc:
+        raise CrupierModelUnsupportedError("Tool allow/approval constraints must be a string or list of names.") from exc
+
+
+def _bounded_tool_result(value: Any, *, max_chars: int) -> Any:
+    safe = _jsonable(value)
+    encoded = json.dumps(safe, ensure_ascii=False, sort_keys=True)
+    limit = max(256, int(max_chars))
+    if len(encoded) <= limit:
+        return safe
+    return {
+        "truncated": True,
+        "original_chars": len(encoded),
+        "preview": encoded[:limit],
+    }
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, datetime | date):
+        return value.isoformat()
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, set):
+        return sorted((_jsonable(item) for item in value), key=repr)
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        return [_jsonable(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _jsonable(model_dump())
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return _jsonable(to_dict())
+    return repr(value)
+
+
+def _truncate(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 3] + "..."

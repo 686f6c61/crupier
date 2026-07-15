@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import builtins
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -97,7 +98,7 @@ def _now_iso() -> str:
 
 def _default_card_for(model_key: str) -> CapabilityCard:
     model_ref = ModelRef.parse(model_key)
-    strengths = ["local", "privacy"] if model_ref.provider == "ollama" else []
+    strengths: list[str] = []
     source = "openai_compatible" if model_ref.provider == "openrouter" else "native"
     model_ref = ModelRef(
         provider=model_ref.provider,
@@ -131,6 +132,21 @@ def _card_from_provider_model(provider_model: ProviderModel) -> CapabilityCard:
     model_ref = ModelRef.parse(provider_model.model_ref)
     model_id = model_ref.model.lower()
     provider = model_ref.provider
+    if provider == "nan":
+        curated = _nan_builtin_card(model_id)
+        if curated is not None:
+            curated.model_ref = ModelRef(
+                provider="nan",
+                model=model_ref.model,
+                stability=curated.model_ref.stability,
+                source="discovered",
+            )
+            curated.last_updated = date.today().isoformat()
+            curated.evidence = {
+                **curated.evidence,
+                "provider_discovery": {"metadata": provider_model.metadata},
+            }
+            return apply_decision_profile(curated, provider_metadata=provider_model.metadata)
     strengths: list[str] = []
     supports_tools = False
     supports_structured_output = False
@@ -197,7 +213,6 @@ def _card_from_provider_model(provider_model: ProviderModel) -> CapabilityCard:
             latency_tier = "medium"
             quality_tier = "frontier" if any(name in model_id for name in ["opus", "sonnet"]) else "strong"
     elif provider == "ollama":
-        strengths.extend(["local", "privacy"])
         if _is_embedding_model(provider, model_id):
             model_kind = "embedding"
             supports_embeddings = True
@@ -212,7 +227,12 @@ def _card_from_provider_model(provider_model: ProviderModel) -> CapabilityCard:
             modalities_input = ["text", "image"]
             supports_file_input = True
             strengths.append("multimodal")
-        if model_kind == "chat" and any(name in model_id for name in ["flash", "small", "20b", "24b"]):
+        is_small_parameter_model = any(
+            re.search(rf"(?<!\d){size}(?!\d)", model_id) for size in ("20b", "24b")
+        )
+        if model_kind == "chat" and (
+            any(name in model_id for name in ["flash", "small"]) or is_small_parameter_model
+        ):
             strengths.extend(["low_latency", "low_cost"])
             cost_tier = "low"
             latency_tier = "fast"
@@ -310,6 +330,16 @@ def _embedding_dimensions(provider: str, model_id: str) -> int | None:
             return 768
         if "mxbai-embed-large" in model_id:
             return 1024
+    if provider == "nan" and model_id == "qwen3-embedding":
+        return 4096
+    return None
+
+
+def _nan_builtin_card(model_id: str) -> CapabilityCard | None:
+    for data in BUILTIN_CAPABILITY_CARDS:
+        ref = data.get("model_ref", {})
+        if ref.get("provider") == "nan" and str(ref.get("model", "")).lower() == model_id:
+            return CapabilityCard.from_dict(data)
     return None
 
 
@@ -362,7 +392,7 @@ class ModelRegistry:
             raise CrupierModelUnsupportedError(f"No capability card found for {model_key!r}.")
         return cards[model_key]
 
-    def allowed_cards(self) -> list[CapabilityCard]:
+    def allowed_cards(self) -> builtins.list[CapabilityCard]:
         if self.config.models.allow:
             return [self.get(model_key) for model_key in self.config.models.allow]
         return self.list()
@@ -384,7 +414,7 @@ class ModelRegistry:
         models: Iterable[str] | None = None,
         discovered_keys: Iterable[str] | None = None,
         locked_keys: Iterable[str] | None = None,
-    ) -> list[dict[str, Any]]:
+    ) -> builtins.list[dict[str, Any]]:
         """Return reader-facing registry state labels for models."""
 
         cards = self.load()
@@ -631,11 +661,11 @@ class ModelRegistry:
         path.write_text(_json_dumps(data), encoding="utf-8")
         return {**self._snapshot_summary(data, path), "path": str(path)}
 
-    def snapshot_list(self) -> list[dict[str, Any]]:
+    def snapshot_list(self) -> builtins.list[dict[str, Any]]:
         """Return summaries for project registry snapshots."""
 
         self.config.ensure_project_dirs()
-        snapshots: list[dict[str, Any]] = []
+        snapshots: builtins.list[dict[str, Any]] = []
         for path in sorted(self.config.registry_snapshots_dir.glob("*.json")):
             data = self._read_snapshot_path(path)
             snapshots.append(self._snapshot_summary(data, path))

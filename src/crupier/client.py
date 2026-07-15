@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
+import hashlib
+import os
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import RLock
+from time import monotonic, perf_counter
 from typing import Any
 from uuid import uuid4
 
 from .adapters import ProviderAdapter, ProviderModel, build_default_adapters
+from .budgets import ExecutionBudget
 from .config import CrupierConfig, write_models_allow, write_orchestrator_settings
 from .errors import (
     CrupierConfigError,
@@ -19,9 +26,24 @@ from .errors import (
 from .evals import RoutingEvalRunner
 from .executor import RouteExecutor
 from .feedback import HumanFeedbackStore
-from .models import CapabilityCard, CrupierResult, DecisionTrace, ModelRef, RequestEnvelope, StreamEvent, UpdateReport
-from .multimodal import can_execute_native_images, normalize_files, plan_file_representations, prepare_extracted_file_context
-from .orchestrator import ModelOrchestrator
+from .models import (
+    CapabilityCard,
+    CrupierResult,
+    DecisionTrace,
+    ModelRef,
+    OperationResult,
+    RequestEnvelope,
+    StreamEvent,
+    UpdateReport,
+)
+from .multimodal import (
+    normalize_files,
+    plan_file_representations,
+    prepare_extracted_file_context,
+    split_file_execution_inputs,
+)
+from .orchestrator import DeterministicOrchestrator, ModelOrchestrator
+from .operations import OperationRouter
 from .planner import RoutePlanner
 from .policy import Exclusion, PolicyEngine
 from .project_audit import ProjectAuditRunner
@@ -47,10 +69,10 @@ class ModelManager:
         *,
         provider: str | None = None,
         skip_unavailable: bool = False,
-        warnings: list[str] | None = None,
-    ) -> list[ProviderModel]:
+        warnings: builtins.list[str] | None = None,
+    ) -> builtins.list[ProviderModel]:
         providers = [provider] if provider else sorted(self._adapters)
-        models: list[ProviderModel] = []
+        models: builtins.list[ProviderModel] = []
         for provider_name in providers:
             adapter = self._adapters.get(provider_name)
             if adapter is None:
@@ -66,7 +88,7 @@ class ModelManager:
                     )
         return sorted(models, key=lambda item: (item.provider, item.id))
 
-    def allow(self, models: list[str], *, replace: bool = False) -> None:
+    def allow(self, models: builtins.list[str], *, replace: bool = False) -> None:
         write_models_allow(self._config.root, models, replace=replace)
         self._config = CrupierConfig.from_toml(self._config.root)
         self._registry.config = self._config
@@ -119,7 +141,32 @@ class Crupier:
         self.traces = TraceStore(config.traces_dir)
         self.feedback = HumanFeedbackStore(config.feedback_dir)
         self.responses = ResponsesFacade(self)
-        self._provider_visibility_cache: dict[str, tuple[set[str] | None, str | None]] = {}
+        self.operations = OperationRouter(self)
+        self._provider_visibility_cache: dict[
+            str, tuple[float, str, set[str] | None, str | None]
+        ] = {}
+        self._provider_visibility_lock = RLock()
+
+    def rerank(self, **kwargs: Any) -> OperationResult:
+        return self.operations.rerank(**kwargs)
+
+    def embed(self, **kwargs: Any) -> OperationResult:
+        return self.operations.embed(**kwargs)
+
+    def transcribe(self, **kwargs: Any) -> OperationResult:
+        return self.operations.transcribe(**kwargs)
+
+    def synthesize(self, **kwargs: Any) -> OperationResult:
+        return self.operations.synthesize(**kwargs)
+
+    def generate_image(self, **kwargs: Any) -> OperationResult:
+        return self.operations.generate_image(**kwargs)
+
+    def edit_image(self, **kwargs: Any) -> OperationResult:
+        return self.operations.edit_image(**kwargs)
+
+    def run(self, task: str, input: Any = None, **kwargs: Any) -> CrupierResult | OperationResult:
+        return self.operations.run(task, input, **kwargs)
 
     def _build_orchestrator(self):
         mode = self.config.orchestrator.mode
@@ -151,6 +198,7 @@ class Crupier:
         temperature: float | None = None,
         require_validated_plan: bool | None = None,
         max_repairs: int | None = None,
+        candidate_limit: int | None = None,
         allow_prompt_summary_only: bool | None = None,
         persist: bool = False,
     ) -> "Crupier":
@@ -159,6 +207,10 @@ class Crupier:
         Set ``persist=True`` to write the change into ``crupier.toml``.
         """
 
+        previous = {
+            name: getattr(self.config.orchestrator, name)
+            for name in self.config.orchestrator.__dataclass_fields__
+        }
         if mode is not None and mode not in {"deterministic", "model", "hybrid"}:
             raise CrupierConfigError("orchestrator mode must be one of: deterministic, model, hybrid.")
         if model is not None:
@@ -175,8 +227,16 @@ class Crupier:
             self.config.orchestrator.require_validated_plan = bool(require_validated_plan)
         if max_repairs is not None:
             self.config.orchestrator.max_repairs = int(max_repairs)
+        if candidate_limit is not None:
+            self.config.orchestrator.candidate_limit = int(candidate_limit)
         if allow_prompt_summary_only is not None:
             self.config.orchestrator.allow_prompt_summary_only = bool(allow_prompt_summary_only)
+        try:
+            self.config.validate()
+        except Exception:
+            for name, value in previous.items():
+                setattr(self.config.orchestrator, name, value)
+            raise
         if persist:
             write_orchestrator_settings(
                 self.config.root,
@@ -187,6 +247,7 @@ class Crupier:
                 temperature=self.config.orchestrator.temperature,
                 require_validated_plan=self.config.orchestrator.require_validated_plan,
                 max_repairs=self.config.orchestrator.max_repairs,
+                candidate_limit=self.config.orchestrator.candidate_limit,
                 allow_prompt_summary_only=self.config.orchestrator.allow_prompt_summary_only,
             )
             self.config = CrupierConfig.from_toml(self.config.root)
@@ -213,22 +274,28 @@ class Crupier:
         trace: bool | str = False,
         dry_run: bool | None = None,
     ) -> CrupierResult:
+        metadata = dict(metadata or {})
+        inherited_started = metadata.pop("_crupier_started_at", None)
+        deal_started = float(inherited_started) if isinstance(inherited_started, int | float) else perf_counter()
         constraints = dict(constraints or {})
         if dry_run is None:
             dry_run = bool(constraints.pop("dry_run", True))
         file_assets = normalize_files(files)
         file_plan = plan_file_representations(file_assets, task=task, constraints=constraints)
-        metadata = dict(metadata or {})
+        metadata.setdefault("_crupier_orchestrator_calls", [])
         execution_files = list(file_assets)
-        if file_assets and not dry_run and not can_execute_native_images(file_plan):
+        if file_plan is not None and not dry_run:
+            execution_files, extraction_plan = split_file_execution_inputs(file_plan)
+        else:
+            extraction_plan = None
+        if extraction_plan is not None:
             file_context = prepare_extracted_file_context(
-                file_assets,
-                file_plan,
+                extraction_plan.assets,
+                extraction_plan,
                 max_file_bytes=int(constraints.get("max_file_bytes", 2_000_000)),
                 max_chars=int(constraints.get("max_file_context_chars", 80_000)),
             )
             metadata["extracted_file_context"] = file_context
-            execution_files = []
         request = RequestEnvelope(
             task=task,
             input=input,
@@ -244,9 +311,28 @@ class Crupier:
             tenant_id=metadata.get("tenant_id"),
             user_id_hash=metadata.get("user_id_hash"),
         )
+        if dry_run:
+            request.metadata["_crupier_offline_planning"] = True
+        execution_budget = metadata.pop("_crupier_execution_budget", None)
+        if not dry_run:
+            if not isinstance(execution_budget, ExecutionBudget):
+                execution_budget = ExecutionBudget(
+                    self.config,
+                    request,
+                    self.registry.list(allowed_only=False),
+                    started_at=deal_started,
+                )
+            request.metadata["_crupier_execution_budget"] = execution_budget
 
         cards = self.registry.allowed_cards()
         cards, provider_exclusions, provider_filters = self._filter_operational_candidates(request, cards, dry_run=dry_run)
+        if not dry_run:
+            cards, adapter_availability_exclusions, adapter_availability_filters = self._filter_adapter_candidates(cards)
+            provider_exclusions.extend(adapter_availability_exclusions)
+            provider_filters.extend(adapter_availability_filters)
+        cards, adapter_exclusions, adapter_filters = self._filter_adapter_file_candidates(request, cards)
+        provider_exclusions.extend(adapter_exclusions)
+        provider_filters.extend(adapter_filters)
         cards, circuit_exclusions, circuit_filters = self._filter_circuit_breaker_candidates(cards)
         provider_exclusions.extend(circuit_exclusions)
         provider_filters.extend(circuit_filters)
@@ -255,8 +341,48 @@ class Crupier:
         for filter_name in provider_filters:
             if filter_name not in policy_result.filters_applied:
                 policy_result.filters_applied.append(filter_name)
-        plan = self.planner.plan(request, policy_result.allowed, policy_result.filters_applied)
+        force_model = bool(request.constraints.get("force_model"))
+        single_candidate = len(policy_result.allowed) == 1
+        if isinstance(self.planner.orchestrator, ModelOrchestrator) and (dry_run or force_model or single_candidate):
+            context = self.planner.build_context(
+                request,
+                policy_result.allowed,
+                policy_result.filters_applied,
+            )
+            plan = DeterministicOrchestrator(
+                self.config,
+                selector=self.planner.selector,
+            ).plan(context)
+            if dry_run:
+                skipped_reason = "this is a dry run"
+            elif force_model:
+                skipped_reason = "force_model already determines the route"
+            else:
+                skipped_reason = "policy and capability filters left only one candidate"
+            plan.reason = (
+                plan.reason
+                + f" Model-orchestrator provider calls were skipped because {skipped_reason}."
+            ).strip()
+        else:
+            plan = self.planner.plan(request, policy_result.allowed, policy_result.filters_applied)
         self.policy.validate_route(plan, policy_result, request)
+
+        planning_calls = metadata.pop("_crupier_orchestrator_calls", [])
+        if not isinstance(planning_calls, list):
+            planning_calls = []
+        successful_orchestrator = next(
+            (
+                item.get("model")
+                for item in reversed(planning_calls)
+                if item.get("plan_status") == "validated"
+            ),
+            None,
+        )
+        attempted_orchestrator = next(
+            (item.get("model") for item in planning_calls if item.get("model")),
+            None,
+        )
+        traced_orchestrator = successful_orchestrator
 
         trace_obj = DecisionTrace(
             trace_id=f"trc_{uuid4().hex[:16]}",
@@ -264,12 +390,61 @@ class Crupier:
             candidate_models=[card.model_ref.key for card in cards],
             excluded_models=policy_result.excluded_dicts(),
             policy_filters=policy_result.filters_applied,
-            orchestrator_model=self.config.orchestrator.model,
+            orchestrator_model=str(traced_orchestrator) if traced_orchestrator else None,
             route_plan=plan,
+            provider_calls=list(planning_calls),
+            errors=[
+                {
+                    "phase": "orchestrator_call",
+                    "provider": item.get("provider"),
+                    "model": item.get("model"),
+                    "error_type": item.get("error_type"),
+                    "error": item.get("error"),
+                }
+                for item in planning_calls
+                if item.get("error")
+            ]
+            + [
+                {
+                    "phase": "orchestrator_validation",
+                    "provider": item.get("provider"),
+                    "model": item.get("model"),
+                    "repair_attempt": item.get("repair_attempt"),
+                    "error_type": "CrupierRouteValidationError",
+                    "error": item.get("validation_error"),
+                }
+                for item in planning_calls
+                if item.get("plan_status") == "invalid"
+            ],
             storage_decision=self._storage_decision(constraints),
         )
 
-        result = self.executor.execute(request, plan, trace_obj, dry_run=dry_run)
+        request.metadata.pop("_crupier_execution_budget", None)
+        result = self.executor.execute(
+            request,
+            plan,
+            trace_obj,
+            dry_run=dry_run,
+            budget=execution_budget,
+        )
+        execution_latency_ms = result.latency_ms
+        total_latency_ms = int((perf_counter() - deal_started) * 1000)
+        result.latency_ms = total_latency_ms
+        trace_obj.latency_ms = total_latency_ms
+        trace_obj.final_quality_signals["execution_latency_ms"] = execution_latency_ms
+        trace_obj.final_quality_signals["orchestrator_calls"] = len(planning_calls)
+        trace_obj.final_quality_signals["orchestrator_outcome"] = (
+            "validated_model_plan"
+            if successful_orchestrator
+            else "deterministic_fallback"
+            if planning_calls
+            else "skipped_or_deterministic"
+        )
+        trace_obj.final_quality_signals["orchestrator_attempted_model"] = attempted_orchestrator
+        trace_obj.final_quality_signals["orchestrator_validation_failures"] = sum(
+            1 for item in planning_calls if item.get("plan_status") == "invalid"
+        )
+        result.provider_metadata["orchestrator_calls"] = planning_calls
         stored_trace_path = self.traces.write(
             project=self.config.project.name,
             request=request,
@@ -305,10 +480,16 @@ class Crupier:
         allowed: list[CapabilityCard] = []
         excluded: list[Exclusion] = []
         filters: set[str] = set()
+        providers = sorted({card.model_ref.provider for card in cards})
+        if len(providers) == 1:
+            visibility = {providers[0]: self._provider_visible_models(providers[0])}
+        else:
+            with ThreadPoolExecutor(max_workers=min(8, len(providers))) as pool:
+                visibility = dict(zip(providers, pool.map(self._provider_visible_models, providers), strict=True))
         for card in cards:
             key = card.model_ref.key
             provider = card.model_ref.provider
-            visible_models, error = self._provider_visible_models(provider)
+            visible_models, error = visibility[provider]
             if error is not None:
                 excluded.append(Exclusion(key, error))
                 filters.add("provider_operational")
@@ -323,6 +504,66 @@ class Crupier:
             reasons = "; ".join(f"{item.model}: {item.reason}" for item in excluded)
             raise CrupierPolicyError(f"No models remain after provider operational checks. {reasons}")
         return allowed, excluded, sorted(filters)
+
+    def _filter_adapter_candidates(
+        self,
+        cards: list[CapabilityCard],
+    ) -> tuple[list[CapabilityCard], list[Exclusion], list[str]]:
+        allowed: list[CapabilityCard] = []
+        excluded: list[Exclusion] = []
+        for card in cards:
+            provider = card.model_ref.provider
+            if provider in self.adapters:
+                allowed.append(card)
+                continue
+            excluded.append(Exclusion(card.model_ref.key, f"provider {provider!r} has no configured adapter"))
+        if not allowed:
+            reasons = "; ".join(f"{item.model}: {item.reason}" for item in excluded)
+            raise CrupierPolicyError(f"No models remain after adapter availability checks. {reasons}")
+        return allowed, excluded, ["adapter_available"] if excluded else []
+
+    def _filter_adapter_file_candidates(
+        self,
+        request: RequestEnvelope,
+        cards: list[CapabilityCard],
+    ) -> tuple[list[CapabilityCard], list[Exclusion], list[str]]:
+        if request.file_plan is None:
+            return cards, [], []
+        native_kinds = {
+            item.kind
+            for item in request.file_plan.representations
+            if item.representation.startswith("native_")
+        }
+        if not native_kinds:
+            return cards, [], []
+
+        allowed: list[CapabilityCard] = []
+        excluded: list[Exclusion] = []
+        for card in cards:
+            adapter = self.adapters.get(card.model_ref.provider)
+            supports_file_kind = getattr(adapter, "supports_file_kind", None)
+            if not callable(supports_file_kind):
+                allowed.append(card)
+                continue
+            unsupported = sorted(
+                kind
+                for kind in native_kinds
+                if not supports_file_kind(model=card.model_ref.model, kind=kind)
+            )
+            if unsupported:
+                excluded.append(
+                    Exclusion(
+                        card.model_ref.key,
+                        "configured adapter cannot transport native file kind(s): " + ", ".join(unsupported),
+                    )
+                )
+                continue
+            allowed.append(card)
+
+        if not allowed:
+            reasons = "; ".join(f"{item.model}: {item.reason}" for item in excluded)
+            raise CrupierPolicyError(f"No models remain after adapter file-transport checks. {reasons}")
+        return allowed, excluded, ["adapter_file_transport"] if excluded else []
 
     def _filter_circuit_breaker_candidates(
         self,
@@ -343,32 +584,71 @@ class Crupier:
         return allowed, excluded, ["provider_circuit_breaker"]
 
     def _provider_visible_models(self, provider: str) -> tuple[set[str] | None, str | None]:
-        cached = self._provider_visibility_cache.get(provider)
-        if cached is not None:
-            return cached
+        now = monotonic()
+        fingerprint = self._provider_visibility_fingerprint(provider)
+        with self._provider_visibility_lock:
+            cached = self._provider_visibility_cache.get(provider)
+            if cached is not None:
+                expires_at, cached_fingerprint, visible_models, error = cached
+                if expires_at > now and cached_fingerprint == fingerprint:
+                    return visible_models, error
         adapter = self.adapters.get(provider)
+        result: tuple[set[str] | None, str | None]
         if adapter is None:
             result = (None, f"provider {provider!r} has no configured adapter")
-            self._provider_visibility_cache[provider] = result
+            self._cache_provider_visibility(provider, fingerprint, *result, ttl_seconds=5.0)
             return result
         list_models = getattr(adapter, "list_models", None)
         if not callable(list_models):
             result = (None, None)
-            self._provider_visibility_cache[provider] = result
+            self._cache_provider_visibility(provider, fingerprint, *result, ttl_seconds=300.0)
             return result
         try:
             models = list_models()
         except (CrupierProviderAuthError, CrupierProviderRateLimitError, CrupierProviderUnavailableError) as exc:
             result = (None, f"provider {provider!r} is not operational with the configured API key: {exc}")
-            self._provider_visibility_cache[provider] = result
+            self._cache_provider_visibility(provider, fingerprint, *result, ttl_seconds=5.0)
             return result
         except Exception as exc:  # noqa: BLE001 - provider SDK boundaries vary
             result = (None, f"provider {provider!r} model discovery failed: {exc}")
-            self._provider_visibility_cache[provider] = result
+            self._cache_provider_visibility(provider, fingerprint, *result, ttl_seconds=5.0)
             return result
         result = ({ModelRef.parse(model.model_ref).key for model in models}, None)
-        self._provider_visibility_cache[provider] = result
+        self._cache_provider_visibility(provider, fingerprint, *result, ttl_seconds=300.0)
         return result
+
+    def _cache_provider_visibility(
+        self,
+        provider: str,
+        fingerprint: str,
+        visible_models: set[str] | None,
+        error: str | None,
+        *,
+        ttl_seconds: float,
+    ) -> None:
+        with self._provider_visibility_lock:
+            self._provider_visibility_cache[provider] = (
+                monotonic() + ttl_seconds,
+                fingerprint,
+                visible_models,
+                error,
+            )
+
+    def _provider_visibility_fingerprint(self, provider: str) -> str:
+        settings = self.config.providers.get(provider)
+        env_keys = {
+            "openai": ["OPENAI_API_KEY"],
+            "anthropic": ["ANTHROPIC_API_KEY"],
+            "google": ["GOOGLE_API_KEY", "GEMINI_API_KEY"],
+            "ollama": ["OLLAMA_API_KEY", "OLLAMA_HOST"],
+            "openrouter": ["OPENROUTER_API_KEY"],
+            "nan": ["NAN_API_KEY"],
+        }.get(provider, [])
+        if settings and settings.env_key:
+            env_keys = [settings.env_key, *env_keys]
+        material = [provider, settings.host if settings and settings.host else ""]
+        material.extend(f"{key}={os.environ.get(key, '')}" for key in dict.fromkeys(env_keys))
+        return hashlib.sha256("\0".join(material).encode("utf-8")).hexdigest()
 
     async def adeal(self, *args: Any, **kwargs: Any) -> CrupierResult:
         return await asyncio.to_thread(self.deal, *args, **kwargs)

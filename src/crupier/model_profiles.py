@@ -12,7 +12,7 @@ from typing import Any
 
 from .models import CapabilityCard, RequestEnvelope
 
-SOURCE_SNAPSHOT_DATE = "2026-06-20"
+SOURCE_SNAPSHOT_DATE = "2026-07-14"
 
 SOURCE_URLS = {
     "openai_models": "https://developers.openai.com/api/docs/models",
@@ -26,6 +26,7 @@ SOURCE_URLS = {
     "google_imagen": "https://ai.google.dev/gemini-api/docs/models/imagen",
     "google_veo_2": "https://ai.google.dev/gemini-api/docs/models/veo-2.0-generate-001",
     "ollama_cloud": "https://docs.ollama.com/cloud",
+    "nan_provider_guide": "https://gist.github.com/686f6c61/8c05e9e6a1fa6062f5a23f56edac46af",
     "arena_text": "https://arena.ai/leaderboard/text",
     "artificial_analysis": "https://artificialanalysis.ai/",
     "swe_bench": "https://www.swebench.com/",
@@ -442,6 +443,7 @@ PRODUCTION_RECOMMENDED_MODELS = {
     "google:gemini-2.5-flash-lite",
     "ollama:glm-5.2",
     "ollama:gpt-oss:120b",
+    "nan:qwen3.6",
 }
 
 OPT_IN_RECOMMENDED_MODELS = {
@@ -450,6 +452,9 @@ OPT_IN_RECOMMENDED_MODELS = {
     "google:deep-research-preview-04-2026",
     "google:antigravity-preview-05-2026",
     "ollama:gemini-3-flash-preview",
+    "nan:deepseek-v4-flash",
+    "nan:mimo-v2.5",
+    "nan:gemma4",
 }
 
 EXPENSIVE_OPT_IN_MODELS = {
@@ -459,6 +464,26 @@ EXPENSIVE_OPT_IN_MODELS = {
 }
 
 CURATED_MODEL_DEFAULTS: dict[str, dict[str, Any]] = {
+    "nan:qwen3.6": {
+        "strengths": ["reasoning", "coding", "multimodal", "structured_output", "classification"],
+        "natural_summary": "NaN's default general-purpose model for text, vision, structured extraction, classification, and optional thinking.",
+        "sources": ["nan_provider_guide"],
+    },
+    "nan:deepseek-v4-flash": {
+        "strengths": ["reasoning", "coding", "long_context", "structured_output", "tool_use"],
+        "natural_summary": "NaN text reasoning model for long-context work with low, medium, or high reasoning effort.",
+        "sources": ["nan_provider_guide"],
+    },
+    "nan:mimo-v2.5": {
+        "strengths": ["reasoning", "long_context", "multimodal", "audio_understanding", "tool_use"],
+        "natural_summary": "NaN long-context multimodal model for text, image, and audio workloads where always-on reasoning is acceptable.",
+        "sources": ["nan_provider_guide"],
+    },
+    "nan:gemma4": {
+        "strengths": ["reasoning", "multimodal", "structured_output", "classification", "tool_use"],
+        "natural_summary": "NaN vision-capable model for classification and structured output with opt-in thinking.",
+        "sources": ["nan_provider_guide"],
+    },
     "google:gemini-2.5-pro": {
         "quality_tier": "frontier",
         "cost_tier": "medium",
@@ -511,8 +536,8 @@ CURATED_MODEL_DEFAULTS: dict[str, dict[str, Any]] = {
         "quality_tier": "frontier",
         "cost_tier": "medium",
         "latency_tier": "medium",
-        "strengths": ["reasoning", "agentic", "coding", "orchestration", "privacy"],
-        "skill_scores": {"reasoning": 8.6, "agentic": 8.6, "coding": 8.2, "orchestration": 8.6, "privacy": 8.0},
+        "strengths": ["reasoning", "agentic", "coding", "orchestration"],
+        "skill_scores": {"reasoning": 8.6, "agentic": 8.6, "coding": 8.2, "orchestration": 8.6},
         "natural_summary": "Ollama Cloud GLM model for orchestration, reasoning, coding plans, and long-horizon agent decisions when the configured account has access.",
         "sources": ["ollama_cloud"],
     },
@@ -520,8 +545,8 @@ CURATED_MODEL_DEFAULTS: dict[str, dict[str, Any]] = {
         "quality_tier": "frontier",
         "cost_tier": "medium",
         "latency_tier": "medium",
-        "strengths": ["reasoning", "coding", "quality", "privacy"],
-        "skill_scores": {"reasoning": 8.4, "coding": 8.2, "privacy": 8.0},
+        "strengths": ["reasoning", "coding", "quality"],
+        "skill_scores": {"reasoning": 8.4, "coding": 8.2},
         "natural_summary": "Large Ollama Cloud text model for general reasoning and coding-style analysis when an account-local Cloud model is preferred.",
         "sources": ["ollama_cloud"],
     },
@@ -819,6 +844,9 @@ def _keyword_matches(text: str, keyword: str) -> bool:
 
 def apply_decision_profile(card: CapabilityCard, *, provider_metadata: dict[str, Any] | None = None) -> CapabilityCard:
     provider_metadata = dict(provider_metadata or {})
+    if card.model_ref.provider == "ollama":
+        card.strengths = [item for item in card.strengths if item not in {"local", "privacy"}]
+        card.skill_scores.pop("privacy", None)
     _apply_provider_metadata(card, provider_metadata)
     _apply_official_override(card)
     _apply_family_inference(card)
@@ -840,7 +868,8 @@ def _apply_provider_metadata(card: CapabilityCard, metadata: dict[str, Any]) -> 
     if provider == "anthropic":
         card.context_window = card.context_window or _int_or_none(metadata.get("max_input_tokens"))
         card.max_output_tokens = card.max_output_tokens or _int_or_none(metadata.get("max_tokens"))
-        capabilities = metadata.get("capabilities") if isinstance(metadata.get("capabilities"), dict) else {}
+        raw_capabilities = metadata.get("capabilities")
+        capabilities: dict[str, Any] = raw_capabilities if isinstance(raw_capabilities, dict) else {}
         if _cap_supported(capabilities, "image_input"):
             _add_modality(card, "image")
         if _cap_supported(capabilities, "pdf_input"):
@@ -1008,7 +1037,6 @@ def _apply_family_inference(card: CapabilityCard) -> None:
             card.supports_structured_output = False
             card.strengths.append("audio_generation")
     elif provider == "ollama":
-        card.strengths.extend(["privacy"])
         if any(name in model for name in ["coder", "code", "devstral"]):
             card.strengths.extend(["coding", "agentic"])
         if any(name in model for name in ["glm", "kimi", "minimax", "deepseek", "qwen3"]):
@@ -1146,7 +1174,7 @@ def _model_decision(card: CapabilityCard) -> dict[str, Any]:
             "requires_opt_in": False,
             "preferred_when": [],
             "avoid_when": [],
-            "status_reason": "Curated Crupier production-routing model as of 2026-06-20.",
+            "status_reason": f"Curated Crupier production-routing model as of {SOURCE_SNAPSHOT_DATE}.",
         }
 
     if key in OPT_IN_RECOMMENDED_MODELS:
@@ -1432,6 +1460,7 @@ def _routing_hints(card: CapabilityCard) -> dict[str, Any]:
     if card.model_kind == "embedding":
         strategy_bias = ["embedding"]
     hints = {
+        **existing,
         "routing_status": existing.get("routing_status"),
         "lifecycle": existing.get("lifecycle"),
         "production_default": existing.get("production_default", False),

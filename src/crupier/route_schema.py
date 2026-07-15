@@ -75,6 +75,7 @@ def validate_route_plan_shape(plan: RoutePlan, *, max_calls: int | None = None) 
             raise CrupierRouteValidationError(f"Route step {step.role!r} timeout must be positive.")
 
     _validate_required_roles(plan.strategy, seen_roles)
+    _validate_panel_cardinality(plan)
     if max_calls is not None:
         planned_calls = planned_call_count(plan)
         if planned_calls > max_calls:
@@ -104,3 +105,16 @@ def _validate_required_roles(strategy: str, seen_roles: set[str]) -> None:
             )
     if strategy == "delegate" and "delegate" not in seen_roles:
         raise CrupierRouteValidationError("Route strategy 'delegate' requires a delegate step.")
+
+
+def _validate_panel_cardinality(plan: RoutePlan) -> None:
+    if plan.strategy not in {"panel", "fusion"}:
+        return
+    panel = next((step for step in plan.steps if step.role == "panel"), None)
+    if panel is None:
+        return
+    model_count = len(panel.models) if panel.models else int(panel.model is not None)
+    if model_count < 2:
+        raise CrupierRouteValidationError(
+            f"Route strategy {plan.strategy!r} requires at least two panel models."
+        )

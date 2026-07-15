@@ -48,14 +48,29 @@ class PolicyEngine:
         has_tools = bool(request.tools)
         wants_structured = request.response_schema is not None or bool(constraints.get("response_schema"))
         wants_streaming = bool(constraints.get("stream", False) or constraints.get("require_streaming", False))
+        requested_model_kind = str(
+            constraints.get("model_kind") or ("embedding" if request.mode == "embedding" else "chat")
+        )
+        offline_planning = bool(request.metadata.get("_crupier_offline_planning"))
 
         for card in candidates:
             key = card.model_ref.key
             provider = card.model_ref.provider
             provider_settings = self.config.providers.get(provider)
 
+            if card.model_kind != requested_model_kind:
+                self._exclude(
+                    result,
+                    key,
+                    f"model kind {card.model_kind!r} cannot execute a {requested_model_kind!r} request",
+                    "model_kind",
+                )
+                continue
             if key in deny:
                 self._exclude(result, key, "model is explicitly denied", "deny_list")
+                continue
+            if provider_settings is None and not offline_planning:
+                self._exclude(result, key, f"provider {provider!r} is not configured", "provider_configured")
                 continue
             if provider_settings is not None and not provider_settings.enabled:
                 self._exclude(result, key, f"provider {provider!r} is disabled", "provider_enabled")
@@ -139,9 +154,39 @@ class PolicyEngine:
         if not self.config.routing.allow_parallel and plan.strategy in {"fusion", "panel"}:
             raise CrupierRouteValidationError(f"Route uses {plan.strategy}, but parallel routing is disabled.")
 
+        if plan.strategy in {"fusion", "panel"}:
+            self._validate_panel_size_constraints(plan, request)
+
         planned_calls = planned_call_count(plan)
         if planned_calls > max_calls:
             raise CrupierRouteValidationError(f"Route plans {planned_calls} calls, above max_calls={max_calls}.")
+
+    @staticmethod
+    def _validate_panel_size_constraints(plan: RoutePlan, request: RequestEnvelope) -> None:
+        panel = next((step for step in plan.steps if step.role == "panel"), None)
+        if panel is None:
+            return
+        count = len(panel.models) if panel.models else int(panel.model is not None)
+        try:
+            minimum = max(2, int(request.constraints.get("min_panel_size", 2)))
+            raw_maximum = request.constraints.get("max_panel_size")
+            maximum = int(raw_maximum) if raw_maximum is not None else None
+        except (TypeError, ValueError) as exc:
+            raise CrupierRouteValidationError(
+                "min_panel_size and max_panel_size must be integers."
+            ) from exc
+        if maximum is not None and maximum < 2:
+            raise CrupierRouteValidationError("max_panel_size must be at least 2 for panel or fusion routes.")
+        if maximum is not None and minimum > maximum:
+            raise CrupierRouteValidationError("min_panel_size cannot exceed max_panel_size.")
+        if count < minimum:
+            raise CrupierRouteValidationError(
+                f"Route plans {count} panel models, below min_panel_size={minimum}."
+            )
+        if maximum is not None and count > maximum:
+            raise CrupierRouteValidationError(
+                f"Route plans {count} panel models, above max_panel_size={maximum}."
+            )
 
     def _declarative_rule_rejection_reason(
         self,

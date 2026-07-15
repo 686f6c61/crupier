@@ -2,7 +2,7 @@ import sys
 from types import SimpleNamespace
 
 from crupier import Crupier, install
-from crupier.adapters import AdapterResponse, EmbeddingResponse
+from crupier.adapters import AdapterResponse, EmbeddingResponse, OperationResponse
 from crupier.compat.openai import OpenAI
 from crupier.config import CrupierConfig
 from crupier.errors import CrupierModelUnsupportedError
@@ -22,12 +22,53 @@ class FakeAdapter:
             metadata={"provider": "openai", "model": model},
         )
 
-    def embed(self, *, model, input):
-        self.calls.append({"model": model, "embedding_input": input})
+    def embed(self, *, model, input, dimensions=None):
+        self.calls.append({"model": model, "embedding_input": input, "dimensions": dimensions})
+        vectors = [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]] if isinstance(input, list) else [[0.1, 0.2, 0.3]]
+        if dimensions is not None:
+            vectors = [vector[:dimensions] for vector in vectors]
         return EmbeddingResponse(
-            embeddings=[[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]] if isinstance(input, list) else [[0.1, 0.2, 0.3]],
+            embeddings=vectors,
             usage={"prompt_tokens": 7, "total_tokens": 7},
             metadata={"provider": "openai", "model": model, "api": "embeddings.create"},
+        )
+
+
+class FakeSpecializedAdapter:
+    provider = "nan"
+
+    def __init__(self):
+        self.calls = []
+
+    @staticmethod
+    def supports_operation(*, operation, model):
+        return model == {
+            "reranker": "rerank",
+            "transcription": "whisper",
+            "tts": "kokoro",
+            "image_generation": "flux-2-klein",
+        }.get(operation)
+
+    def execute_operation(self, *, operation, model, request, payload):
+        self.calls.append({"operation": operation, "model": model, "payload": payload})
+        output = {
+            "reranker": [{"index": 1, "relevance_score": 0.98}],
+            "transcription": {"text": "hola mundo", "language": "es"},
+            "tts": b"audio-bytes",
+            "image_generation": [{"url": "https://example.test/image.png"}],
+        }[operation]
+        return OperationResponse(
+            operation=operation,
+            output=output,
+            metadata={"provider": "nan", "model": model},
+        )
+
+    def embed(self, *, model, input, dimensions=None):
+        self.calls.append({"operation": "embedding", "model": model, "input": input, "dimensions": dimensions})
+        return EmbeddingResponse(
+            embeddings=[[0.9, 0.8, 0.7]],
+            usage={"prompt_tokens": 3, "total_tokens": 3},
+            metadata={"provider": "nan", "model": model},
         )
 
 
@@ -36,7 +77,13 @@ def make_client(tmp_path, *, dry_run=False):
         {
             "project": {"name": "compat", "default_profile": "agentic"},
             "providers": {"openai": {"enabled": True, "env_key": "OPENAI_API_KEY"}},
-            "models": {"allow": ["openai:gpt-5.5", "openai:gpt-5.4-mini"]},
+            "models": {
+                "allow": [
+                    "openai:gpt-5.5",
+                    "openai:gpt-5.4-mini",
+                    "openai:text-embedding-3-small",
+                ]
+            },
             "routing": {"default_strategy": "single"},
         }
     )
@@ -44,6 +91,29 @@ def make_client(tmp_path, *, dry_run=False):
     adapter = FakeAdapter()
     crupier = Crupier(config, adapters={"openai": adapter})
     return OpenAI(crupier=crupier, dry_run=dry_run), adapter
+
+
+def make_specialized_client(tmp_path):
+    config = CrupierConfig.from_dict(
+        {
+            "project": {"name": "compat-specialized"},
+            "providers": {"nan": {"enabled": True, "env_key": "NAN_API_KEY"}},
+            "models": {
+                "allow": [
+                    "nan:rerank",
+                    "nan:whisper",
+                    "nan:kokoro",
+                    "nan:flux-2-klein",
+                    "nan:qwen3-embedding",
+                ]
+            },
+            "routing": {"require_operational_providers": False},
+        }
+    )
+    config.root = tmp_path
+    adapter = FakeSpecializedAdapter()
+    crupier = Crupier(config, adapters={"nan": adapter})
+    return OpenAI(crupier=crupier), adapter
 
 
 def test_responses_create_returns_openai_like_object(tmp_path):
@@ -206,6 +276,7 @@ def test_embeddings_create_returns_openai_like_list(tmp_path):
     assert response.data[1].embedding == [0.4, 0.5]
     assert response.usage.prompt_tokens == 7
     assert adapter.calls[-1]["model"] == "text-embedding-3-small"
+    assert adapter.calls[-1]["dimensions"] == 2
 
 
 def test_embeddings_rejects_known_chat_model(tmp_path):
@@ -214,6 +285,57 @@ def test_embeddings_rejects_known_chat_model(tmp_path):
     try:
         client.embeddings.create(model="gpt-5.5", input="hello")
     except CrupierModelUnsupportedError as exc:
-        assert "not marked as an embedding model" in str(exc)
+        assert "embedding" in str(exc)
     else:
         raise AssertionError("chat model should not be accepted for embeddings")
+
+
+def test_embeddings_can_route_to_non_openai_provider_by_model_id(tmp_path):
+    client, adapter = make_specialized_client(tmp_path)
+
+    response = client.embeddings.create(model="qwen3-embedding", input="hola")
+
+    assert response.model == "nan:qwen3-embedding"
+    assert response.data[0].embedding == [0.9, 0.8, 0.7]
+    assert response.crupier.operation == "embedding"
+    assert adapter.calls[-1]["model"] == "qwen3-embedding"
+
+
+def test_openai_compat_images_route_through_specialized_model(tmp_path):
+    client, adapter = make_specialized_client(tmp_path)
+
+    response = client.images.generate(
+        prompt="A lighthouse",
+        size="1024x1024",
+        response_format="url",
+        seed=42,
+    )
+
+    assert response.model == "nan:flux-2-klein"
+    assert response.data[0].url == "https://example.test/image.png"
+    assert response.crupier.operation == "image_generation"
+    assert response.crupier.route["steps"][0]["model"] == "nan:flux-2-klein"
+    assert adapter.calls[0]["payload"]["seed"] == 42
+
+
+def test_openai_compat_audio_and_rerank_surfaces(tmp_path):
+    client, _ = make_specialized_client(tmp_path)
+
+    audio = client.audio.speech.create(input="Hola", voice="ef_dora", response_format="mp3")
+    transcript = client.audio.transcriptions.create(
+        file=("short.mp3", b"audio", "audio/mpeg"),
+        language="es",
+        response_format="verbose_json",
+    )
+    reranked = client.rerank.create(
+        query="capital of France",
+        documents=["Berlin", "Paris"],
+        top_n=1,
+    )
+
+    assert audio.read() == b"audio-bytes"
+    assert list(audio.iter_bytes(chunk_size=5)) == [b"audio", b"-byte", b"s"]
+    assert transcript.text == "hola mundo"
+    assert transcript.model == "nan:whisper"
+    assert reranked.model == "nan:rerank"
+    assert reranked.results[0].index == 1

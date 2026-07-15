@@ -9,6 +9,7 @@ from crupier.config import (
     write_models_allow,
     write_orchestrator_settings,
 )
+from crupier.errors import CrupierConfigError
 
 
 def test_write_default_project_creates_config_and_dirs(tmp_path):
@@ -20,6 +21,8 @@ def test_write_default_project_creates_config_and_dirs(tmp_path):
     assert ".env" in gitignore
     assert "!.env.example" in gitignore
     assert ".crupier/traces/" in gitignore
+    assert ".crupier/evals/live-routing-validation.json" in gitignore
+    assert ".crupier/evals/live-operations-validation.json" in gitignore
     assert (tmp_path / ".crupier" / "registry" / "capability-cards").is_dir()
     assert (tmp_path / ".crupier" / "registry" / "snapshots").is_dir()
 
@@ -33,6 +36,9 @@ def test_write_default_project_creates_config_and_dirs(tmp_path):
     assert config.routing.max_provider_retries == 1
     assert config.routing.retry_backoff_seconds == 0.2
     assert config.routing.require_operational_providers is True
+    assert config.orchestrator.mode == "model"
+    assert config.orchestrator.model == "openai:gpt-5.4-mini"
+    assert config.orchestrator.fallback == "deterministic"
     env_example = (tmp_path / ".env.example").read_text(encoding="utf-8")
     assert "OLLAMA_HOST=https://ollama.com/api" in env_example
     assert "OPENROUTER_API_KEY=" in env_example
@@ -120,6 +126,7 @@ def test_write_orchestrator_settings_and_sdk_configuration(tmp_path):
         fallback="deterministic",
         require_validated_plan=False,
         max_repairs=3,
+        candidate_limit=8,
         allow_prompt_summary_only=False,
     )
 
@@ -130,6 +137,7 @@ def test_write_orchestrator_settings_and_sdk_configuration(tmp_path):
     assert config.orchestrator.temperature == 0.1
     assert config.orchestrator.require_validated_plan is False
     assert config.orchestrator.max_repairs == 3
+    assert config.orchestrator.candidate_limit == 8
     assert config.orchestrator.allow_prompt_summary_only is False
 
     client = Crupier.from_project(tmp_path)
@@ -137,13 +145,38 @@ def test_write_orchestrator_settings_and_sdk_configuration(tmp_path):
         mode="hybrid",
         model="anthropic:claude-opus-4-8",
         max_repairs=2,
+        candidate_limit=7,
         allow_prompt_summary_only=True,
     )
     assert client.config.orchestrator.mode == "hybrid"
     assert client.config.orchestrator.model == "anthropic:claude-opus-4-8"
     assert client.config.orchestrator.max_repairs == 2
+    assert client.config.orchestrator.candidate_limit == 7
     assert client.config.orchestrator.allow_prompt_summary_only is True
     assert client.planner.config.orchestrator.model == "anthropic:claude-opus-4-8"
+
+
+def test_orchestrator_candidate_limit_is_validated_before_mutation_or_write(tmp_path):
+    write_default_project(tmp_path)
+    original = (tmp_path / "crupier.toml").read_text(encoding="utf-8")
+
+    try:
+        write_orchestrator_settings(tmp_path, candidate_limit=1)
+    except CrupierConfigError as exc:
+        assert "candidate_limit" in str(exc)
+    else:
+        raise AssertionError("invalid persisted candidate limit must fail")
+    assert (tmp_path / "crupier.toml").read_text(encoding="utf-8") == original
+
+    client = Crupier.from_project(tmp_path)
+    previous = client.config.orchestrator.candidate_limit
+    try:
+        client.configure_orchestrator(candidate_limit=33)
+    except CrupierConfigError as exc:
+        assert "candidate_limit" in str(exc)
+    else:
+        raise AssertionError("invalid SDK candidate limit must fail")
+    assert client.config.orchestrator.candidate_limit == previous
 
 
 def test_from_toml_loads_local_dotenv_without_overriding_existing_env(tmp_path, monkeypatch):

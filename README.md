@@ -7,9 +7,9 @@ It is designed for two situations:
 - New projects that want one AI boundary instead of hard-coding provider/model choices throughout the codebase.
 - Existing AI projects, agents, SDK integrations, or provider-specific codebases that want to add model selection, provider fallback, audits, evals, and human review without a full rewrite.
 
-Crupier is a BYOK orchestration layer: it runs with your own provider accounts across OpenAI, Anthropic Claude, Google Gemini, Ollama Cloud, optional OpenRouter BYOK, or your own integration boundary. It keeps prompts/responses out of persistent logs by default and routes each request toward the best available model or model family for the task, quality target, latency, cost budget, and project policy.
+Crupier is a BYOK orchestration layer: it runs with your own provider accounts across OpenAI, Anthropic Claude, Google Gemini, Ollama Cloud, configurable OpenAI-compatible inference servers, optional OpenRouter BYOK, or your own integration boundary. It keeps prompts/responses out of persistent logs by default and routes each request toward the best available model or model family for the task, quality target, latency, cost budget, and project policy.
 
-Current public package version: `0.3.0`.
+Current public package version: `0.4.0`.
 
 ## What It Does
 
@@ -38,6 +38,7 @@ Install only the provider SDKs and file helpers you use. Ollama Cloud and explic
 pip install "crupier[openai]"
 pip install "crupier[anthropic]"
 pip install "crupier[google]"
+pip install "crupier[inference-server]"
 pip install "crupier[openrouter]"
 pip install "crupier[pdf]"
 pip install "crupier[all]"
@@ -51,6 +52,7 @@ Optional provider extras:
 | `crupier[anthropic]` | Native Anthropic Claude calls. |
 | `crupier[google]` | Native Google Gemini calls. |
 | `crupier[ollama]` | Compatibility extra; Ollama Cloud/local REST support ships in the base package. |
+| `crupier[inference-server]` | Configurable OpenAI-compatible chat, image-input, and embedding servers. |
 | `crupier[openrouter]` | Optional OpenRouter BYOK adapter through OpenAI-compatible SDK calls. |
 | `crupier[pdf]` | PDF text extraction through `pypdf` for file-context execution. |
 | `crupier[all]` | All runtime provider/file extras. |
@@ -145,6 +147,7 @@ GOOGLE_API_KEY=
 GEMINI_API_KEY=
 OLLAMA_API_KEY=
 OLLAMA_HOST=https://ollama.com/api
+INFERENCE_API_KEY=
 ```
 
 Do not pass API keys as CLI arguments, commit `.env`, or put provider keys in `crupier.toml`.
@@ -152,7 +155,7 @@ For CLI checks, load a local ignored env file explicitly:
 
 ```bash
 crupier --env-file .env verify --provider google
-crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama
+crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference
 ```
 
 Relative `--env-file` paths resolve from `--project`. Existing exported variables are kept, so CI or shell-provided secrets are not overwritten by local files.
@@ -183,6 +186,12 @@ enabled = false
 mode = "byok"
 host = "https://openrouter.ai/api/v1"
 env_key = "OPENROUTER_API_KEY"
+
+[providers.inference]
+enabled = false
+mode = "openai_compatible"
+host = "http://127.0.0.1:8000/v1"
+auth = "none"
 ```
 
 Ollama means Ollama Cloud by default:
@@ -209,6 +218,7 @@ crupier models discover --provider openai
 crupier models discover --provider anthropic
 crupier models discover --provider google
 crupier models discover --provider ollama
+crupier models discover --provider inference
 ```
 
 Then you choose which models this project is allowed to use:
@@ -244,7 +254,7 @@ crupier models show ollama:glm-5.2
 
 Every capability card carries a decision profile with `routing_status`, `lifecycle`, `production_default`, `requires_opt_in`, task skills, modality support, and source evidence. Expensive or narrow models can remain visible without being selected by default. For example, OpenAI `o3`, `o3-pro`, and `o4-mini` are treated as explicit opt-in models rather than Crupier production-default choices.
 
-For `0.3.0`, Crupier treats the provider catalog and the automatic routing set as different things. Provider discovery may produce hundreds of cards, but the production-default set stays intentionally small and source-backed: current OpenAI GPT defaults, current Claude Opus/Sonnet defaults, current Gemini Flash/Pro defaults, and selected Ollama Cloud defaults such as `ollama:glm-5.2` and `ollama:gpt-oss:120b`. Everything else remains selectable by the project owner through `[models].allow`, but is classified as `unknown`, `opt_in`, `specialized`, `legacy`, `deprecated`, or `shutdown` until there is enough evidence to promote it.
+For `0.4.0`, Crupier treats the provider catalog and the automatic routing set as different things. Provider discovery may produce hundreds of cards, but the production-default set stays intentionally small and source-backed: current OpenAI GPT defaults, current Claude Opus/Sonnet defaults, current Gemini Flash/Pro defaults, and selected Ollama Cloud defaults such as `ollama:glm-5.2` and `ollama:gpt-oss:120b`. Models from a configurable inference server remain selectable by the project owner through `[models].allow`, but are classified as `unknown`, `opt_in`, `specialized`, `legacy`, `deprecated`, or `shutdown` until project probes and eval evidence justify promotion.
 
 Refresh reports now separate added, removed, stale, pricing, and profile/capability changes so maintainers can review what changed before updating an allowlist.
 
@@ -254,13 +264,13 @@ Crupier selection is intentionally layered:
 
 1. Load project policy, profiles, allowlist, denylist, and capability cards.
 2. Classify the request with weighted signals: agentic, structured, fast, cheap, research, private, multimodal, file-based, embedding, tool-using, or constrained.
-3. Filter out models that violate policy, stability rules, provider config, required capabilities, or budget constraints.
+3. Filter out models that violate policy, stability rules, provider config, adapter transport support, required capabilities, or budget constraints.
 4. Score the remaining models using configurable weights for profile preferences, task signals, quality/cost/latency tiers, verified probes, eval results, budget fit, and human feedback.
 5. Build a `RoutePlan` with a strategy such as single, fallback, cascade, panel, fusion, critique-repair, local-first, or delegate.
 6. Validate the route shape before any provider call.
-7. Execute the route, or return the plan when `dry_run=True`.
+7. Execute the route under one shared call/cost/latency budget that includes model-powered planning, retries, tools, panels, and delegated work; or return the plan when `dry_run=True`.
 
-The default orchestrator is deterministic. You can opt into a model orchestrator for JSON route plans, one repair attempt, and deterministic fallback:
+Projects created with `crupier init` default to a model-powered orchestrator for JSON route plans, one repair attempt, and deterministic fallback. The orchestrator receives deterministic scoring as a prior and cannot bypass policy or route validation. Set `mode = "deterministic"` when a project explicitly wants zero planning-model calls:
 
 ```toml
 [orchestrator]
@@ -271,7 +281,8 @@ fallback = "deterministic"
 temperature = 0
 require_validated_plan = true
 max_repairs = 1
-allow_prompt_summary_only = true
+candidate_limit = 6
+allow_prompt_summary_only = false
 ```
 
 Configure it from the CLI or SDK:
@@ -295,6 +306,12 @@ crupier.configure_orchestrator(
 ```
 
 `ollama:glm-5.2` is a strong preset when Ollama Cloud is enabled for the project, not a lock-in. Any model visible to your enabled provider accounts can be used as the orchestrator model by setting `provider:model`.
+
+The model orchestrator receives bounded, redacted request content plus a compact, provider-diverse candidate pool: natural-language strengths and avoid-cases, modalities, context/output limits, tool and structured-output support, reasoning controls, pricing evidence, probe status, and deterministic scores as a calibrated prior. `candidate_limit` bounds that pool to control planning latency and cost. Its JSON plan is schema-validated and policy-checked before execution. Set `allow_prompt_summary_only = true` only when the orchestrator must choose from task metadata without seeing request content.
+
+`force_model` is an explicit caller decision, so Crupier validates it and bypasses the model-orchestrator call. This avoids paying for a redundant routing decision and keeps a one-call budget genuinely to one provider call.
+
+Crupier also bypasses model-powered planning when policy and capability filters leave exactly one candidate. The LLM orchestrator is reserved for real choices between viable routes.
 
 Sensitive agentic/tool routes include guardrails so an orchestrator cannot silently downgrade into an unsafe or unsupported model path.
 
@@ -327,11 +344,11 @@ strategy = "orchestrated"
 
 [profiles.cheap]
 prefer = ["low_cost"]
-strategy = "cascade"
+strategy = "orchestrated"
 
 [profiles.fast]
 prefer = ["low_latency"]
-strategy = "single"
+strategy = "orchestrated"
 
 [profiles.private]
 prefer = ["local", "zdr", "no_prompt_logging"]
@@ -339,14 +356,14 @@ strategy = "local_first"
 
 [profiles.research]
 prefer = ["consensus", "critique"]
-strategy = "fusion"
+strategy = "orchestrated"
 
 [profiles.structured]
 prefer = ["structured_output", "schema_validity"]
-strategy = "cascade"
+strategy = "orchestrated"
 ```
 
-Profiles can also live in `.crupier/profiles/*.toml` or `.json`, which lets teams share routing presets without editing the main `crupier.toml`. Advanced profiles can declare `strategy_rules` so, for example, a short tool request stays `single` while a longer high-risk tool workflow uses `critique_repair` or `delegate`.
+`strategy = "orchestrated"` lets the configured LLM choose the route strategy from the request and candidate evidence. Setting `single`, `cascade`, `fusion`, or another concrete strategy turns it into a project policy that the model orchestrator must obey. Profiles can also live in `.crupier/profiles/*.toml` or `.json`, which lets teams share routing presets without editing the main `crupier.toml`. Advanced profiles can declare `strategy_rules` so, for example, a short tool request stays `single` while a longer high-risk tool workflow uses `critique_repair` or `delegate`.
 
 Use a profile from Python:
 
@@ -435,6 +452,83 @@ crupier smoke --model openai:gpt-5.4-mini
 ```
 
 By default, smoke tests do not print model output. Use `--show-output` only for harmless debugging prompts.
+
+## Live End-To-End Routing Validation
+
+`verify` and `smoke` prove that provider credentials, discovery, and one minimal model call work. They do not prove that the LLM orchestrator can inspect a real task, choose a strategy, divide work between roles, execute those roles across providers, and preserve the result in a trace. The live validation suite exercises that complete path without `force_model`:
+
+```bash
+env -u OPENAI_API_KEY -u ANTHROPIC_API_KEY \
+  -u GOOGLE_API_KEY -u GEMINI_API_KEY \
+  -u OLLAMA_API_KEY -u OLLAMA_HOST \
+  python examples/live_routing_validation.py --real --project . --write-report
+```
+
+Use `--case fast`, `--case research`, or repeat `--case` to run only selected cases. The optional report is written to the ignored local path `.crupier/evals/live-routing-validation.json`. It contains the task, validated route, role/model allocation, provider-call metadata, latency, cost, checks, and a bounded output preview; it does not contain credentials.
+
+Each validation case starts from a fresh Crupier runtime so a circuit opened by one experiment cannot invalidate an unrelated later case. Cross-request circuit persistence and degraded-provider exclusion are covered separately by the automated executor suite.
+
+A provider or primary-orchestrator error is not silently discarded. The case passes only if the error is recovered by a later validated orchestrator plan, successful retry, role fallback, or fusion quorum; executor errors or an invalid final route still fail the suite. Recovered events remain in `trace.errors` and `trace.fallbacks` so fallback behavior is auditable.
+
+The suite sends the following literal task strings and controlled inputs; these are the prompts used by the executable validation case definitions, not paraphrases:
+
+1. `fast`: `Summarize the deployment event in exactly one sentence and include the incident id.` Input identifies `INC-42` and a canary rollback.
+2. `structured`: `Extract claim fields from the supplied text; do not infer missing facts. Use a primary extraction, validate it against the response schema, and reserve a separate escalation model only if validation fails.` Input contains claim `CLM-2048`, its date, total, missing police report, and mandatory human review. The response must match an exact JSON Schema.
+3. `research`: `Compare a single frontier model with provider fallback against a capability-aware multi-provider router for 100000 support tickets per month. Evaluate reliability, latency, cost, observability, failure modes, and migration risk. Obtain three independent provider-diverse analyses, have a separate judge reconcile consensus and disagreements, then use a final writer to recommend one.`
+4. `agentic`: `Review a production payment-retry change. Produce a merge decision, identify rollback risks, challenge the first draft with an independent critic, and repair the recommendation.` Input includes the proposed retry policy, existing idempotency behavior, and missing tests.
+5. `tools`: `Use lookup_billing_case for ticket SUP-LIVE-TOOL-1, then draft a concise reply. Do not claim a refund started or completed unless the tool says so. State the next action and ETA. Have an independent critic verify the draft against the tool result, then repair any unsupported claim.` The local tool returns an authoritative duplicate-charge state, `refund_status=not_started`, billing review, and a two-business-day ETA.
+6. `delegate`: `Use delegate exactly once. Hand off this bounded subtask: identify three failure modes in a capability-aware router and one mitigation for each. Execute the subtask as single-model analysis.`
+7. `image`: `Inspect the attached solid-color image and reply with exactly one lowercase color word.` The fixture is a generated solid red PNG sent through native vision.
+8. `pdf`: `Read the attached PDF and reply with only the audit passphrase.` The generated PDF contains `The audit passphrase is zircon.` and is sent through native PDF input.
+
+Each case asserts the work decomposition as well as the final answer:
+
+| Case | Required route and subtasks | Success evidence |
+| --- | --- | --- |
+| `fast` | `single`: one primary answer | Valid model-authored plan, one sentence, `INC-42` preserved |
+| `structured` | `cascade`: primary attempt, sufficiency/schema validation, conditional escalation | Exact typed JSON; escalation is skipped only when the primary output validates |
+| `research` | `fusion`: three provider-diverse panel analyses, judge, final writer | Three panel members are planned; at least two providers must succeed to satisfy quorum before judge and writer execute |
+| `agentic` | `critique_repair`: generator, independent critic, repair | All three roles execute under one shared budget |
+| `tools` | Tool planner, approved local tool execution, tool-aware critic, repaired final answer | Tool completes; critic and repair receive the tool ledger; refund state and ETA remain factual |
+| `delegate` | Outer delegate creates a bounded subtask; nested Crupier route selects and executes its own model | Nested strategy/models are traced and remaining depth decreases |
+| `image` | Capability filtering plus native image delivery to a vision model | Adapter records one native image and output is exactly `red` |
+| `pdf` | Capability filtering plus native PDF delivery to a document-capable model | Adapter records one native file and output is exactly `zircon` |
+
+For multi-step routes, the executor turns the validated role plan into these bounded subtask prompts:
+
+| Role | Subtask sent to that role |
+| --- | --- |
+| Fusion panel member | Receives the original task and controlled input independently; panel members do not see each other's drafts |
+| Fusion judge | Receives every labeled panel output and must return consensus, contradictions, gaps, and risks without hidden reasoning |
+| Fusion final writer | Receives the original request plus the judge synthesis and writes the direct user-facing answer with uncertainty stated |
+| Critique-repair generator | Produces the first complete answer from the original request |
+| Critique-repair critic | Receives the draft and checks correctness, missing constraints, cost/latency tradeoffs, and tool risk |
+| Critique-repair repair | Receives both draft and critique and produces the corrected final answer |
+| Tool planner | Receives the original task plus JSON tool schemas, proposes approved calls, observes the authoritative result ledger, and may plan another bounded round |
+| Tool critic | Checks the draft against the actual tool ledger rather than relying on model memory |
+| Tool repair | Preserves only facts supported by the request and tool ledger, then applies the critic's corrections |
+| Delegate | Receives the bounded subtask in `RouteStep.params.task`; a nested Crupier call inherits the remaining call, cost, latency, and depth budget and selects its own validated subroute |
+
+In the observed tool plan, the orchestrator made the subtasks explicit: the generator had to call `lookup_billing_case` and draft the reply; the critic had to verify that refund status, next action, and ETA were supported; the repair role had to remove unsupported refund claims or fill missing action/ETA. The delegate subtask was exactly `identify three failure modes in a capability-aware router and one mitigation for each`.
+
+The following allocation was observed with the configured operational allowlist on `2026-07-15`:
+
+| Case | Orchestrator decision | Executed model allocation |
+| --- | --- | --- |
+| `fast` | `ollama:glm-5.2` selected `single` | `google:gemini-3.5-flash` as primary |
+| `structured` | `ollama:glm-5.2` selected `cascade` | `anthropic:claude-sonnet-4-6` as primary; `anthropic:claude-opus-4-8` reserved for escalation and not called after exact schema validation |
+| `research` | `ollama:glm-5.2` selected `fusion` | Planned panel: `google:gemini-3.5-flash`, `openai:gpt-5.5`, and `anthropic:claude-sonnet-4-6`; Gemini and Claude succeeded, GPT-5.5 returned empty text twice, and the `2/3` quorum continued to `anthropic:claude-opus-4-8` as judge and `openai:gpt-5.5` as final writer |
+| `agentic` | `ollama:glm-5.2` selected `critique_repair` | Generator: `anthropic:claude-opus-4-8`; critic: `openai:gpt-5.5`; repair: `anthropic:claude-opus-4-8` |
+| `tools` | `ollama:glm-5.2` selected a tool-aware `critique_repair` route | Tool planner: `anthropic:claude-opus-4-8`; local tool; tool critic: `anthropic:claude-sonnet-4-6`; tool repair: `anthropic:claude-opus-4-8` |
+| `delegate` | Requested `delegate`; `ollama:glm-5.2` authored the outer plan, bounded subtask, and `anthropic:claude-opus-4-8` anchor | Nested `ollama:glm-5.2` routing plan; `anthropic:claude-opus-4-8` as nested primary |
+| `image` | `ollama:glm-5.2` selected a native-vision `single` route | `google:gemini-3.5-flash` received the PNG |
+| `pdf` | `ollama:glm-5.2` selected a native-PDF `single` route | `openai:gpt-5.4-mini` received the PDF |
+
+No case fixes an executor model. Seven cases let the model orchestrator choose both strategy and models; `delegate` fixes only the strategy because that case specifically validates recursive delegation. Exact model names may change as a project's allowlist, account availability, prices, probes, evals, and feedback change. The stable contract is the validated strategy, required roles, capability fit, budget enforcement, and trace evidence.
+
+The repeated live run on `2026-07-15` passed `8/8` cases with no unrecovered trace errors. Its eight sequential routes used about `189.9 s` in aggregate and recorded an estimated provider cost of `$0.4234`; these are trace estimates, not provider invoices. The failed GPT-5.5 panel attempts remain cost-visible in the trace even though fusion recovered through quorum.
+
+The complete executable cases live in [`examples/live_routing_validation.py`](https://github.com/686f6c61/crupier/blob/main/examples/live_routing_validation.py). Model-facing route and role prompts are versioned in [`src/crupier/prompts.py`](https://github.com/686f6c61/crupier/blob/main/src/crupier/prompts.py) instead of being duplicated in prose. The route prompt is `orchestrator.route_plan.v3`; it supplies the allowed strategies, exact role shape for each strategy, bounded request context, constraints, and a compact candidate-card corpus. Fusion plans prefer a provider-diverse three-member panel when candidates and budget allow, while `min_panel_size` and `max_panel_size` are enforced as hard request policy. A returned plan must pass schema, policy, capability, and budget validation before execution; malformed plans get one contract-aware repair attempt and then the configured fallback.
 
 ## Structured Output
 
@@ -545,12 +639,15 @@ print(result.route.input_plan)
 Current execution behavior:
 
 - Images can route to native vision-capable models and execute through OpenAI, Anthropic Claude, Google Gemini, and Ollama adapters when the selected model supports image input.
+- OpenAI-compatible inference servers can receive native images when the selected model card and configured adapter both declare image support.
 - Text, Markdown, JSON, YAML, HTML/CSS, code files, and PDFs can execute as extracted text context.
 - PDF extraction uses `pypdf` from `crupier[pdf]` when installed or a local `pdftotext` binary when available.
-- `constraints={"require_native_file_input": True}` forces a native file-capable route instead of extracted context.
-- Native PDF/audio/video/office-document execution, OCR, table-aware PDF extraction, and transcription are explicitly blocked until those local or provider-native pipelines are implemented.
+- OpenAI Responses can receive native PDFs when `constraints={"require_native_file_input": True}` or `constraints={"file_strategy": "native"}` is set.
+- The CLI exposes `--file-strategy auto|native|extract` on `crupier deal`.
+- Crupier checks both model capability and adapter transport support before selecting a native-file route, so an unsupported adapter cannot silently drop a file.
+- Native video/office-document execution, OCR, table-aware PDF extraction, and transcript-first audio/video preprocessing remain explicitly unsupported.
 
-## Embeddings
+## Embeddings And Specialized Operations
 
 Crupier marks embedding models separately from chat models. For projects that already use OpenAI-style embedding clients, the compatibility layer can route embedding calls through the same Crupier boundary:
 
@@ -571,6 +668,74 @@ response = client.embeddings.create(
 
 print(response.data[0].embedding[:3])
 ```
+
+Crupier can route dedicated embedding, reranking, transcription, text-to-speech, and image generation/editing models through capability-specific operations instead of pretending they are chat models. Built-in providers and custom adapters declare which operations they actually execute:
+
+```python
+from crupier import Crupier
+
+crupier = Crupier.from_project()
+
+ranking = crupier.rerank(
+    query="capital of France",
+    documents=["Berlin", "Paris"],
+    top_n=1,
+)
+transcript = crupier.transcribe(file="meeting.wav")
+speech = crupier.synthesize(input="Hola", voice="ef_dora")
+image = crupier.generate_image(
+    prompt="A precise product diagram on a white background",
+    size="1024x1024",
+)
+```
+
+Use `Crupier.run(...)` when the caller does not already know which operation is required. In `model` or `hybrid` orchestrator mode, Crupier first asks the configured orchestrator to classify the request as chat, embedding, reranking, transcription, TTS, or image generation, validates that choice against the executable allowlist, and then selects a capable model. The classifier and execution share one call/cost/latency budget and one decision trace:
+
+```python
+result = crupier.run(
+    "Ordena estos textos por relevancia para la consulta",
+    input={
+        "query": "capital of France",
+        "documents": ["Berlin", "Paris"],
+    },
+    constraints={"max_calls": 2},
+    trace="debug",
+)
+
+print(result.operation)  # reranker
+print(result.model)      # for example inference:rerank-model
+```
+
+Direct methods are preferable when application code already knows the operation: they avoid paying for classification while retaining policy, model selection, budgets, provider readiness, and traces. Specialized provider pricing may be quota-, request-, image-, or subscription-based instead of token-based; when the provider does not report billable cost, Crupier records the call and emits a warning but does not invent a USD estimate. Each adapter validates its own upload, dimension, output-count, and reference-image limits before dispatch.
+
+### Live Operations And Compatibility Validation
+
+The public operations suite validates the actual operation boundary, the Python compatibility client, and an ephemeral OpenAI-compatible HTTP server. It does not use fake adapters in real mode:
+
+```bash
+python examples/live_operations_validation.py \
+  --real --project . --write-report
+```
+
+The project used for this command must allow at least one executable chat, embedding, reranking, transcription, TTS, and image-generation model. Those capabilities may come from built-in providers or a configured OpenAI-compatible inference server. Use `--case classifier`, `--case audio`, or repeat `--case` to narrow a run. The sanitized report is written to the ignored local path `.crupier/evals/live-operations-validation.json`; it records models, dimensions, byte counts, endpoint evidence, calls, budgets, and errors, but not vectors, audio, images, credentials, or raw provider responses.
+
+The suite sends these exact controlled requests:
+
+| Case | Request and input | Contract asserted |
+| --- | --- | --- |
+| `classifier` | `Rank these documents by relevance to the query.` with query `the exact token ZEBRA-991` and three documents | The model orchestrator classifies `reranker`, then a different operation step executes a capable model under the same budget and ranks the matching document first |
+| `embeddings` | Embeds `Crupier live embedding` and `capability-aware model router` through every executable embedding model in the allowlist | Two non-zero vectors per model, equal positive dimensions, and requested dimensions honored where supported |
+| `rerank` | Query `the exact token ZEBRA-991`; the second of three documents contains that token | Three descending scores and source index `1` ranked first |
+| `audio` | Synthesizes `The secret phrase is blue ocean seven.` to WAV and sends those exact bytes to transcription | Valid RIFF audio and a transcript preserving `blue ocean` plus `seven` or `7` |
+| `image` | Generates `A centered green circle on a white background, no text.` and edits a generated red fixture with `Change the red square to blue and keep the background white. No text.` | Generation and edit both return decodable image data; the edit trace records the edit endpoint |
+| `compat` | Exact replies `COMPAT-OK`, `STREAM-OK`, and `NATIVE-STREAM-OK`, plus one embedding | Chat Completions shape, Responses event sequence, native route-event sequence, exact text reconstruction, and embedding shape |
+| `http` | Repeats chat, streaming, embeddings, rerank, TTS/transcription, and image generation/edit through a loopback server, then sends an invalid chat request | `/health`, `/v1/models`, all operation endpoints, SSE `[DONE]`, request ids, binary response, multipart uploads, clean shutdown, and an OpenAI-shaped typed `400` error |
+
+On `2026-07-15`, a clean-environment provider verification reported OpenAI, Anthropic Claude, Google Gemini, and Ollama Cloud ready, with `131`, `9`, `54`, and `18` models discovered respectively. Representative `structured_output`, `tool_call`, and `streaming` probes passed `12/12` across those four providers.
+
+The repeated live operations run passed `7/7` cases. It produced two `128`-dimension vectors through each public embedding API and two `4096`-dimension vectors through the configured inference server; ranked the exact-token document first; produced a `136430`-byte WAV whose transcription preserved the test phrase; and returned image data for both generation and editing. The Python surface reconstructed all three exact compatibility replies. The HTTP surface returned healthy/model-list responses, a `32`-dimension embedding, the correct rerank index, audio and image bodies, and the expected typed `400` error with a request id.
+
+`Crupier.stream()` currently emits route lifecycle events (`route_started`, `route_selected`, `final`). The OpenAI-compatible streaming surfaces reconstruct the expected SSE/Responses event contracts from the completed model result; they are not yet a provider-native token-forwarding proxy. Broader provider-native streaming remains listed under Planned Work.
 
 ## Drop-In Adoption For Existing Projects
 
@@ -655,8 +820,13 @@ Implemented endpoints:
 - `POST /v1/responses`
 - `POST /v1/chat/completions`
 - `POST /v1/embeddings`
+- `POST /v1/rerank` and `POST /v2/rerank`
+- `POST /v1/images/generations`
+- `POST /v1/images/edits` (multipart)
+- `POST /v1/audio/speech`
+- `POST /v1/audio/transcriptions` (multipart)
 
-The server returns OpenAI-like JSON errors, `x-request-id`, typed Responses SSE events, and Chat Completions chunks. Add `--no-dry-run` when you want the proxy to call real providers.
+The server returns OpenAI-like JSON errors, `x-request-id`, typed Responses SSE events, Chat Completions chunks, and binary speech responses. Add `--no-dry-run` when you want the proxy to call real providers. Request bodies default to a 10 MB ceiling; raise it deliberately with `--max-request-bytes` for larger audio or image uploads, while still respecting the selected provider's own limits.
 
 ## Provider Retries And Fallback
 
@@ -784,7 +954,9 @@ During development, run the fast local checks:
 
 ```bash
 python -m pytest
-python -m ruff check src tests --select E9,F63,F7,F82
+python -m pytest --cov=crupier --cov-fail-under=95
+python -m ruff check src tests
+python -m mypy src/crupier
 python -m pip_audit --skip-editable --progress-spinner off
 crupier release check
 crupier release check --json
@@ -801,7 +973,8 @@ crupier capabilities probe --provider openai --apply
 crupier capabilities probe --provider anthropic --apply
 crupier capabilities probe --provider google --apply
 crupier capabilities probe --provider ollama --apply
-crupier release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama
+crupier capabilities probe --provider inference --apply
+crupier release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference
 crupier --version
 ```
 
@@ -811,7 +984,7 @@ The release check validates:
 - README, PyPI-safe README links, CONTRIBUTING, SECURITY, CHANGELOG, public Markdown link/fence health, GitHub YAML syntax, and community templates
 - repository `.gitignore` coverage for local keys, caches, builds, and generated Crupier artifacts
 - safe `crupier init` defaults, including Ollama Cloud and prompt/response storage opt-in
-- CI, Dependabot, critical Ruff lint, and `pip-audit` wiring
+- CI, Dependabot, full Ruff lint, `mypy`, a 95% coverage floor, and `pip-audit` wiring
 - provider extras, console script, license metadata, and `py.typed`
 - sdist and wheel build
 - built wheel/sdist PyPI metadata for name, version, summary, Python requirement, license, project URLs, classifiers, and extras
@@ -835,13 +1008,13 @@ Final public release order:
 2. Configure PyPI trusted publishing for this repository and the `pypi` GitHub environment.
 3. Change repository visibility to public.
 4. Rerun `crupier release check --strict-public --verify-project-urls --check-pypi-name`.
-5. Rerun `crupier release check --strict-public --verify-providers --provider openai --provider anthropic --provider google --provider ollama`.
+5. Rerun `crupier release check --strict-public --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference`.
 6. Confirm Dependabot security updates are enabled and unpaused.
 7. Protect `main` with required CI, no force pushes, and pull-request review before accepting public changes.
-8. Publish a final GitHub Release from the current `main` tip tagged `v0.3.0` or `0.3.0`; the publish workflow rejects draft/non-final releases, non-main targets, commits that do not match `origin/main`, and tags that do not match the package version.
+8. Publish a final GitHub Release from the current `main` tip tagged `v0.4.0` or `0.4.0`; the publish workflow rejects draft/non-final releases, non-main targets, commits that do not match `origin/main`, and tags that do not match the package version.
 
 Manual workflow dispatch is only for retrying an intentional release operation.
-It must run from `main`, requires the `version` input to equal `0.3.0`, and
+It must run from `main`, requires the `version` input to equal `0.4.0`, and
 requires `confirm_publish=true` before any distribution is built or uploaded.
 The publish workflow verifies that the configured PyPI project is available for
 first uploads or already owned for maintenance releases, then requires the
@@ -853,13 +1026,14 @@ permissions and links the `pypi` environment to the package page.
 
 For development and pull request expectations, see [CONTRIBUTING.md](https://github.com/686f6c61/crupier/blob/main/CONTRIBUTING.md).
 
-## What Is Implemented In 0.3.0
+## What Is Implemented In 0.4.0
 
 Implemented now:
 
 - Python SDK: `Crupier.from_project()`, `from_toml()`, `from_config()`, `deal()`, `adeal()`, basic `stream()`
+- capability-aware operation SDK: `run()`, `embed()`, `rerank()`, `transcribe()`, `synthesize()`, `generate_image()`, and `edit_image()`
 - CLI for init, update, models, registry snapshots, capabilities, profiles, route, deal, smoke, verify, eval, feedback, audit, adoption, trace, server, and release checks
-- Real provider calls for OpenAI, Anthropic Claude, Google Gemini, and Ollama Cloud
+- Real provider calls for OpenAI, Anthropic Claude, Google Gemini, Ollama Cloud, and configurable OpenAI-compatible inference servers
 - OpenRouter as an optional disabled-by-default BYOK OpenAI-compatible adapter
 - deterministic route planning and opt-in model orchestrator with fallback orchestrator support
 - configurable scoring weights plus `scoring suggest` from eval and human-feedback evidence
@@ -868,25 +1042,26 @@ Implemented now:
 - cascade validation/escalation, parallel panel/fusion execution, iterative tool planning, and bounded delegate sub-routes
 - structured-output validation and one repair attempt
 - provider-agnostic local tool execution with approval guardrails and idempotency
-- multimodal/file planning, native image execution for supported adapters, and extracted text/PDF context
-- explicit unsupported errors for OCR, audio/video transcription, spreadsheets, office documents, and native non-image execution paths
+- multimodal/file planning, adapter-aware native image execution, provider-specific native audio, OpenAI native PDF, and extracted text/PDF context
+- explicit unsupported errors for OCR, transcript-first audio/video preprocessing, spreadsheets, office documents, and unimplemented native paths
 - model discovery, capability cards, provider refresh, capability/profile/pricing change reports, probes, readiness checks, and registry snapshots
+- model-powered operation classification with deterministic fallback and shared end-to-end budgets
 - eval runner, compare reports, human review packets, human decision templates, and feedback application
 - adoption audit, doctor, package, handoff, code comments, SARIF, and signoff workflows
 - opt-in metadata traces with redaction and replay only when prompt/input storage is explicitly enabled
-- OpenAI-like Python client, optional autopatch, and local HTTP server
+- OpenAI-like Python client, optional autopatch, and local HTTP server for chat, embeddings, reranking, images, speech, and transcription
 - declarative policy rules and shared `.crupier/profiles/` routing presets
 - provider retries with jitter, circuit breakers, and route-time degraded-provider exclusion
 - typed errors and `py.typed`
 - release gate with build, artifact, install smoke, PyPI name, project URL, provider readiness, CI, security, and dependency checks
 
-Planned after `0.3.0`:
+Planned after `0.4.0`:
 
 - production-calibrated model orchestrator evals
 - larger production eval datasets
 - provider-native structured-output parameter mapping beyond prompt+validate execution
-- provider-native PDF/audio/video/document execution
-- table-aware PDF extraction, OCR, audio/video transcription, and office-document parsing
+- broader provider-native PDF/audio/video/document execution
+- table-aware PDF extraction, OCR, transcript-first video processing, and office-document parsing
 - broader SDK compatibility matrix
 - provider-native tool-calling optimizations
 - provider-native streaming proxy

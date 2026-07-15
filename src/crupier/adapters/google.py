@@ -5,7 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
-from typing import Any
+from typing import Any, NoReturn
 
 from crupier.config import ProviderSettings
 from crupier.errors import (
@@ -17,7 +17,7 @@ from crupier.models import RequestEnvelope
 from crupier.multimodal import native_image_payloads
 
 from .base import AdapterResponse, EmbeddingResponse, ProviderModel
-from .common import build_prompt, object_to_dict, provider_timeout_seconds
+from .common import build_prompt, object_to_dict, provider_timeout_seconds, request_timeout_seconds
 
 
 GOOGLE_DEFAULT_ENV_KEYS = ("GOOGLE_API_KEY", "GEMINI_API_KEY")
@@ -29,6 +29,11 @@ class GoogleAdapter:
     def __init__(self, settings: ProviderSettings):
         self.settings = settings
         self._client: Any = None
+
+    @staticmethod
+    def supports_file_kind(*, model: str, kind: str) -> bool:
+        del model
+        return kind == "image"
 
     def generate(self, *, model: str, prompt: str, request: RequestEnvelope) -> AdapterResponse:
         client = self._client or self._build_client()
@@ -79,11 +84,16 @@ class GoogleAdapter:
             )
         return sorted(models, key=lambda model: model.id)
 
-    def embed(self, *, model: str, input: Any) -> EmbeddingResponse:
+    def embed(self, *, model: str, input: Any, dimensions: int | None = None) -> EmbeddingResponse:
         client = self._client or self._build_client()
         self._client = client
+        payload: dict[str, Any] = {"model": model, "contents": input}
+        if dimensions is not None:
+            if dimensions <= 0:
+                raise CrupierProviderUnavailableError("Embedding dimensions must be positive.", retryable=False)
+            payload["config"] = {"output_dimensionality": dimensions}
         try:
-            response = client.models.embed_content(model=model, contents=input)
+            response = client.models.embed_content(**payload)
         except Exception as exc:  # noqa: BLE001
             self._raise_mapped_error(exc)
 
@@ -190,7 +200,7 @@ class GoogleAdapter:
                 model=model,
                 contents='Reply with exactly: "stream-ok"',
                 config={
-                    "max_output_tokens": int(request.constraints.get("max_output_tokens", 16)),
+                    "max_output_tokens": int(request.constraints.get("max_output_tokens", 256)),
                     "temperature": request.constraints.get("temperature", 0),
                 },
             )
@@ -204,7 +214,7 @@ class GoogleAdapter:
                     break
         except Exception as exc:  # noqa: BLE001
             self._raise_mapped_error(exc)
-        ok = event_count > 0
+        ok = event_count > 0 and text_seen
         return AdapterResponse(
             text="",
             raw=None,
@@ -230,6 +240,9 @@ class GoogleAdapter:
 
     def _generation_config(self, request: RequestEnvelope) -> dict[str, Any]:
         config: dict[str, Any] = {}
+        timeout = request_timeout_seconds(request)
+        if timeout is not None:
+            config["http_options"] = {"timeout": int(timeout * 1000)}
         if "temperature" in request.constraints:
             config["temperature"] = request.constraints["temperature"]
         if "max_output_tokens" in request.constraints:
@@ -258,7 +271,7 @@ class GoogleAdapter:
             kwargs["http_options"] = types.HttpOptions(timeout=int(timeout * 1000))
         return genai.Client(**kwargs)
 
-    def _raise_mapped_error(self, exc: Exception) -> None:
+    def _raise_mapped_error(self, exc: Exception) -> NoReturn:
         name = exc.__class__.__name__.lower()
         status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
         text = str(exc).lower()
@@ -348,7 +361,7 @@ def _tool_probe_config(*, tools: list[Any], max_output_tokens: int, temperature:
             automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
             max_output_tokens=max_output_tokens,
             temperature=temperature,
-            thinking_config=types.ThinkingConfig(thinking_level="minimal"),
+            thinking_config=types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL),
         )
     except ImportError:
         return {
@@ -407,7 +420,8 @@ def _google_embeddings(response: Any) -> list[list[float]]:
         raw = response.get("embedding") if isinstance(response, dict) else getattr(response, "embedding", None)
     if raw is None:
         return []
-    if _looks_like_vector(raw):
+    single_values = raw.get("values") if isinstance(raw, dict) else getattr(raw, "values", None)
+    if _looks_like_vector(raw) or single_values is not None:
         raw = [raw]
     embeddings: list[list[float]] = []
     for item in raw or []:
@@ -473,4 +487,4 @@ def _json_probe_ok(text: str) -> bool:
 
 
 def _looks_like_vector(value: Any) -> bool:
-    return isinstance(value, list) and (not value or isinstance(value[0], int | float))
+    return isinstance(value, list) and bool(value) and all(isinstance(item, int | float) for item in value)

@@ -45,7 +45,8 @@ def write_release_project(root):
         "crupier release check --strict-public\n"
         "crupier release check --strict-public --verify-project-urls --check-pypi-name\n"
         "crupier capabilities probe --provider google --apply\n"
-        "crupier release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama\n"
+        "crupier capabilities probe --provider inference --apply\n"
+        "crupier release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference\n"
         "```\n\n"
         "## Python SDK Quickstart\n\n"
         "```python\n"
@@ -56,6 +57,7 @@ def write_release_project(root):
         "```\n\n"
         "Images can route to native vision-capable models and execute through OpenAI, Anthropic Claude, "
         "Google Gemini, and Ollama adapters when the selected model supports image input.\n\n"
+        "Projects can also use configurable OpenAI-compatible inference servers.\n\n"
         + "Install and use this package.\n" * 40,
         encoding="utf-8",
     )
@@ -70,7 +72,8 @@ def write_release_project(root):
         "crupier release check --strict-public\n"
         "crupier release check --strict-public --verify-project-urls --check-pypi-name\n"
         "GEMINI_API_KEY\n"
-        "crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama\n"
+        "INFERENCE_API_KEY\n"
+        "crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference\n"
         "```\n",
         encoding="utf-8",
     )
@@ -92,6 +95,9 @@ def write_release_project(root):
         ".env.*\n"
         "!.env.example\n"
         ".ruff_cache/\n"
+        ".coverage\n"
+        "coverage.xml\n"
+        "htmlcov/\n"
         ".crupier/registry/models.json\n"
         ".crupier/registry/capability-cards/\n"
         ".crupier/traces/\n"
@@ -100,9 +106,13 @@ def write_release_project(root):
         ".crupier/evals/history/\n"
         ".crupier/evals/results/\n"
         ".crupier/evals/runs/\n"
+        ".crupier/evals/live-routing-validation.json\n"
+        ".crupier/evals/live-operations-validation.json\n"
         ".crupier/feedback/\n"
         ".crupier/handoffs/\n"
         ".crupier/packages/\n"
+        ".crupier/test-assets/\n"
+        ".crupier/audit-dist/\n"
         ".venv/\n"
         "venv/\n"
         "env/\n"
@@ -178,8 +188,9 @@ def write_release_project(root):
         "    steps:\n"
         "      - uses: actions/checkout@v7\n"
         "      - uses: actions/setup-python@v6\n"
-        "      - run: python -m pytest\n"
-        "      - run: python -m ruff check src tests --select E9,F63,F7,F82\n"
+        "      - run: python -m pytest --cov=crupier --cov-fail-under=95\n"
+        "      - run: python -m ruff check src tests\n"
+        "      - run: python -m mypy src/crupier\n"
         "      - run: python -m pip_audit --skip-editable --progress-spinner off\n"
         "      - run: crupier release check\n",
         encoding="utf-8",
@@ -221,7 +232,9 @@ def write_release_project(root):
         "          FIRST_PUBLIC_RELEASE_VERSION: \"0.2.0\"\n"
         "        run: |\n"
         "          crupier release check --strict-public --verify-project-urls --check-pypi-name --allow-existing-pypi-project\n"
-        "      - run: python -m ruff check src tests --select E9,F63,F7,F82\n"
+        "      - run: python -m pytest --cov=crupier --cov-fail-under=95\n"
+        "      - run: python -m ruff check src tests\n"
+        "      - run: python -m mypy src/crupier\n"
         "      - run: python -m pip_audit --skip-editable --progress-spinner off\n"
         "      - run: python -m build --sdist --wheel --outdir dist\n"
         "      - uses: actions/upload-artifact@v7\n"
@@ -263,6 +276,7 @@ anthropic = ["anthropic>=0.40"]
 google = ["google-genai>=1"]
 ollama = []
 openrouter = ["openai>=1"]
+inference-server = ["openai>=1"]
 pdf = ["pypdf>=5"]
 all = ["openai>=1", "anthropic>=0.40", "google-genai>=1", "pypdf>=5"]
 dev = ["pytest>=8", "build>=1", "twine>=5", "pip-audit>=2", "ruff>=0.14", "trove-classifiers>=2026.6.1.19", "PyYAML>=6"]
@@ -463,7 +477,7 @@ def test_release_check_fails_when_readme_provider_gate_omits_google(tmp_path):
     readme = tmp_path / "README.md"
     readme.write_text(
         readme.read_text(encoding="utf-8").replace(
-            "crupier release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama",
+            "crupier release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference",
             "crupier release check --verify-providers --provider openai --provider anthropic --provider ollama",
         ),
         encoding="utf-8",
@@ -475,7 +489,7 @@ def test_release_check_fails_when_readme_provider_gate_omits_google(tmp_path):
     assert report.ok is False
     assert checks["readme"].status == "fail"
     assert (
-        "crupier release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama"
+        "crupier release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference"
         in checks["readme"].evidence["missing_markers"]
     )
 
@@ -583,7 +597,9 @@ def test_release_check_fails_without_strict_publish_workflow(tmp_path):
     assert "is not main" in checks["publish_workflow"].evidence["missing_markers"]
     assert "FIRST_PUBLIC_RELEASE_VERSION" in checks["publish_workflow"].evidence["missing_markers"]
     assert "--allow-existing-pypi-project" in checks["publish_workflow"].evidence["missing_markers"]
-    assert "python -m ruff check src tests --select E9,F63,F7,F82" in checks["publish_workflow"].evidence["missing_markers"]
+    assert "python -m ruff check src tests" in checks["publish_workflow"].evidence["missing_markers"]
+    assert "python -m mypy src/crupier" in checks["publish_workflow"].evidence["missing_markers"]
+    assert "--cov-fail-under=95" in checks["publish_workflow"].evidence["missing_markers"]
     assert "python -m pip_audit --skip-editable --progress-spinner off" in checks["publish_workflow"].evidence["missing_markers"]
 
 
@@ -604,8 +620,9 @@ def test_release_check_warns_when_contributing_provider_gate_omits_google(tmp_pa
     contributing.write_text(
         contributing.read_text(encoding="utf-8")
         .replace("GEMINI_API_KEY\n", "")
+        .replace("INFERENCE_API_KEY\n", "")
         .replace(
-            "crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama",
+            "crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference",
             "crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider ollama",
         ),
         encoding="utf-8",
@@ -617,8 +634,9 @@ def test_release_check_warns_when_contributing_provider_gate_omits_google(tmp_pa
     assert report.ok is True
     assert checks["contributing"].status == "warn"
     assert "GEMINI_API_KEY" in checks["contributing"].evidence["missing_markers"]
+    assert "INFERENCE_API_KEY" in checks["contributing"].evidence["missing_markers"]
     assert (
-        "crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama"
+        "crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference"
         in checks["contributing"].evidence["missing_markers"]
     )
 
@@ -709,7 +727,9 @@ def test_release_check_warns_without_dependabot_or_minimal_ci_permissions(tmp_pa
     assert "contents: read" in checks["ci"].evidence["missing_markers"]
     assert "actions/checkout@v7" in checks["ci"].evidence["missing_markers"]
     assert "actions/setup-python@v6" in checks["ci"].evidence["missing_markers"]
-    assert "python -m ruff check src tests --select E9,F63,F7,F82" in checks["ci"].evidence["missing_markers"]
+    assert "python -m ruff check src tests" in checks["ci"].evidence["missing_markers"]
+    assert "python -m mypy src/crupier" in checks["ci"].evidence["missing_markers"]
+    assert "--cov-fail-under=95" in checks["ci"].evidence["missing_markers"]
     assert "python -m pip_audit --skip-editable --progress-spinner off" in checks["ci"].evidence["missing_markers"]
     assert checks["dependency_updates"].evidence["exists"] is False
 
@@ -1030,11 +1050,12 @@ def test_wheel_install_smoke_runs_install_import_and_cli(tmp_path, monkeypatch):
                 project_dir.mkdir(parents=True)
                 (project_dir / "crupier.toml").write_text(
                     '[providers.ollama]\nhost = "https://ollama.com/api"\n\n'
-                    '[providers.openrouter]\nhost = "https://openrouter.ai/api/v1"\n',
+                    '[providers.openrouter]\nhost = "https://openrouter.ai/api/v1"\n\n'
+                    '[providers.inference]\nmode = "openai_compatible"\nhost = "http://127.0.0.1:8000/v1"\n',
                     encoding="utf-8",
                 )
                 (project_dir / ".env.example").write_text(
-                    "OLLAMA_HOST=https://ollama.com/api\nOPENROUTER_API_KEY=\n", encoding="utf-8"
+                    "OLLAMA_HOST=https://ollama.com/api\nOPENROUTER_API_KEY=\nINFERENCE_API_KEY=\n", encoding="utf-8"
                 )
                 (project_dir / ".gitignore").write_text(".env\n!.env.example\n", encoding="utf-8")
                 return SimpleNamespace(returncode=0, stdout="Created crupier.toml\n", stderr="")
@@ -1095,11 +1116,12 @@ def test_sdist_install_smoke_runs_install_import_and_cli(tmp_path, monkeypatch):
                 project_dir.mkdir(parents=True)
                 (project_dir / "crupier.toml").write_text(
                     '[providers.ollama]\nhost = "https://ollama.com/api"\n\n'
-                    '[providers.openrouter]\nhost = "https://openrouter.ai/api/v1"\n',
+                    '[providers.openrouter]\nhost = "https://openrouter.ai/api/v1"\n\n'
+                    '[providers.inference]\nmode = "openai_compatible"\nhost = "http://127.0.0.1:8000/v1"\n',
                     encoding="utf-8",
                 )
                 (project_dir / ".env.example").write_text(
-                    "OLLAMA_HOST=https://ollama.com/api\nOPENROUTER_API_KEY=\n", encoding="utf-8"
+                    "OLLAMA_HOST=https://ollama.com/api\nOPENROUTER_API_KEY=\nINFERENCE_API_KEY=\n", encoding="utf-8"
                 )
                 (project_dir / ".gitignore").write_text(".env\n!.env.example\n", encoding="utf-8")
                 return SimpleNamespace(returncode=0, stdout="Created crupier.toml\n", stderr="")
@@ -1142,6 +1164,9 @@ def test_default_config_check_enforces_public_onboarding_defaults():
     assert check.evidence["max_provider_retries"] == 1
     assert check.evidence["retry_backoff_seconds"] == 0.2
     assert check.evidence["require_operational_providers"] is True
+    assert check.evidence["orchestrator_mode"] == "model"
+    assert check.evidence["inference_host"] == "http://127.0.0.1:8000/v1"
+    assert check.evidence["max_latency_ms"] == 120000
 
 
 def test_runtime_safety_defaults_check_enforces_server_exposure_defaults():
@@ -1249,6 +1274,8 @@ def test_artifact_content_check_requires_typed_marker_and_blocks_local_artifacts
         archive.add(source, arcname="demo-0.1.0/examples/agentic_pr_review.py")
         archive.add(source, arcname="demo-0.1.0/examples/customer_support_triage.py")
         archive.add(source, arcname="demo-0.1.0/examples/drop_in_agent_boundary.py")
+        archive.add(source, arcname="demo-0.1.0/examples/live_operations_validation.py")
+        archive.add(source, arcname="demo-0.1.0/examples/live_routing_validation.py")
         archive.add(source, arcname="demo-0.1.0/examples/model-compare-eval.json")
         archive.add(source, arcname="demo-0.1.0/examples/multimodal_claim_review.py")
         archive.add(source, arcname="demo-0.1.0/examples/routing-eval.json")
@@ -1286,6 +1313,8 @@ def test_artifact_content_check_requires_typed_marker_and_blocks_local_artifacts
         archive.add(source, arcname="demo-0.1.0/examples/agentic_pr_review.py")
         archive.add(source, arcname="demo-0.1.0/examples/customer_support_triage.py")
         archive.add(source, arcname="demo-0.1.0/examples/drop_in_agent_boundary.py")
+        archive.add(source, arcname="demo-0.1.0/examples/live_operations_validation.py")
+        archive.add(source, arcname="demo-0.1.0/examples/live_routing_validation.py")
         archive.add(source, arcname="demo-0.1.0/examples/model-compare-eval.json")
         archive.add(source, arcname="demo-0.1.0/examples/multimodal_claim_review.py")
         archive.add(source, arcname="demo-0.1.0/examples/routing-eval.json")
@@ -1308,6 +1337,8 @@ def test_artifact_content_check_requires_typed_marker_and_blocks_local_artifacts
         archive.add(source, arcname="demo-0.1.0/examples/agentic_pr_review.py")
         archive.add(source, arcname="demo-0.1.0/examples/customer_support_triage.py")
         archive.add(source, arcname="demo-0.1.0/examples/drop_in_agent_boundary.py")
+        archive.add(source, arcname="demo-0.1.0/examples/live_operations_validation.py")
+        archive.add(source, arcname="demo-0.1.0/examples/live_routing_validation.py")
         archive.add(source, arcname="demo-0.1.0/examples/model-compare-eval.json")
         archive.add(source, arcname="demo-0.1.0/examples/multimodal_claim_review.py")
         archive.add(source, arcname="demo-0.1.0/examples/routing-eval.json")
@@ -1353,7 +1384,7 @@ def test_copy_release_source_uses_clean_build_tree(tmp_path):
     assert not (copied / "src" / "__pycache__").exists()
 
 
-def test_copy_release_source_prefers_git_tracked_files(tmp_path):
+def test_copy_release_source_includes_untracked_public_files_but_not_ignored_files(tmp_path):
     source = tmp_path / "source"
     source.mkdir()
     tracked_files = {
@@ -1377,8 +1408,8 @@ def test_copy_release_source_prefers_git_tracked_files(tmp_path):
 
     for relative in tracked_files:
         assert (copied / relative).exists()
-    assert not (copied / "LOCAL_NOTES.md").exists()
-    assert not (copied / "src" / "untracked.py").exists()
+    assert (copied / "LOCAL_NOTES.md").exists()
+    assert (copied / "src" / "untracked.py").exists()
     assert not (copied / ".env").exists()
     assert not (copied / ".git").exists()
 

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import time
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from crupier.client import Crupier
 from crupier.config import CrupierConfig
-from crupier.errors import CrupierModelUnsupportedError
-from crupier.models import CrupierResult
+from crupier.errors import CrupierProviderUnavailableError
+from crupier.models import CrupierResult, OperationResult
 
 
 class CompatObject(dict):
@@ -18,13 +19,39 @@ class CompatObject(dict):
 
     def __init__(self, **items: Any):
         super().__init__(items)
-        self.__dict__ = self
 
     def to_dict(self) -> dict[str, Any]:
         return _plain(self)
 
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError as exc:
+            raise AttributeError(name) from exc
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self[name] = value
+
     def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         return self.to_dict()
+
+
+class CompatBinaryResponse:
+    """Small OpenAI-like binary response used for speech output."""
+
+    def __init__(self, content: bytes, *, crupier: CompatObject):
+        self.content = content
+        self.crupier = crupier
+
+    def read(self) -> bytes:
+        return self.content
+
+    def iter_bytes(self, *, chunk_size: int = 65_536) -> Iterator[bytes]:
+        for start in range(0, len(self.content), max(1, chunk_size)):
+            yield self.content[start : start + max(1, chunk_size)]
+
+    def stream_to_file(self, path: str | Path) -> None:
+        Path(path).write_bytes(self.content)
 
 
 class OpenAI:
@@ -55,6 +82,9 @@ class OpenAI:
         self.responses = _Responses(self)
         self.chat = _Chat(self)
         self.embeddings = _Embeddings(self)
+        self.images = _Images(self)
+        self.audio = _Audio(self)
+        self.rerank = _Rerank(self)
 
     def _deal(
         self,
@@ -93,6 +123,29 @@ class OpenAI:
             dry_run=dry_run,
             trace=trace,
         )
+
+    def _operation_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        values = dict(kwargs)
+        constraints = dict(values.pop("constraints", {}) or {})
+        for key in ("max_calls", "max_cost_usd", "max_latency_ms", "timeout_seconds"):
+            if values.get(key) is not None:
+                constraints[key] = values.pop(key)
+        for ignored in (
+            "background",
+            "moderation",
+            "output_compression",
+            "output_format",
+            "quality",
+            "style",
+            "user",
+        ):
+            values.pop(ignored, None)
+        dry_run = values.pop("dry_run", self._dry_run)
+        if dry_run is not None:
+            values["dry_run"] = bool(dry_run)
+        if constraints:
+            values["constraints"] = constraints
+        return values
 
 
 class _Responses:
@@ -190,21 +243,26 @@ class _Embeddings:
         user: str | None = None,
         **kwargs: Any,
     ) -> CompatObject:
-        del encoding_format, user, kwargs
-        model_ref = _model_ref_for_openai(model)
-        provider, model_id = model_ref.split(":", 1)
-        adapter = self._owner._crupier.adapters.get(provider)
-        if adapter is None or not hasattr(adapter, "embed"):
-            raise CrupierModelUnsupportedError(f"Embeddings are not supported for provider {provider!r}.")
-        card = self._owner._crupier.registry.load().get(model_ref)
-        if card is not None and not card.supports_embeddings:
-            raise CrupierModelUnsupportedError(f"Model {model_ref!r} is not marked as an embedding model.")
-        if card is None and not _looks_like_embedding_model(model_id):
-            raise CrupierModelUnsupportedError(f"Model {model_ref!r} does not look like an embedding model.")
-        response = adapter.embed(model=model_id, input=input)
-        embeddings = response.embeddings
-        if dimensions is not None:
-            embeddings = [embedding[: int(dimensions)] for embedding in embeddings]
+        del encoding_format, user
+        requested_dimensions = None if dimensions is None else int(dimensions)
+        result = self._owner._crupier.embed(
+            input=input,
+            model=model,
+            dimensions=requested_dimensions,
+            **self._owner._operation_kwargs(kwargs),
+        )
+        embeddings = result.data
+        if not isinstance(embeddings, list):
+            raise CrupierProviderUnavailableError("Embedding provider returned an invalid vector list.", retryable=False)
+        if not embeddings:
+            raise CrupierProviderUnavailableError("Embedding provider returned no vectors.", retryable=False)
+        if requested_dimensions is not None and any(
+            not isinstance(embedding, list) or len(embedding) != requested_dimensions for embedding in embeddings
+        ):
+            raise CrupierProviderUnavailableError(
+                f"Embedding provider did not honor dimensions={requested_dimensions}.",
+                retryable=False,
+            )
         data = [
             CompatObject(object="embedding", index=index, embedding=embedding)
             for index, embedding in enumerate(embeddings)
@@ -212,12 +270,145 @@ class _Embeddings:
         return CompatObject(
             object="list",
             data=data,
-            model=model_ref,
-            usage=_embedding_usage_object(response.usage),
-            crupier=CompatObject(
-                provider_metadata=response.metadata,
-                warnings=[],
-            ),
+            model=result.model,
+            usage=_embedding_usage_object(result.usage),
+            crupier=_operation_metadata(result),
+        )
+
+
+class _Images:
+    def __init__(self, owner: OpenAI):
+        self._owner = owner
+
+    def generate(
+        self,
+        *,
+        prompt: str,
+        model: str | None = None,
+        n: int = 1,
+        size: str = "1024x1024",
+        response_format: str = "url",
+        **kwargs: Any,
+    ) -> CompatObject:
+        result = self._owner._crupier.generate_image(
+            prompt=prompt,
+            model=model,
+            n=n,
+            size=size,
+            response_format=response_format,
+            **self._owner._operation_kwargs(kwargs),
+        )
+        return _image_object(result)
+
+    def edit(
+        self,
+        *,
+        image: Any,
+        prompt: str,
+        model: str | None = None,
+        n: int = 1,
+        size: str = "1024x1024",
+        response_format: str = "url",
+        **kwargs: Any,
+    ) -> CompatObject:
+        result = self._owner._crupier.edit_image(
+            prompt=prompt,
+            images=image,
+            model=model,
+            n=n,
+            size=size,
+            response_format=response_format,
+            **self._owner._operation_kwargs(kwargs),
+        )
+        return _image_object(result)
+
+
+class _Audio:
+    def __init__(self, owner: OpenAI):
+        self.speech = _Speech(owner)
+        self.transcriptions = _Transcriptions(owner)
+
+
+class _Speech:
+    def __init__(self, owner: OpenAI):
+        self._owner = owner
+
+    def create(
+        self,
+        *,
+        input: str,
+        voice: str,
+        model: str | None = None,
+        response_format: str = "mp3",
+        speed: float = 1.0,
+        **kwargs: Any,
+    ) -> CompatBinaryResponse:
+        result = self._owner._crupier.synthesize(
+            input=input,
+            voice=voice,
+            model=model,
+            response_format=response_format,
+            speed=speed,
+            **self._owner._operation_kwargs(kwargs),
+        )
+        if not isinstance(result.data, bytes):
+            raise CrupierProviderUnavailableError("Speech provider returned a non-binary response.", retryable=False)
+        return CompatBinaryResponse(result.data, crupier=_operation_metadata(result))
+
+
+class _Transcriptions:
+    def __init__(self, owner: OpenAI):
+        self._owner = owner
+
+    def create(
+        self,
+        *,
+        file: Any,
+        model: str | None = None,
+        language: str | None = None,
+        response_format: str = "json",
+        timestamp_granularities: list[str] | None = None,
+        **kwargs: Any,
+    ) -> CompatObject:
+        result = self._owner._crupier.transcribe(
+            file=file,
+            model=model,
+            language=language,
+            response_format=response_format,
+            timestamp_granularities=timestamp_granularities,
+            **self._owner._operation_kwargs(kwargs),
+        )
+        data = dict(result.data) if isinstance(result.data, dict) else {"text": str(result.data or "")}
+        data.update({"model": result.model, "crupier": _operation_metadata(result)})
+        return CompatObject(**data)
+
+
+class _Rerank:
+    def __init__(self, owner: OpenAI):
+        self._owner = owner
+
+    def create(
+        self,
+        *,
+        query: str,
+        documents: list[str],
+        model: str | None = None,
+        top_n: int | None = None,
+        **kwargs: Any,
+    ) -> CompatObject:
+        result = self._owner._crupier.rerank(
+            query=query,
+            documents=documents,
+            model=model,
+            top_n=top_n,
+            **self._owner._operation_kwargs(kwargs),
+        )
+        return CompatObject(
+            id=f"rerank_{uuid4().hex[:16]}",
+            model=result.model,
+            results=[CompatObject(**item) for item in result.data or []],
+            usage=CompatObject(**result.usage),
+            crupier=_operation_metadata(result),
         )
 
 
@@ -475,6 +666,26 @@ def _crupier_metadata(result: CrupierResult) -> CompatObject:
         trace=trace,
         warnings=list(result.warnings),
         provider_metadata=dict(result.provider_metadata),
+    )
+
+
+def _operation_metadata(result: OperationResult) -> CompatObject:
+    return CompatObject(
+        operation=result.operation,
+        route=result.route.to_dict() if result.route else None,
+        trace=result.trace.to_dict(summary=True) if result.trace else None,
+        warnings=list(result.warnings),
+        provider_metadata=dict(result.provider_metadata),
+    )
+
+
+def _image_object(result: OperationResult) -> CompatObject:
+    data = [CompatObject(**item) for item in result.data or [] if isinstance(item, dict)]
+    return CompatObject(
+        created=int(time.time()),
+        model=result.model,
+        data=data,
+        crupier=_operation_metadata(result),
     )
 
 

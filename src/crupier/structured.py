@@ -81,9 +81,9 @@ def _extract_json(text: str) -> Any:
     stripped = text.strip()
     if stripped.startswith("```"):
         lines = stripped.splitlines()
-        if lines and lines[0].startswith("```"):
+        if lines and lines[0].strip().startswith("```"):
             lines = lines[1:]
-        if lines and lines[-1].startswith("```"):
+        if lines and lines[-1].strip().startswith("```"):
             lines = lines[:-1]
         stripped = "\n".join(lines).strip()
     try:
@@ -107,9 +107,7 @@ def _validate_json_schema(value: Any, schema: dict[str, Any], *, path: str) -> N
     if expected_type:
         _validate_type(value, expected_type, path=path)
 
-    if expected_type == "object" or "properties" in schema:
-        if not isinstance(value, dict):
-            raise CrupierStructuredOutputError(f"{path} must be an object.")
+    if isinstance(value, dict) and (expected_type == "object" or "properties" in schema):
         for key in schema.get("required", []):
             if key not in value:
                 raise CrupierStructuredOutputError(f"{path}.{key} is required.")
@@ -122,9 +120,7 @@ def _validate_json_schema(value: Any, schema: dict[str, Any], *, path: str) -> N
             if extras:
                 raise CrupierStructuredOutputError(f"{path} contains unexpected keys: {', '.join(sorted(extras))}.")
 
-    if expected_type == "array" or "items" in schema:
-        if not isinstance(value, list):
-            raise CrupierStructuredOutputError(f"{path} must be an array.")
+    if isinstance(value, list) and (expected_type == "array" or "items" in schema):
         item_schema = schema.get("items")
         if isinstance(item_schema, dict):
             for index, item in enumerate(value):
