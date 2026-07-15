@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="Crupier es el SDK Python BYOK que selecciona, combina y ejecuta modelos de OpenAI, Anthropic, Google y Ollama según calidad, coste, latencia y capacidades.">
+    <meta name="author" content="686f6c61">
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
+    <meta name="theme-color" content="#f2f1eb">
+
+    <meta property="og:type" content="website">
+    <meta property="og:locale" content="es_ES">
+    <meta property="og:site_name" content="Crupier">
+    <meta property="og:url" content="https://crupier.686f6c61.dev/">
+    <meta property="og:title" content="Crupier · Una petición. La ruta correcta.">
+    <meta property="og:description" content="Orquestación multi-modelo para Python: selección por capacidades, coste y latencia; ejecución con fallback, tools y trazas auditables.">
+    <meta property="og:image" content="https://crupier.686f6c61.dev/og-crupier.png">
+    <meta property="og:image:secure_url" content="https://crupier.686f6c61.dev/og-crupier.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Crupier conecta una petición con una ruta multi-modelo validada.">
+
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:creator" content="@686f6c61">
+    <meta name="twitter:title" content="Crupier · Una petición. La ruta correcta.">
+    <meta name="twitter:description" content="SDK Python BYOK para seleccionar, combinar y ejecutar el modelo adecuado en cada tarea.">
+    <meta name="twitter:image" content="https://crupier.686f6c61.dev/og-crupier.png">
+    <meta name="twitter:image:alt" content="Crupier conecta una petición con una ruta multi-modelo validada.">
+
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="canonical" href="https://crupier.686f6c61.dev/">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <title>Crupier · Orquestación multi-modelo para Python</title>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareSourceCode",
+        "name": "Crupier",
+        "description": "SDK Python BYOK para seleccionar, combinar y ejecutar modelos de IA según capacidades, calidad, coste y latencia.",
+        "url": "https://crupier.686f6c61.dev/",
+        "image": "https://crupier.686f6c61.dev/og-crupier.png",
+        "codeRepository": "https://github.com/686f6c61/crupier",
+        "downloadUrl": "https://pypi.org/project/crupier/",
+        "programmingLanguage": "Python",
+        "runtimePlatform": "Python 3.11+",
+        "version": "0.4.0",
+        "license": "https://opensource.org/licenses/MIT",
+        "author": {
+          "@type": "Person",
+          "name": "686f6c61",
+          "url": "https://github.com/686f6c61"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Saltar al contenido</a>
+
+    <header class="site-header">
+      <a class="brand" href="#top">
+        <span>Crupier</span><mark>0.4</mark>
+      </a>
+      <nav class="site-nav" aria-label="Navegación principal">
+        <a href="#runtime">Runtime</a>
+        <a href="#patterns">Patrones</a>
+        <a href="#api">API</a>
+        <a href="#evidence">Evidencia</a>
+      </nav>
+      <a class="header-link" href="https://github.com/686f6c61/crupier">GitHub</a>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top" aria-labelledby="hero-title">
+        <div class="hero-copy page-shell">
+          <p class="eyebrow">BYOK · Python · multi-provider</p>
+          <h1 id="hero-title">Una petición.<br><mark>La ruta correcta.</mark></h1>
+          <p class="hero-lede">
+            Crupier clasifica la tarea, filtra por capacidades y política, y deja que un LLM proponga el patrón de ejecución y los modelos. Después valida el plan, ejecuta cada rol y conserva una traza auditable.
+          </p>
+          <div class="install-line" role="group" aria-label="Comando de instalación">
+            <code>pip install crupier</code>
+            <button class="copy-command" type="button" data-copy="pip install crupier">Copiar</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="route-lab" aria-labelledby="route-lab-title">
+        <div class="route-lab-head page-shell">
+          <div>
+            <p class="eyebrow">Traza real · 2026-07-15</p>
+            <h2 id="route-lab-title">El reparto cambia con la tarea</h2>
+          </div>
+          <div class="route-tabs" role="tablist" aria-label="Seleccionar tipo de ruta">
+            <button id="route-research-tab" type="button" role="tab" aria-controls="route-panel" aria-selected="true" tabindex="0" data-route="research">Research</button>
+            <button id="route-structured-tab" type="button" role="tab" aria-controls="route-panel" aria-selected="false" tabindex="-1" data-route="structured">Structured</button>
+            <button id="route-agentic-tab" type="button" role="tab" aria-controls="route-panel" aria-selected="false" tabindex="-1" data-route="agentic">Agentic</button>
+            <button id="route-tools-tab" type="button" role="tab" aria-controls="route-panel" aria-selected="false" tabindex="-1" data-route="tools">Tools</button>
+            <button id="route-pdf-tab" type="button" role="tab" aria-controls="route-panel" aria-selected="false" tabindex="-1" data-route="pdf">PDF</button>
+            <button id="route-coding-tab" type="button" role="tab" aria-controls="route-panel" aria-selected="false" tabindex="-1" data-route="coding">Code</button>
+            <button id="route-vision-tab" type="button" role="tab" aria-controls="route-panel" aria-selected="false" tabindex="-1" data-route="vision">Vision</button>
+            <button id="route-open-set-tab" type="button" role="tab" aria-controls="route-panel" aria-selected="false" tabindex="-1" data-route="openSet">Open set</button>
+          </div>
+        </div>
+
+        <div id="route-panel" role="tabpanel" aria-labelledby="route-research-tab" tabindex="0">
+          <div class="model-pool page-shell" role="group" aria-label="Modelos candidatos para la ruta seleccionada">
+            <span>Model set</span>
+            <ul id="model-pool" aria-live="off"></ul>
+          </div>
+          <div class="graph-scroll" aria-label="Diagrama de la ruta seleccionada">
+            <div class="graph-stage" id="graph-stage">
+              <canvas id="route-canvas" aria-hidden="true"></canvas>
+              <ul id="route-nodes" class="route-nodes" aria-live="off"></ul>
+            </div>
+          </div>
+
+          <dl class="route-metrics page-shell" id="route-metrics"></dl>
+        </div>
+      </section>
+
+      <section class="runtime-band" id="runtime" aria-labelledby="runtime-title">
+        <div class="page-shell section-heading inverted">
+          <p class="eyebrow">Request lifecycle</p>
+          <h2 id="runtime-title">El LLM propone. La política decide si puede.</h2>
+          <p>Cada fase deja evidencia. Ningún modelo se salta la allowlist, las capacidades requeridas o el presupuesto del proyecto.</p>
+        </div>
+        <ol class="runtime-flow page-shell">
+          <li><span>01</span><strong>Clasificar</strong><small>task signals + operación</small></li>
+          <li><span>02</span><strong>Filtrar</strong><small>policy + capabilities</small></li>
+          <li><span>03</span><strong>Puntuar</strong><small>calidad + coste + latencia</small></li>
+          <li><span>04</span><strong>Orquestar</strong><small>LLM + candidate cards</small></li>
+          <li><span>05</span><strong>Validar</strong><small>schema + route shape</small></li>
+          <li><span>06</span><strong>Ejecutar</strong><small>roles + tools + fallback</small></li>
+          <li><span>07</span><strong>Trazar</strong><small>calls + budget + errors</small></li>
+        </ol>
+      </section>
+
+      <section class="evidence-section page-shell" id="evidence" aria-labelledby="selection-title">
+        <div class="section-heading">
+          <p class="eyebrow">Selection evidence</p>
+          <h2 id="selection-title">No elige por nombre.<br>Elige con contexto.</h2>
+          <p>El orquestador recibe un corpus compacto de candidatos ya permitido por el proyecto. El scoring determinista actúa como prior; no como una orden ciega.</p>
+        </div>
+
+        <div class="evidence-map" role="img" aria-label="Fuentes de evidencia que alimentan el plan de routing">
+          <div class="evidence-source source-task">
+            <span>01 / Request</span>
+            <strong>Señales ponderadas</strong>
+            <p>research, tools, structured, multimodal, coste y riesgo.</p>
+          </div>
+          <div class="evidence-source source-card">
+            <span>02 / Model cards</span>
+            <strong>Capacidades documentadas</strong>
+            <p>strengths, avoid cases, modalidades, contexto y pricing.</p>
+          </div>
+          <div class="evidence-core">
+            <span>Validated RoutePlan</span>
+            <strong>pattern + roles + models</strong>
+            <code>policy(route) == pass</code>
+          </div>
+          <div class="evidence-source source-live">
+            <span>03 / Live account</span>
+            <strong>Discovery y probes</strong>
+            <p>modelos visibles, readiness y capacidad verificada.</p>
+          </div>
+          <div class="evidence-source source-local">
+            <span>04 / Project</span>
+            <strong>Evals y feedback</strong>
+            <p>calidad local, límites, allowlist y decisiones humanas.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="strategies-section" id="patterns" aria-labelledby="patterns-title">
+        <div class="page-shell section-heading">
+          <p class="eyebrow">Executable patterns</p>
+          <h2 id="patterns-title">Patrones de ejecución completos</h2>
+          <p>El patrón no es metadata decorativa. Define qué roles se ejecutan, cómo comparten presupuesto y qué condición permite continuar.</p>
+        </div>
+
+        <div class="strategy-grid page-shell">
+          <article class="strategy-card accent-lime">
+            <div class="mini-route"><i></i><b></b><i></i></div>
+            <p class="eyebrow">01 / Direct</p>
+            <h3>Single + fallback</h3>
+            <p>Una llamada cuando basta. Retry por llamada y fallback de modelo o proveedor cuando falla.</p>
+          </article>
+          <article class="strategy-card accent-cyan">
+            <div class="mini-route cascade"><i></i><b></b><i></i><em></em></div>
+            <p class="eyebrow">02 / Conditional</p>
+            <h3>Cascade</h3>
+            <p>Primario, validación de suficiencia o schema y escalación solo si el resultado no cumple.</p>
+          </article>
+          <article class="strategy-card accent-coral">
+            <div class="mini-route fusion"><i></i><b></b><b></b><b></b><i></i></div>
+            <p class="eyebrow">03 / Consensus</p>
+            <h3>Panel + fusion</h3>
+            <p>Análisis independientes, quorum, juez separado y redactor final. Los fallos parciales quedan en la traza.</p>
+          </article>
+          <article class="strategy-card accent-yellow">
+            <div class="mini-route critique"><i></i><b></b><i></i><b></b></div>
+            <p class="eyebrow">04 / Review</p>
+            <h3>Critique + repair</h3>
+            <p>Un modelo redacta, otro desafía el resultado y un tercero repara sin exponer el material interno.</p>
+          </article>
+          <article class="strategy-card accent-blue">
+            <div class="mini-route tools"><i></i><b></b><em></em><b></b></div>
+            <p class="eyebrow">05 / Actions</p>
+            <h3>Iterative tools</h3>
+            <p>Plan, tools locales aprobadas, ledger autoritativo, nuevas rondas acotadas y respuesta verificada.</p>
+          </article>
+          <article class="strategy-card accent-ink">
+            <div class="mini-route delegate"><i></i><b></b><span></span><i></i></div>
+            <p class="eyebrow">06 / Recursive</p>
+            <h3>Delegate</h3>
+            <p>Subtarea acotada, presupuesto heredado, profundidad limitada y traza anidada en la ruta principal.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="api-section" id="api" aria-labelledby="api-title">
+        <div class="page-shell api-layout">
+          <div class="section-heading">
+            <p class="eyebrow">Integration surface</p>
+            <h2 id="api-title">Una frontera.<br>Cuatro entradas.</h2>
+            <p>SDK nativo para cualquier aplicación. Compatibilidad OpenAI para migraciones controladas. CLI y servidor HTTP para operar y auditar.</p>
+            <ul class="api-contracts">
+              <li><span class="contract-label">Native</span><span class="contract-copy"><code>deal</code>, <code>run</code>, embeddings, audio e imagen.</span></li>
+              <li><span class="contract-label">Drop-in</span><span class="contract-copy">Cliente Python compatible con OpenAI.</span></li>
+              <li><span class="contract-label">HTTP</span><span class="contract-copy">Responses, Chat, embeddings, rerank, audio e imágenes.</span></li>
+              <li><span class="contract-label">CLI</span><span class="contract-copy">Discovery, probes, evals, feedback y release gates.</span></li>
+            </ul>
+          </div>
+
+          <div class="code-workbench">
+            <div class="code-tabs" role="tablist" aria-label="Ejemplos de integración">
+              <button id="code-sdk-tab" type="button" role="tab" aria-controls="code-panel" aria-selected="true" tabindex="0" data-code="sdk">SDK</button>
+              <button id="code-compat-tab" type="button" role="tab" aria-controls="code-panel" aria-selected="false" tabindex="-1" data-code="compat">Compat</button>
+              <button id="code-server-tab" type="button" role="tab" aria-controls="code-panel" aria-selected="false" tabindex="-1" data-code="server">HTTP</button>
+              <button id="code-cli-tab" type="button" role="tab" aria-controls="code-panel" aria-selected="false" tabindex="-1" data-code="cli">CLI</button>
+            </div>
+            <div id="code-panel" role="tabpanel" aria-labelledby="code-sdk-tab" tabindex="0">
+              <div class="code-toolbar">
+                <span id="code-filename">app.py</span>
+                <button class="copy-command" id="copy-code" type="button">Copiar</button>
+              </div>
+              <pre><code id="code-sample"></code></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="boundaries-section page-shell" aria-labelledby="boundaries-title">
+        <div class="section-heading">
+          <p class="eyebrow">Current boundary</p>
+          <h2 id="boundaries-title">Qué ejecuta hoy.<br>Qué todavía no.</h2>
+        </div>
+        <table class="boundary-table">
+          <caption class="visually-hidden">Estado de capacidades</caption>
+          <thead>
+            <tr class="boundary-row boundary-head">
+              <th scope="col">Superficie</th><th scope="col">Estado</th><th scope="col">Contrato actual</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr class="boundary-row">
+              <th scope="row">Routing multi-modelo</th><td><span class="state live">Ejecutable</span></td><td>Patrones validados, presupuesto compartido, retry, circuit breaker, fallback y quorum.</td>
+            </tr>
+            <tr class="boundary-row">
+              <th scope="row">Inputs nativos</th><td><span class="state live">Parcial real</span></td><td>Imagen en OpenAI, Claude, Gemini y Ollama; PDF nativo en OpenAI; audio mediante operaciones dedicadas.</td>
+            </tr>
+            <tr class="boundary-row">
+              <th scope="row">Streaming</th><td><span class="state bounded">Acotado</span></td><td>Eventos de ciclo de ruta y contratos SSE reconstruidos tras completar la llamada; no proxy nativo de tokens.</td>
+            </tr>
+            <tr class="boundary-row">
+              <th scope="row">Document pipelines</th><td><span class="state planned">En construcción</span></td><td>OCR, tablas, Office y vídeo transcript-first fallan explícitamente hasta tener implementación completa.</td>
+            </tr>
+            <tr class="boundary-row">
+              <th scope="row">Provider-native tools</th><td><span class="state planned">Optimización</span></td><td>Hoy usa planificación JSON y tools locales aprobadas; tool calling nativo queda como optimización futura.</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="final-cta" aria-labelledby="cta-title">
+        <div class="page-shell">
+          <p class="eyebrow">Crupier 0.4.0</p>
+          <h2 id="cta-title">Tu aplicación pide.<br><mark>Crupier reparte.</mark></h2>
+          <div class="cta-actions">
+            <a class="primary-action" href="https://github.com/686f6c61/crupier">Ver el código</a>
+            <a class="secondary-action" href="https://pypi.org/project/crupier/">Abrir en PyPI</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="page-shell">
+        <strong>Crupier</strong>
+        <div class="footer-meta">
+          <p>Python orchestration SDK · MIT</p>
+          <p>Creado por <a href="https://github.com/686f6c61">686f6c61</a> · <a href="https://x.com/686f6c61">Twitter</a></p>
+        </div>
+        <nav aria-label="Enlaces del pie">
+          <a href="https://github.com/686f6c61/crupier">GitHub</a>
+          <a href="https://pypi.org/project/crupier/">PyPI</a>
+          <a href="https://github.com/686f6c61/crupier/blob/main/README.md">README</a>
+          <a href="https://github.com/686f6c61/crupier/blob/main/CHANGELOG.md">Changelog</a>
+        </nav>
+      </div>
+    </footer>
+
+    <div class="copy-toast" id="copy-toast" role="status" aria-live="polite"></div>
+    <script src="app.js" defer></script>
+  </body>
+</html>

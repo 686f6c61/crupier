@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=1200, initial-scale=1">
+    <meta name="robots" content="noindex, nofollow">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+    <title>Crupier social card</title>
+    <style>
+      * { box-sizing: border-box; }
+
+      html,
+      body {
+        width: 1200px;
+        height: 630px;
+        margin: 0;
+        overflow: hidden;
+      }
+
+      body {
+        position: relative;
+        color: #141414;
+        background: #f2f1eb;
+        font-family: "Space Grotesk", Arial, sans-serif;
+      }
+
+      body::before {
+        position: absolute;
+        inset: 0;
+        background-image:
+          linear-gradient(#d7d5cc 1px, transparent 1px),
+          linear-gradient(90deg, #d7d5cc 1px, transparent 1px);
+        background-size: 40px 40px;
+        content: "";
+        opacity: 0.56;
+      }
+
+      .card {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        width: 100%;
+        height: 100%;
+        border: 14px solid #141414;
+      }
+
+      header,
+      footer {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding-inline: 40px;
+        background: #f2f1eb;
+      }
+
+      header {
+        min-height: 78px;
+        border-bottom: 2px solid #141414;
+      }
+
+      .brand {
+        font-size: 27px;
+        font-weight: 700;
+      }
+
+      .version {
+        display: inline-block;
+        margin-left: 7px;
+        padding: 3px 6px;
+        background: #b7f500;
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 13px;
+        vertical-align: 4px;
+      }
+
+      .kicker,
+      footer {
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 14px;
+        text-transform: uppercase;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: 1.08fr 0.92fr;
+        align-items: center;
+        gap: 38px;
+        padding: 38px 40px 34px;
+        background: rgba(242, 241, 235, 0.86);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 76px;
+        line-height: 0.97;
+        letter-spacing: 0;
+      }
+
+      h1 mark {
+        display: inline;
+        padding: 0 8px 5px;
+        color: inherit;
+        background: #b7f500;
+      }
+
+      .lede {
+        max-width: 590px;
+        margin: 27px 0 0;
+        color: #55554f;
+        font-size: 21px;
+        line-height: 1.42;
+      }
+
+      .route {
+        position: relative;
+        height: 330px;
+      }
+
+      .route::before,
+      .route::after,
+      .branch::before,
+      .branch::after {
+        position: absolute;
+        height: 2px;
+        background: #141414;
+        content: "";
+        transform-origin: left center;
+      }
+
+      .route::before { top: 164px; left: 24px; width: 104px; }
+      .route::after { top: 164px; left: 341px; width: 102px; }
+      .branch::before { top: 163px; left: 121px; width: 112px; transform: rotate(-34deg); }
+      .branch::after { top: 163px; left: 121px; width: 112px; transform: rotate(34deg); }
+
+      .node {
+        position: absolute;
+        width: 150px;
+        min-height: 76px;
+        padding: 11px 12px;
+        border: 2px solid #141414;
+        background: #fff;
+        box-shadow: 5px 5px 0 #141414;
+      }
+
+      .node small,
+      .node span {
+        display: block;
+        font-family: "IBM Plex Mono", monospace;
+      }
+
+      .node small {
+        margin-bottom: 7px;
+        font-size: 10px;
+        text-transform: uppercase;
+      }
+
+      .node strong {
+        display: block;
+        overflow-wrap: anywhere;
+        font-size: 15px;
+        line-height: 1.15;
+      }
+
+      .node span {
+        margin-top: 7px;
+        font-size: 9px;
+      }
+
+      .request { top: 126px; left: 0; width: 138px; background: #f2f1eb; }
+      .router { top: 126px; left: 146px; background: #b7f500; }
+      .qwen { top: 24px; left: 262px; background: #8fdddd; }
+      .deepseek { top: 222px; left: 262px; background: #ff8a78; }
+      .final { top: 126px; right: 0; color: #f2f1eb; background: #141414; box-shadow: none; }
+
+      footer {
+        min-height: 70px;
+        border-top: 2px solid #141414;
+      }
+
+      footer code {
+        padding: 10px 14px;
+        color: #f2f1eb;
+        background: #141414;
+        font-family: "IBM Plex Mono", monospace;
+        font-size: 17px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <header>
+        <div class="brand">Crupier<span class="version">0.4</span></div>
+        <div class="kicker">BYOK · Python · multi-provider</div>
+      </header>
+      <main>
+        <div>
+          <h1>Una petición.<br><mark>La ruta correcta.</mark></h1>
+          <p class="lede">Selección, orquestación y ejecución multi-modelo para aplicaciones y agentes Python.</p>
+        </div>
+        <div class="route" aria-hidden="true">
+          <div class="branch"></div>
+          <div class="node request"><small>Request</small><strong>Production task</strong><span>quality · cost · latency</span></div>
+          <div class="node router"><small>Crupier</small><strong>validated route</strong><span>policy + capabilities</span></div>
+          <div class="node qwen"><small>Reasoning</small><strong>qwen3.5</strong><span>selected</span></div>
+          <div class="node deepseek"><small>Critic</small><strong>deepseek-v4-pro</strong><span>selected</span></div>
+          <div class="node final"><small>Result</small><strong>auditable output</strong><span>trace preserved</span></div>
+        </div>
+      </main>
+      <footer>
+        <code>pip install crupier</code>
+        <span>route · execute · trace</span>
+      </footer>
+    </div>
+  </body>
+</html>
