@@ -10,8 +10,8 @@ Use Python 3.11 or newer:
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
+python -m pip install --upgrade pip "setuptools>=83" wheel
+python -m pip install -e ".[all,dev]"
 python -m pytest
 ```
 

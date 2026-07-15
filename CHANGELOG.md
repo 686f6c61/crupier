@@ -18,6 +18,7 @@ All notable changes to Crupier will be documented here.
 - Made capability probes model-kind aware and strengthened structured, streaming, tool, embedding, reranking, transcription, speech, and image probe evidence from live configurable-server and Ollama Cloud checks.
 - Expanded model-orchestrator context with bounded request content, natural capability summaries, context/output limits, reasoning hints, edge cases, and pricing evidence; prompt-summary-only mode is now opt-in.
 - Added full `mypy` cleanliness for the typed package, full Ruff CI, a 95% coverage gate, package build checks, and dependency vulnerability auditing.
+- Hardened CI and publishing environments with patched build tooling and complete optional provider dependencies so dependency audits and public type checks run consistently across supported Python versions.
 
 - Tightened `orchestrator.route_plan.v3` with exact per-strategy role contracts, resilient provider-diverse fusion planning, Crupier-owned cost/latency estimates, validated-plan authorship in traces, and auditable primary/fallback orchestrator outcomes.
 - Added a public live end-to-end routing harness covering autonomous single, cascade, fusion, critique-repair, tool-ledger review, delegate, native image, and native PDF routes without forcing executor models.
