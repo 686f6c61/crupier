@@ -10,10 +10,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .adapters.google import google_env_label, google_env_present
 from .client import Crupier
-from .config import CrupierConfig, write_default_project, write_models_allow, write_orchestrator_settings
-from .evals import CompareVariant
+from .config import (
+    CrupierConfig,
+    write_default_project,
+    write_models_allow,
+    write_orchestrator_settings,
+)
 from .errors import CrupierConfigError, CrupierError
+from .evals import CompareVariant
 from .feedback import (
     build_human_review_packet,
     import_human_decisions,
@@ -23,8 +29,6 @@ from .feedback import (
 from .learning import suggest_scoring_from_project
 from .models import ModelRef
 from .probes import AVAILABLE_PROBES, OPERATION_PROBES
-from .adapters.google import google_env_label, google_env_present
-from .release import ReleaseCheck, check_project_urls_reachable, check_pypi_project_name, run_release_checks
 from .project_audit import (
     acknowledge_code_comments,
     build_adoption_handoff,
@@ -38,15 +42,21 @@ from .project_audit import (
     record_adoption_signoff,
     scan_code_comments,
     summarize_code_comment_reviews,
-    write_adoption_patch_report,
     write_adoption_handoff_report,
     write_adoption_package_index,
+    write_adoption_patch_report,
     write_adoption_plan_report,
     write_code_comment_decision_template,
-    write_code_review_comments,
-    write_code_comments_sarif,
     write_code_comments_report,
+    write_code_comments_sarif,
+    write_code_review_comments,
     write_project_doctor_report,
+)
+from .release import (
+    ReleaseCheck,
+    check_project_urls_reachable,
+    check_pypi_project_name,
+    run_release_checks,
 )
 from .server import build_openai_compatible_server
 from .version import __version__
@@ -591,6 +601,108 @@ def build_parser() -> argparse.ArgumentParser:
     code_comments.add_argument("--json", action="store_true", help="Print JSON")
     code_comments.set_defaults(func=cmd_code_comments)
 
+    approvals = subparsers.add_parser("approvals", help="Durable route approval commands")
+    approval_subparsers = approvals.add_subparsers(dest="approval_command", required=True)
+    approval_list = approval_subparsers.add_parser("list", help="List route approvals")
+    approval_list.add_argument(
+        "--status",
+        choices=["pending", "granted", "rejected", "expired", "revoked", "consumed"],
+    )
+    approval_list.add_argument("--json", action="store_true")
+    approval_list.set_defaults(func=cmd_approvals_list)
+    approval_show = approval_subparsers.add_parser("show", help="Show one approval and its events")
+    approval_show.add_argument("approval_or_trace_id")
+    approval_show.add_argument("--json", action="store_true")
+    approval_show.set_defaults(func=cmd_approvals_show)
+    approval_execute = approval_subparsers.add_parser(
+        "execute",
+        help="Execute the frozen route authorized by a one-use token",
+    )
+    approval_execute.add_argument(
+        "--token-env",
+        default="CRUPIER_APPROVAL_TOKEN",
+        help="Environment variable containing the approval token",
+    )
+    approval_execute.add_argument(
+        "--trace",
+        choices=["none", "summary", "debug"],
+        default="summary",
+    )
+    approval_execute.add_argument("--json", action="store_true")
+    approval_execute.set_defaults(func=cmd_approvals_execute)
+
+    approve = subparsers.add_parser("approve", help="Grant a pending frozen route")
+    approve.add_argument("approval_or_trace_id")
+    approve.add_argument("--reviewer", required=True)
+    approve.add_argument("--ttl-s", type=int, default=3600)
+    approve.add_argument("--reason", default="")
+    approve.add_argument("--json", action="store_true")
+    approve.set_defaults(func=cmd_approve)
+
+    reject = subparsers.add_parser("reject", help="Reject a pending frozen route")
+    reject.add_argument("approval_or_trace_id")
+    reject.add_argument("--reviewer", required=True)
+    reject.add_argument("--reason", required=True)
+    reject.add_argument("--json", action="store_true")
+    reject.set_defaults(func=cmd_reject)
+
+    sessions = subparsers.add_parser("sessions", help="Persisted multi-turn session commands")
+    session_subparsers = sessions.add_subparsers(dest="session_command", required=True)
+    session_list = session_subparsers.add_parser("list", help="List persisted sessions")
+    session_list.add_argument("--status", choices=["active", "closed"])
+    session_list.add_argument("--json", action="store_true")
+    session_list.set_defaults(func=cmd_sessions_list)
+    session_show = session_subparsers.add_parser("show", help="Show persisted session state")
+    session_show.add_argument("session_id")
+    session_show.add_argument("--json", action="store_true")
+    session_show.set_defaults(func=cmd_sessions_show)
+    session_close = session_subparsers.add_parser("close", help="Close a persisted session")
+    session_close.add_argument("session_id")
+    session_close.add_argument("--json", action="store_true")
+    session_close.set_defaults(func=cmd_sessions_close)
+
+    experiments = subparsers.add_parser("experiments", help="Shadow and canary experiment commands")
+    experiment_subparsers = experiments.add_subparsers(dest="experiment_command", required=True)
+    experiment_report = experiment_subparsers.add_parser("report", help="Show experiment evidence and gates")
+    experiment_report.add_argument("name")
+    experiment_report.add_argument("--json", action="store_true")
+    experiment_report.set_defaults(func=cmd_experiments_report)
+    experiment_promote = experiment_subparsers.add_parser("promote", help="Promote the candidate route")
+    experiment_promote.add_argument("name")
+    experiment_promote.add_argument("--actor", required=True)
+    experiment_promote.add_argument("--force", action="store_true")
+    experiment_promote.add_argument("--json", action="store_true")
+    experiment_promote.set_defaults(func=cmd_experiments_promote)
+    experiment_rollback = experiment_subparsers.add_parser("rollback", help="Roll back to the baseline route")
+    experiment_rollback.add_argument("name")
+    experiment_rollback.add_argument("--actor", required=True)
+    experiment_rollback.add_argument("--reason", required=True)
+    experiment_rollback.add_argument("--json", action="store_true")
+    experiment_rollback.set_defaults(func=cmd_experiments_rollback)
+    experiment_pause = experiment_subparsers.add_parser("pause", help="Pause experiment traffic")
+    experiment_pause.add_argument("name")
+    experiment_pause.add_argument("--actor", required=True)
+    experiment_pause.add_argument("--json", action="store_true")
+    experiment_pause.set_defaults(func=cmd_experiments_pause)
+    experiment_resume = experiment_subparsers.add_parser("resume", help="Resume paused or rolled-back experiment traffic")
+    experiment_resume.add_argument("name")
+    experiment_resume.add_argument("--actor", required=True)
+    experiment_resume.add_argument("--json", action="store_true")
+    experiment_resume.set_defaults(func=cmd_experiments_resume)
+    experiment_evaluate = experiment_subparsers.add_parser(
+        "evaluate",
+        help="Attach external eval or human-review checks to an observation",
+    )
+    experiment_evaluate.add_argument("observation_id")
+    experiment_evaluate.add_argument("--actor", required=True)
+    experiment_evaluate.add_argument(
+        "--checks",
+        required=True,
+        help='JSON object, for example: {"quality_delta": 0.12}',
+    )
+    experiment_evaluate.add_argument("--json", action="store_true")
+    experiment_evaluate.set_defaults(func=cmd_experiments_evaluate)
+
     deal = subparsers.add_parser("deal", help="Plan a route for a task")
     deal.add_argument("task", help="Task to route")
     deal.add_argument("--input", dest="input_value", help="Optional input payload; JSON is parsed when possible")
@@ -613,6 +725,12 @@ def build_parser() -> argparse.ArgumentParser:
     deal.add_argument("--store-response", action="store_true", help="Allow storing model output text/JSON")
     deal.add_argument("--json", action="store_true", help="Print JSON")
     deal.add_argument("--no-dry-run", action="store_true", help="Attempt real provider execution")
+    deal.add_argument("--experiment", help="Configured shadow/canary experiment name")
+    deal.add_argument(
+        "--approval-token-env",
+        default="CRUPIER_APPROVAL_TOKEN",
+        help="Environment variable containing a one-use approval token",
+    )
     deal.set_defaults(func=cmd_deal)
 
     route = subparsers.add_parser("route", help="Show route decision without provider calls")
@@ -2251,6 +2369,243 @@ def cmd_code_comments(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_approvals_list(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    approvals = client.approvals.list(status=args.status)
+    if args.json:
+        print(json.dumps([item.to_dict() for item in approvals], indent=2, sort_keys=True))
+        return 0
+    for item in approvals:
+        print(
+            f"{item.approval_id}\t{item.status}\t{item.trace_id}\t"
+            f"{item.reviewer or '-'}\t{item.expires_at or '-'}"
+        )
+    return 0
+
+
+def cmd_approvals_show(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    approval = client.approvals.resolve(args.approval_or_trace_id)
+    events = client.approvals.events(approval.approval_id)
+    payload = {
+        "approval": approval.to_dict(),
+        "events": events,
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"approval_id: {approval.approval_id}")
+    print(f"trace_id: {approval.trace_id}")
+    print(f"status: {approval.status}")
+    print(f"plan_hash: {approval.plan_hash}")
+    print(f"request_fingerprint: {approval.request_fingerprint}")
+    print(f"expires_at: {approval.expires_at or '-'}")
+    for event in events:
+        print(f"event: {event['created_at']} {event['event']} actor={event['actor'] or '-'}")
+    return 0
+
+
+def cmd_approvals_execute(args: argparse.Namespace) -> int:
+    token = os.environ.get(args.token_env)
+    if not token:
+        raise CrupierConfigError(
+            f"Approval token environment variable {args.token_env!r} is not set."
+        )
+    client = Crupier.from_project(args.project)
+    trace: bool | str = False if args.trace == "none" else args.trace
+    result = client.execute_approved(token, trace=trace)
+    if args.json:
+        print(
+            json.dumps(
+                result.to_dict(trace_summary=args.trace != "debug"),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return 0
+    print(result.output_text)
+    if result.route:
+        print(f"route: {result.route.strategy} | {result.route.model_summary}")
+    return 0
+
+
+def cmd_approve(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    approval = client.approvals.resolve(args.approval_or_trace_id)
+    granted = client.approvals.grant(
+        approval.approval_id,
+        reviewer=args.reviewer,
+        ttl_s=args.ttl_s,
+        reason=args.reason,
+    )
+    if args.json:
+        print(json.dumps(granted.to_dict(include_token=True), indent=2, sort_keys=True))
+        return 0
+    print(f"approval_id: {granted.approval_id}")
+    print(f"status: {granted.status}")
+    print(f"expires_at: {granted.expires_at}")
+    print(f"approval_token: {granted.token}")
+    print("The token is shown once; pass it through CRUPIER_APPROVAL_TOKEN.")
+    return 0
+
+
+def cmd_reject(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    approval = client.approvals.resolve(args.approval_or_trace_id)
+    rejected = client.approvals.reject(
+        approval.approval_id,
+        reviewer=args.reviewer,
+        reason=args.reason,
+    )
+    if args.json:
+        print(json.dumps(rejected.to_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"approval_id: {rejected.approval_id}")
+    print(f"status: {rejected.status}")
+    return 0
+
+
+def cmd_sessions_list(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    sessions = client.sessions.list(status=args.status)
+    if args.json:
+        print(json.dumps([item.to_dict() for item in sessions], indent=2, sort_keys=True))
+        return 0
+    for item in sessions:
+        print(
+            f"{item.session_id}\t{item.status}\tturns={item.turns}\t"
+            f"cost=${item.cumulative_cost_usd:.6f}\t{item.mode}\t{item.stickiness}"
+        )
+    return 0
+
+
+def cmd_sessions_show(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    record = client.sessions.store.get("session", args.session_id)
+    payload = {
+        "session": {
+            "session_id": record.id,
+            "status": record.status,
+            "version": record.version,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+        },
+        "state": record.payload,
+        "events": client.sessions.store.events("session", args.session_id),
+    }
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+    print(f"session_id: {record.id}")
+    print(f"status: {record.status}")
+    print(f"turns: {record.payload.get('turns', 0)}")
+    print(f"mode: {record.payload.get('mode', '-')}")
+    print(f"stickiness: {record.payload.get('stickiness', '-')}")
+    print(f"route_transitions: {len(record.payload.get('route_history', []))}")
+    return 0
+
+
+def cmd_sessions_close(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    info = client.sessions.resume(args.session_id).close()
+    if args.json:
+        print(json.dumps(info.to_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"session_id: {info.session_id}")
+    print(f"status: {info.status}")
+    return 0
+
+
+def cmd_experiments_report(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    report = client.experiments.report(args.name)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        return 0
+    _print_experiment_report(report)
+    return 0
+
+
+def cmd_experiments_promote(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    report = client.experiments.promote(
+        args.name,
+        actor=args.actor,
+        force=args.force,
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        return 0
+    _print_experiment_report(report)
+    return 0
+
+
+def cmd_experiments_rollback(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    report = client.experiments.rollback(
+        args.name,
+        actor=args.actor,
+        reason=args.reason,
+    )
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        return 0
+    _print_experiment_report(report)
+    return 0
+
+
+def cmd_experiments_pause(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    report = client.experiments.pause(args.name, actor=args.actor)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        return 0
+    _print_experiment_report(report)
+    return 0
+
+
+def cmd_experiments_resume(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    report = client.experiments.resume(args.name, actor=args.actor)
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
+        return 0
+    _print_experiment_report(report)
+    return 0
+
+
+def cmd_experiments_evaluate(args: argparse.Namespace) -> int:
+    client = Crupier.from_project(args.project)
+    try:
+        checks = json.loads(args.checks)
+    except json.JSONDecodeError as exc:
+        raise CrupierConfigError(f"--checks must be valid JSON: {exc}") from exc
+    if not isinstance(checks, dict):
+        raise CrupierConfigError("--checks must be a JSON object.")
+    observation = client.experiments.record_evaluation(
+        args.observation_id,
+        checks,
+        actor=args.actor,
+    )
+    if args.json:
+        print(json.dumps(observation.to_dict(), indent=2, sort_keys=True))
+        return 0
+    print(f"observation_id: {observation.observation_id}")
+    print(f"status: {observation.status}")
+    print(f"checks: {json.dumps(observation.checks, sort_keys=True)}")
+    return 0
+
+
+def _print_experiment_report(report: Any) -> None:
+    print(f"experiment: {report.experiment}")
+    print(f"status: {report.status}")
+    print(f"observations: {report.observations}")
+    print(f"sampled: {report.sampled}")
+    print(f"promotion_eligible: {report.promotion.eligible}")
+    for reason in report.promotion.reasons:
+        print(f"gate: {reason}")
+
+
 def cmd_deal(args: argparse.Namespace) -> int:
     client = Crupier.from_project(args.project)
     trace: bool | str = False if args.trace == "none" else args.trace
@@ -2264,6 +2619,8 @@ def cmd_deal(args: argparse.Namespace) -> int:
         response_schema=_parse_response_schema(args.response_schema),
         trace=trace,
         dry_run=not args.no_dry_run,
+        approval_token=os.environ.get(args.approval_token_env),
+        experiment=args.experiment,
     )
     if args.json:
         print(json.dumps(result.to_dict(trace_summary=args.trace != "debug"), indent=2, sort_keys=True))
@@ -2647,11 +3004,13 @@ def _provider_readiness_release_check(report: dict[str, Any]) -> ReleaseCheck:
         else "Real provider/model readiness checks failed.",
         evidence=report,
         actions=[
-            "Run `crupier verify --provider ...` with real environment keys. "
-            "If a model reports `needs_probes`, run "
-            "`crupier capabilities probe --model <provider:model> --apply`; "
-            "if a model fails smoke, remove or replace it in the allowlist, then retry "
-            "`crupier release check --verify-providers`."
+            (
+                "Run `crupier verify --provider ...` with real environment keys. "
+                "If a model reports `needs_probes`, run "
+                "`crupier capabilities probe --model <provider:model> --apply`; "
+                "if a model fails smoke, remove or replace it in the allowlist, then retry "
+                "`crupier release check --verify-providers`."
+            )
         ]
         if not ok
         else [],

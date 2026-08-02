@@ -812,7 +812,7 @@ def test_cli_adopt_handoff_json_and_report(tmp_path, capsys):
     assert payload["written_files"]
     assert (tmp_path / ".crupier" / "handoffs").exists()
     markdown_path = next(path for path in payload["written_files"] if path.endswith(".md"))
-    markdown = open(markdown_path, encoding="utf-8").read()
+    markdown = Path(markdown_path).read_text(encoding="utf-8")
     assert "## Review Contract" in markdown
     assert "## Human Signoff Checklist" in markdown
     assert "## Pending Programmer Code Comments" in markdown

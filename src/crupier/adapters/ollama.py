@@ -19,7 +19,12 @@ from crupier.multimodal import native_image_payloads
 from crupier.structured import schema_from_request
 
 from .base import AdapterResponse, EmbeddingResponse, ProviderModel
-from .common import build_prompt, env_value, provider_timeout_seconds, request_timeout_seconds
+from .common import (
+    build_prompt,
+    env_value,
+    provider_timeout_seconds,
+    request_timeout_seconds,
+)
 
 OLLAMA_AUTH_HINT = (
     "Set OLLAMA_API_KEY for https://ollama.com/api, or configure host explicitly for a local Ollama daemon."
@@ -364,7 +369,10 @@ class OllamaAdapter:
         )
 
     def _raise_http_error(self, exc: urllib.error.HTTPError) -> NoReturn:
-        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            body = exc.read().decode("utf-8", errors="replace")
+        finally:
+            exc.close()
         message = body or str(exc)
         if exc.code in {401, 403}:
             raise CrupierProviderAuthError(message, provider=self.provider, env_key=self.settings.env_key) from exc

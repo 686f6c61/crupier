@@ -7,16 +7,16 @@ usable in a real project, with explicit checks, canaries, and code comments.
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import re
 import struct
 import tempfile
 import zlib
-from difflib import unified_diff
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
+from difflib import unified_diff
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,6 @@ from .errors import CrupierError
 from .models import ModelRef
 from .orchestrator import ModelOrchestrator
 from .planner import RoutePlanner
-
 
 REAL_PROVIDER_CHOICES = ("openai", "anthropic", "google", "ollama", "openrouter")
 DEFAULT_PROVIDER_ENV_KEYS = {
@@ -221,7 +220,7 @@ class ProjectDoctorReport:
     readiness_mode: str
     adoption_plan: ProjectAdoptionPlan
     patch_report: AdoptionPatchReport
-    audit_report: "ProjectAuditReport"
+    audit_report: ProjectAuditReport
     eval_history: Any
     feedback_summary: dict[str, Any]
     gates: list[DoctorGate]

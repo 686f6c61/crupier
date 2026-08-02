@@ -376,7 +376,7 @@ def test_configurable_tool_and_stream_probes_cover_success_failure_timeout_and_e
         def create(self, **payload):
             self.calls.append(payload)
             if self.fail:
-                raise Exception("probe offline")
+                raise RuntimeError("probe offline")
             if payload.get("stream"):
                 return [
                     {"choices": [{"delta": {"content": "stream-ok"}}]},

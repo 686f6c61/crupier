@@ -10,7 +10,6 @@ from __future__ import annotations
 from .errors import CrupierRouteValidationError
 from .models import RoutePlan
 
-
 ALLOWED_STRATEGIES = {
     "single",
     "fallback",

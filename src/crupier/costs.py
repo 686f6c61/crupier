@@ -13,7 +13,6 @@ from typing import Any
 from .adapters.common import build_prompt
 from .models import CapabilityCard, CostEstimate, RequestEnvelope, RoutePlan
 
-
 DEFAULT_PRICE_BY_COST_TIER = {
     "low": {"input_per_million_usd": 0.20, "output_per_million_usd": 0.80},
     "medium": {"input_per_million_usd": 3.00, "output_per_million_usd": 12.00},

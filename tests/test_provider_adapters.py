@@ -1,6 +1,6 @@
 import json
 import sys
-from datetime import datetime
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from crupier.adapters import ProviderModel
@@ -11,8 +11,17 @@ from crupier.adapters.nan import NaNAdapter
 from crupier.adapters.ollama import OllamaAdapter
 from crupier.adapters.openai import OpenAIAdapter
 from crupier.adapters.openrouter import OpenRouterAdapter
-from crupier.config import NAN_DEFAULT_HOST, OPENROUTER_DEFAULT_HOST, CrupierConfig, ProviderSettings
-from crupier.errors import CrupierModelUnsupportedError, CrupierProviderAuthError, CrupierProviderUnavailableError
+from crupier.config import (
+    NAN_DEFAULT_HOST,
+    OPENROUTER_DEFAULT_HOST,
+    CrupierConfig,
+    ProviderSettings,
+)
+from crupier.errors import (
+    CrupierModelUnsupportedError,
+    CrupierProviderAuthError,
+    CrupierProviderUnavailableError,
+)
 from crupier.models import FileAsset, RequestEnvelope
 
 
@@ -24,8 +33,9 @@ class FakeOpenAIResponses:
         self.payload = payload
 
         class Response:
-            output_text = "openai text"
-            usage = {"input_tokens": 1, "output_tokens": 2}
+            def __init__(self):
+                self.output_text = "openai text"
+                self.usage = {"input_tokens": 1, "output_tokens": 2}
 
         return Response()
 
@@ -133,11 +143,12 @@ def test_openai_adapter_retries_without_unsupported_temperature():
         def create(self, **payload):
             self.payloads.append(payload)
             if "temperature" in payload:
-                raise Exception("Unsupported parameter: 'temperature' is not supported with this model.")
+                raise RuntimeError("Unsupported parameter: 'temperature' is not supported with this model.")
 
             class Response:
-                output_text = "openai text"
-                usage = {"input_tokens": 1, "output_tokens": 2}
+                def __init__(self):
+                    self.output_text = "openai text"
+                    self.usage = {"input_tokens": 1, "output_tokens": 2}
 
             return Response()
 
@@ -570,12 +581,12 @@ def test_provider_model_to_dict_is_json_serializable():
     model = ProviderModel(
         id="claude-sonnet-4-6",
         provider="anthropic",
-        metadata={"created_at": datetime(2026, 6, 19, 9, 30), "tags": {"chat", "vision"}},
+        metadata={"created_at": datetime(2026, 6, 19, 9, 30, tzinfo=UTC), "tags": {"chat", "vision"}},
     )
 
     payload = model.to_dict()
 
-    assert payload["metadata"]["created_at"] == "2026-06-19T09:30:00"
+    assert payload["metadata"]["created_at"] == "2026-06-19T09:30:00+00:00"
     assert payload["metadata"]["tags"] == ["chat", "vision"]
     json.dumps(payload)
 
@@ -591,8 +602,9 @@ class FakeAnthropicMessages:
             text = "claude text"
 
         class Message:
-            content = [Block()]
-            usage = {"input_tokens": 3, "output_tokens": 4}
+            def __init__(self):
+                self.content = [Block()]
+                self.usage = {"input_tokens": 3, "output_tokens": 4}
 
         return Message()
 
@@ -658,14 +670,15 @@ def test_anthropic_adapter_retries_without_deprecated_temperature():
         def create(self, **payload):
             self.payloads.append(payload)
             if "temperature" in payload:
-                raise Exception("`temperature` is deprecated for this model.")
+                raise RuntimeError("`temperature` is deprecated for this model.")
 
             class Block:
                 text = "claude text"
 
             class Message:
-                content = [Block()]
-                usage = {"input_tokens": 3, "output_tokens": 4}
+                def __init__(self):
+                    self.content = [Block()]
+                    self.usage = {"input_tokens": 3, "output_tokens": 4}
 
             return Message()
 

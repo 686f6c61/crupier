@@ -19,7 +19,6 @@ from uuid import uuid4
 from .errors import CrupierError
 from .models import ModelRef
 
-
 VERDICTS = {"accept", "reject", "needs_work", "unknown"}
 
 
@@ -39,7 +38,7 @@ class HumanFeedbackRecord:
     reviewer_hash: str | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "HumanFeedbackRecord":
+    def from_dict(cls, data: dict[str, Any]) -> HumanFeedbackRecord:
         return cls(
             feedback_id=str(data["feedback_id"]),
             created_at=str(data["created_at"]),

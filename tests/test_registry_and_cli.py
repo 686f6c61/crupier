@@ -1,8 +1,18 @@
 import json
 
 from crupier import Crupier
-from crupier.adapters import AdapterResponse, EmbeddingResponse, OperationResponse, ProviderModel
-from crupier.cli import _smoke_model_refs, _verify_provider, _verify_provider_names, main
+from crupier.adapters import (
+    AdapterResponse,
+    EmbeddingResponse,
+    OperationResponse,
+    ProviderModel,
+)
+from crupier.cli import (
+    _smoke_model_refs,
+    _verify_provider,
+    _verify_provider_names,
+    main,
+)
 from crupier.config import CrupierConfig, write_default_project, write_models_allow
 from crupier.model_profiles import apply_decision_profile
 from crupier.models import CapabilityCard, ModelRef, RequestEnvelope

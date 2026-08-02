@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import inspect
 import json
@@ -44,6 +45,7 @@ _PYPI_PROJECT_JSON_URL = "https://pypi.org/pypi/{project}/json"
 _EXPECTED_EXAMPLE_FILES = {
     "examples/_example_support.py",
     "examples/agentic_pr_review.py",
+    "examples/approval_workflow.py",
     "examples/customer_support_triage.py",
     "examples/drop_in_agent_boundary.py",
     "examples/live_operations_validation.py",
@@ -52,6 +54,8 @@ _EXPECTED_EXAMPLE_FILES = {
     "examples/multimodal_claim_review.py",
     "examples/routing-eval.json",
     "examples/sdk_dry_run.py",
+    "examples/session_contract_review.py",
+    "examples/shadow_canary_rollout.py",
     "examples/workflow_operations_hub.py",
 }
 _RELEASE_SOURCE_IGNORED_NAMES = {
@@ -234,20 +238,22 @@ def check_pypi_project_name(
     try:
         response = urlopen(request, timeout=timeout_seconds)
     except HTTPError as exc:
-        if exc.code == 404:
+        status = exc.code
+        exc.close()
+        if status == 404:
             return ReleaseCheck(
                 id="pypi_project_name",
                 status="pass",
                 severity="high",
                 summary="PyPI project name is currently available for a first public upload.",
-                evidence={"project": project, "normalized": normalized, "url": url, "http_status": 404},
+                evidence={"project": project, "normalized": normalized, "url": url, "http_status": status},
             )
         return ReleaseCheck(
             id="pypi_project_name",
             status="warn",
             severity="medium",
             summary="PyPI project name check returned an unexpected HTTP status.",
-            evidence={"project": project, "normalized": normalized, "url": url, "http_status": exc.code},
+            evidence={"project": project, "normalized": normalized, "url": url, "http_status": status},
             actions=["Retry the PyPI name check before publishing."],
         )
     except (OSError, TimeoutError, URLError) as exc:
@@ -332,7 +338,10 @@ def check_project_urls_reachable(root: str | Path, *, timeout_seconds: float = 1
         try:
             response = urlopen(request, timeout=timeout_seconds)
         except HTTPError as exc:
-            item.update({"ok": False, "http_status": exc.code, "error_type": exc.__class__.__name__})
+            status = exc.code
+            error_type = exc.__class__.__name__
+            exc.close()
+            item.update({"ok": False, "http_status": status, "error_type": error_type})
             failures.append(item)
             checked.append(item)
             continue
@@ -469,9 +478,13 @@ def _version_sync_check(root: Path, pyproject_version: str | None) -> ReleaseChe
     version_path = root / "src" / "crupier" / "version.py"
     module_version = None
     if version_path.exists():
-        namespace: dict[str, Any] = {}
-        exec(version_path.read_text(encoding="utf-8"), namespace)
-        module_version = namespace.get("__version__")
+        tree = ast.parse(version_path.read_text(encoding="utf-8"), filename=str(version_path))
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "__version__" for target in node.targets
+            ):
+                module_version = ast.literal_eval(node.value)
+                break
     ok = bool(pyproject_version and module_version and pyproject_version == module_version)
     return ReleaseCheck(
         id="version_sync",
@@ -580,7 +593,17 @@ def _public_repository_surface_check(root: Path) -> ReleaseCheck:
         "CODE_OF_CONDUCT.md",
         "docs",
     ]
-    present = [relative for relative in forbidden_paths if (root / relative).exists()]
+    tracked = _git_tracked_files(root, include_untracked=False)
+    if tracked:
+        tracked_names = {path.as_posix() for path in tracked}
+        present = [
+            relative
+            for relative in forbidden_paths
+            if relative in tracked_names
+            or any(name.startswith(f"{relative}/") for name in tracked_names)
+        ]
+    else:
+        present = [relative for relative in forbidden_paths if (root / relative).exists()]
     ok = not present
     return ReleaseCheck(
         id="public_repository_surface",
@@ -873,7 +896,7 @@ def _public_yaml_check(root: Path) -> ReleaseCheck:
         checked.append(relative)
         try:
             parsed = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
-        except Exception as exc:  # pragma: no cover - exact parser exception classes vary by PyYAML version
+        except yaml.YAMLError as exc:
             failures.append(
                 {
                     "path": relative,
@@ -921,7 +944,7 @@ def _broken_relative_markdown_links(root: Path, source_relative: Path, text: str
     for match in re.finditer(r"!?\[[^\]]+\]\(([^)]+)\)", text):
         raw_target = match.group(1).strip().strip("<>")
         target = raw_target.split("#", 1)[0].split("?", 1)[0]
-        if not target or target.startswith("#") or target.startswith("//"):
+        if not target or target.startswith(("#", "//")):
             continue
         if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target):
             continue
@@ -953,7 +976,7 @@ def _relative_markdown_links(text: str) -> list[str]:
     for match in re.finditer(r"!?\[[^\]]+\]\(([^)]+)\)", text):
         raw_target = match.group(1).strip().strip("<>")
         target = raw_target.split("#", 1)[0].split("?", 1)[0]
-        if not target or target.startswith("#") or target.startswith("//"):
+        if not target or target.startswith(("#", "//")):
             continue
         if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", target):
             continue
@@ -988,7 +1011,7 @@ def _contributing_check(root: Path) -> ReleaseCheck:
         "INFERENCE_API_KEY",
         "crupier --env-file .env release check --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference",
         "Never commit provider keys",
-        "Dependabot security updates",
+        "No `.github/dependabot.yml`",
         "Protect `main`",
         "disallow force pushes",
     ]
@@ -1133,7 +1156,7 @@ def _ci_check(root: Path) -> ReleaseCheck:
         "permissions:",
         "contents: read",
         "actions/checkout@v7",
-        "actions/setup-python@v6",
+        "actions/setup-python@v7",
         "python -m pytest",
         "--cov-fail-under=95",
         "python -m ruff check src tests",
@@ -1163,24 +1186,16 @@ def _ci_check(root: Path) -> ReleaseCheck:
 
 def _dependency_updates_check(root: Path) -> ReleaseCheck:
     path = root / ".github" / "dependabot.yml"
-    text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
-    required_markers = [
-        "version: 2",
-        "package-ecosystem: pip",
-        "package-ecosystem: github-actions",
-        "interval: weekly",
-    ]
-    missing_markers = [marker for marker in required_markers if marker not in text]
-    ok = path.exists() and not missing_markers
+    exists = path.exists()
     return ReleaseCheck(
         id="dependency_updates",
-        status="pass" if ok else "warn",
+        status="warn" if exists else "pass",
         severity="medium",
-        summary="Dependabot is configured for Python tooling and GitHub Actions."
-        if ok
-        else "Dependabot is missing or incomplete for public maintenance.",
-        evidence={"path": ".github/dependabot.yml", "exists": path.exists(), "missing_markers": missing_markers},
-        actions=["Add .github/dependabot.yml entries for pip and github-actions update checks."] if not ok else [],
+        summary="Dependabot configuration is not allowed by repository policy."
+        if exists
+        else "Dependabot configuration is intentionally absent.",
+        evidence={"path": ".github/dependabot.yml", "exists": exists},
+        actions=["Remove .github/dependabot.yml before publishing."] if exists else [],
     )
 
 
@@ -1194,7 +1209,7 @@ def _publish_workflow_check(root: Path) -> ReleaseCheck:
         "cancel-in-progress: false",
         "environment:",
         "name: pypi",
-        "url: https://pypi.org/p/crupier",
+        "url: https://pypi.org/project/crupier/",
         "    permissions:",
         "      contents: read",
         "      id-token: write",
@@ -1202,7 +1217,7 @@ def _publish_workflow_check(root: Path) -> ReleaseCheck:
         "confirm_publish",
         "actions/checkout@v7",
         "fetch-depth: 0",
-        "actions/setup-python@v6",
+        "actions/setup-python@v7",
         "Verify publish event matches package version",
         "GITHUB_EVENT_NAME",
         "GITHUB_REF_NAME",

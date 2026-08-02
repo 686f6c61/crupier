@@ -1,7 +1,11 @@
 from crupier import Crupier
 from crupier.adapters import AdapterResponse, EmbeddingResponse, OperationResponse
 from crupier.config import CrupierConfig
-from crupier.errors import CrupierModelUnsupportedError, CrupierPolicyError, CrupierRouteValidationError
+from crupier.errors import (
+    CrupierModelUnsupportedError,
+    CrupierPolicyError,
+    CrupierRouteValidationError,
+)
 
 
 class FakeOperationAdapter:

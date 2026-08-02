@@ -1,12 +1,12 @@
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tarfile
+import zipfile
+from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
-import zipfile
 
 from crupier.cli import main
 from crupier.release import (
@@ -16,12 +16,12 @@ from crupier.release import (
     _artifact_metadata_check,
     _copy_release_source,
     _default_config_check,
-    _runtime_safety_defaults_check,
     _public_model_examples_check,
-    _public_repository_surface_check,
     _public_release_language_check,
-    _sdist_install_smoke,
+    _public_repository_surface_check,
+    _runtime_safety_defaults_check,
     _sdist_examples_smoke,
+    _sdist_install_smoke,
     _wheel_install_smoke,
     check_project_urls_reachable,
     check_pypi_project_name,
@@ -64,7 +64,7 @@ def write_release_project(root):
     (root / "CONTRIBUTING.md").write_text(
         "# Contributing\n\n"
         "Never commit provider keys.\n\n"
-        "Dependabot security updates enabled and unpaused.\n\n"
+        "No `.github/dependabot.yml`; automated dependency-update pull requests are disabled.\n\n"
         "Protect `main` and disallow force pushes before accepting public changes.\n\n"
         "```bash\n"
         "python -m pytest\n"
@@ -166,19 +166,6 @@ def write_release_project(root):
         "blank_issues_enabled: false\n",
         encoding="utf-8",
     )
-    (root / ".github" / "dependabot.yml").write_text(
-        "version: 2\n"
-        "updates:\n"
-        "  - package-ecosystem: pip\n"
-        "    directory: /\n"
-        "    schedule:\n"
-        "      interval: weekly\n"
-        "  - package-ecosystem: github-actions\n"
-        "    directory: /\n"
-        "    schedule:\n"
-        "      interval: weekly\n",
-        encoding="utf-8",
-    )
     (root / ".github" / "workflows" / "ci.yml").write_text(
         "name: CI\n"
         "permissions:\n"
@@ -187,7 +174,7 @@ def write_release_project(root):
         "  test:\n"
         "    steps:\n"
         "      - uses: actions/checkout@v7\n"
-        "      - uses: actions/setup-python@v6\n"
+        "      - uses: actions/setup-python@v7\n"
         "      - run: python -m pytest --cov=crupier --cov-fail-under=95\n"
         "      - run: python -m ruff check src tests\n"
         "      - run: python -m mypy src/crupier\n"
@@ -209,7 +196,7 @@ def write_release_project(root):
         "  publish:\n"
         "    environment:\n"
         "      name: pypi\n"
-        "      url: https://pypi.org/p/crupier\n"
+        "      url: https://pypi.org/project/crupier/\n"
         "    permissions:\n"
         "      contents: read\n"
         "      id-token: write\n"
@@ -217,7 +204,7 @@ def write_release_project(root):
         "      - uses: actions/checkout@v7\n"
         "        with:\n"
         "          fetch-depth: 0\n"
-        "      - uses: actions/setup-python@v6\n"
+        "      - uses: actions/setup-python@v7\n"
         "      - name: Verify publish event matches package version\n"
         "        run: echo GITHUB_EVENT_NAME GITHUB_REF_NAME REQUESTED_VERSION CONFIRM_PUBLISH 'git\", \"fetch\", \"--quiet\", \"origin\", \"main:refs/remotes/origin/main\", \"--tags' 'git\", \"rev-parse\", \"origin/main' 'Publish commit does not match origin/main.'\n"
         "        env:\n"
@@ -415,6 +402,20 @@ def test_public_repository_surface_check_blocks_internal_docs_and_extra_policy_f
     assert check.evidence["forbidden_present"] == ["CODE_OF_CONDUCT.md", "docs"]
 
 
+def test_public_repository_surface_ignores_untracked_internal_docs(tmp_path, monkeypatch):
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "internal.md").write_text("internal\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "crupier.release._git_tracked_files",
+        lambda root, include_untracked=False: [Path("README.md")],
+    )
+
+    check = _public_repository_surface_check(tmp_path)
+
+    assert check.status == "pass"
+    assert check.evidence["forbidden_present"] == []
+
+
 def test_release_check_fails_when_public_file_contains_provider_secret(tmp_path):
     write_release_project(tmp_path)
     secret = "sk-proj-" + "A" * 48
@@ -564,11 +565,12 @@ def test_release_check_fails_without_strict_publish_workflow(tmp_path):
     assert "pypi-publish-${{ github.ref }}" in checks["publish_workflow"].evidence["missing_markers"]
     assert "cancel-in-progress: false" in checks["publish_workflow"].evidence["missing_markers"]
     assert "name: pypi" in checks["publish_workflow"].evidence["missing_markers"]
-    assert "url: https://pypi.org/p/crupier" in checks["publish_workflow"].evidence["missing_markers"]
+    assert "url: https://pypi.org/project/crupier/" in checks["publish_workflow"].evidence["missing_markers"]
     assert "    permissions:" in checks["publish_workflow"].evidence["missing_markers"]
     assert "      contents: read" in checks["publish_workflow"].evidence["missing_markers"]
     assert "      id-token: write" in checks["publish_workflow"].evidence["missing_markers"]
     assert "fetch-depth: 0" in checks["publish_workflow"].evidence["missing_markers"]
+    assert "actions/setup-python@v7" in checks["publish_workflow"].evidence["missing_markers"]
     assert "actions/upload-artifact@v7" in checks["publish_workflow"].evidence["missing_markers"]
     assert "if-no-files-found: error" in checks["publish_workflow"].evidence["missing_markers"]
     assert "Verify publish event matches package version" in checks["publish_workflow"].evidence["missing_markers"]
@@ -710,9 +712,8 @@ def test_release_check_warns_without_complete_security_policy(tmp_path):
     assert "## Disclosure And Fix Process" in checks["security_policy"].evidence["missing_markers"]
 
 
-def test_release_check_warns_without_dependabot_or_minimal_ci_permissions(tmp_path):
+def test_release_check_requires_absent_dependabot_and_warns_on_minimal_ci_permissions(tmp_path):
     write_release_project(tmp_path)
-    (tmp_path / ".github" / "dependabot.yml").unlink()
     (tmp_path / ".github" / "workflows" / "ci.yml").write_text(
         "name: CI\njobs:\n  test:\n    steps:\n      - run: python -m pytest\n",
         encoding="utf-8",
@@ -722,16 +723,28 @@ def test_release_check_warns_without_dependabot_or_minimal_ci_permissions(tmp_pa
     checks = {check.id: check for check in report.checks}
 
     assert report.ok is True
-    assert checks["dependency_updates"].status == "warn"
+    assert checks["dependency_updates"].status == "pass"
     assert checks["ci"].status == "warn"
     assert "contents: read" in checks["ci"].evidence["missing_markers"]
     assert "actions/checkout@v7" in checks["ci"].evidence["missing_markers"]
-    assert "actions/setup-python@v6" in checks["ci"].evidence["missing_markers"]
+    assert "actions/setup-python@v7" in checks["ci"].evidence["missing_markers"]
     assert "python -m ruff check src tests" in checks["ci"].evidence["missing_markers"]
     assert "python -m mypy src/crupier" in checks["ci"].evidence["missing_markers"]
     assert "--cov-fail-under=95" in checks["ci"].evidence["missing_markers"]
     assert "python -m pip_audit --skip-editable --progress-spinner off" in checks["ci"].evidence["missing_markers"]
     assert checks["dependency_updates"].evidence["exists"] is False
+
+
+def test_release_check_warns_when_dependabot_config_is_present(tmp_path):
+    write_release_project(tmp_path)
+    (tmp_path / ".github" / "dependabot.yml").write_text("version: 2\nupdates: []\n", encoding="utf-8")
+
+    report = run_release_checks(tmp_path, build=False)
+    checks = {check.id: check for check in report.checks}
+
+    assert checks["dependency_updates"].status == "warn"
+    assert checks["dependency_updates"].evidence["exists"] is True
+    assert checks["dependency_updates"].actions == ["Remove .github/dependabot.yml before publishing."]
 
 
 def test_release_check_warns_when_dev_extra_missing_pip_audit(tmp_path):
@@ -1272,6 +1285,7 @@ def test_artifact_content_check_requires_typed_marker_and_blocks_local_artifacts
         archive.add(source, arcname="demo-0.1.0/CONTRIBUTING.md")
         archive.add(source, arcname="demo-0.1.0/examples/_example_support.py")
         archive.add(source, arcname="demo-0.1.0/examples/agentic_pr_review.py")
+        archive.add(source, arcname="demo-0.1.0/examples/approval_workflow.py")
         archive.add(source, arcname="demo-0.1.0/examples/customer_support_triage.py")
         archive.add(source, arcname="demo-0.1.0/examples/drop_in_agent_boundary.py")
         archive.add(source, arcname="demo-0.1.0/examples/live_operations_validation.py")
@@ -1280,6 +1294,8 @@ def test_artifact_content_check_requires_typed_marker_and_blocks_local_artifacts
         archive.add(source, arcname="demo-0.1.0/examples/multimodal_claim_review.py")
         archive.add(source, arcname="demo-0.1.0/examples/routing-eval.json")
         archive.add(source, arcname="demo-0.1.0/examples/sdk_dry_run.py")
+        archive.add(source, arcname="demo-0.1.0/examples/session_contract_review.py")
+        archive.add(source, arcname="demo-0.1.0/examples/shadow_canary_rollout.py")
         archive.add(source, arcname="demo-0.1.0/examples/workflow_operations_hub.py")
 
     clean_check, clean_payload = _artifact_content_check([sdist, clean])
@@ -1311,6 +1327,7 @@ def test_artifact_content_check_requires_typed_marker_and_blocks_local_artifacts
         archive.add(source, arcname="demo-0.1.0/CONTRIBUTING.md")
         archive.add(source, arcname="demo-0.1.0/examples/_example_support.py")
         archive.add(source, arcname="demo-0.1.0/examples/agentic_pr_review.py")
+        archive.add(source, arcname="demo-0.1.0/examples/approval_workflow.py")
         archive.add(source, arcname="demo-0.1.0/examples/customer_support_triage.py")
         archive.add(source, arcname="demo-0.1.0/examples/drop_in_agent_boundary.py")
         archive.add(source, arcname="demo-0.1.0/examples/live_operations_validation.py")
@@ -1319,6 +1336,8 @@ def test_artifact_content_check_requires_typed_marker_and_blocks_local_artifacts
         archive.add(source, arcname="demo-0.1.0/examples/multimodal_claim_review.py")
         archive.add(source, arcname="demo-0.1.0/examples/routing-eval.json")
         archive.add(source, arcname="demo-0.1.0/examples/sdk_dry_run.py")
+        archive.add(source, arcname="demo-0.1.0/examples/session_contract_review.py")
+        archive.add(source, arcname="demo-0.1.0/examples/shadow_canary_rollout.py")
         archive.add(source, arcname="demo-0.1.0/examples/workflow_operations_hub.py")
         archive.add(source, arcname="demo-0.1.0/docs/crupier-roadmap.md")
 
@@ -1335,6 +1354,7 @@ def test_artifact_content_check_requires_typed_marker_and_blocks_local_artifacts
         archive.add(source, arcname="demo-0.1.0/CONTRIBUTING.md")
         archive.add(source, arcname="demo-0.1.0/examples/_example_support.py")
         archive.add(source, arcname="demo-0.1.0/examples/agentic_pr_review.py")
+        archive.add(source, arcname="demo-0.1.0/examples/approval_workflow.py")
         archive.add(source, arcname="demo-0.1.0/examples/customer_support_triage.py")
         archive.add(source, arcname="demo-0.1.0/examples/drop_in_agent_boundary.py")
         archive.add(source, arcname="demo-0.1.0/examples/live_operations_validation.py")
@@ -1343,6 +1363,8 @@ def test_artifact_content_check_requires_typed_marker_and_blocks_local_artifacts
         archive.add(source, arcname="demo-0.1.0/examples/multimodal_claim_review.py")
         archive.add(source, arcname="demo-0.1.0/examples/routing-eval.json")
         archive.add(source, arcname="demo-0.1.0/examples/sdk_dry_run.py")
+        archive.add(source, arcname="demo-0.1.0/examples/session_contract_review.py")
+        archive.add(source, arcname="demo-0.1.0/examples/shadow_canary_rollout.py")
         archive.add(source, arcname="demo-0.1.0/examples/workflow_operations_hub.py")
         archive.add(source, arcname="demo-0.1.0/tests/test_release.py")
 

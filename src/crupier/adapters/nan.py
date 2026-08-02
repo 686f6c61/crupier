@@ -20,7 +20,12 @@ from crupier.multimodal import native_file_payloads
 from crupier.structured import schema_from_request
 
 from .base import AdapterResponse, EmbeddingResponse, OperationResponse, ProviderModel
-from .common import object_to_dict, provider_timeout_seconds, request_timeout_seconds, require_api_key
+from .common import (
+    object_to_dict,
+    provider_timeout_seconds,
+    request_timeout_seconds,
+    require_api_key,
+)
 
 _IMAGE_MODELS = {"mimo-v2.5", "gemma4", "qwen3.6"}
 _AUDIO_MODELS = {"mimo-v2.5"}

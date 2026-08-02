@@ -15,7 +15,6 @@ from typing import Any
 
 from .models import RoutePlan
 
-
 BUILTIN_ROUTING_EVALS: list[dict[str, Any]] = [
     {
         "id": "fast_uses_single",
@@ -63,7 +62,7 @@ class EvalCase:
     notes: str = ""
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "EvalCase":
+    def from_dict(cls, data: dict[str, Any]) -> EvalCase:
         return cls(
             id=str(data["id"]),
             task=str(data["task"]),
@@ -122,7 +121,7 @@ class CompareVariant:
     constraints: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CompareVariant":
+    def from_dict(cls, data: dict[str, Any]) -> CompareVariant:
         return cls(
             name=str(data.get("name") or data.get("model") or "variant"),
             mode=data.get("mode"),
@@ -628,7 +627,7 @@ def recommend_compare_winner(results: list[CompareVariantResult]) -> tuple[str |
             item.name,
         )
 
-    winner = sorted(passed, key=sort_key)[0]
+    winner = min(passed, key=sort_key)
     cost = winner.actual_cost_usd if winner.actual_cost_usd is not None else winner.estimated_cost_usd
     latency = winner.latency_ms if winner.latency_ms is not None else winner.estimated_latency_ms
     return (
@@ -908,7 +907,7 @@ def _avg_float(values: list[float]) -> float | None:
 def _avg_int(values: list[float]) -> int | None:
     if not values:
         return None
-    return int(round(sum(values) / len(values)))
+    return round(sum(values) / len(values))
 
 
 def _compare_score_delta(*, appearances: int, passed: int, wins: int) -> float:
@@ -951,7 +950,7 @@ def _avg_weighted(values: list[tuple[float, int]]) -> float | None:
 
 def _avg_weighted_int(values: list[tuple[float, int]]) -> int | None:
     value = _avg_weighted(values)
-    return int(round(value)) if value is not None else None
+    return round(value) if value is not None else None
 
 
 def _confidence_from_appearances(appearances: int) -> str:

@@ -1,5 +1,6 @@
 import argparse
 import json
+import runpy
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -68,6 +69,15 @@ from crupier.config import CrupierConfig
 from crupier.errors import CrupierConfigError, CrupierError
 from crupier.models import CapabilityCard, ModelRef
 from crupier.registry import ModelRegistry
+
+
+def test_python_module_entrypoint_delegates_to_cli(monkeypatch):
+    monkeypatch.setattr(cli_module, "main", lambda: 17)
+
+    with pytest.raises(SystemExit) as error:
+        runpy.run_module("crupier.__main__", run_name="__main__")
+
+    assert error.value.code == 17
 
 
 def test_env_file_parser_supports_exports_quotes_comments_and_precedence(tmp_path, monkeypatch):
@@ -164,7 +174,7 @@ def test_print_update_probe_readiness_and_release_reports(capsys):
     release = NS(
         ok=False,
         project="crupier",
-        version="0.4.0",
+        version="0.5.0",
         summary={"fail": 1},
         checks=[NS(status="fail", id="coverage", summary="below gate", actions=["add tests"])],
         build={"ok": False, "wheel_count": 0},
@@ -1049,7 +1059,7 @@ def test_code_comments_text_ack_import_and_conflict(monkeypatch, capsys):
     monkeypatch.setattr(
         cli_module,
         "summarize_code_comment_reviews",
-        lambda *args, **kwargs: NS(reviewed_count=1, pending_count=0, to_dict=lambda: {}),
+        lambda *args, **kwargs: NS(reviewed_count=1, pending_count=0, to_dict=dict),
     )
     monkeypatch.setattr(
         cli_module,
@@ -1096,7 +1106,7 @@ def test_code_comments_text_ack_import_and_conflict(monkeypatch, capsys):
 
 def test_adopt_package_configured_text_path(monkeypatch, capsys):
     plan = _adoption_plan()
-    patch_report = NS(patches=[], to_dict=lambda: {})
+    patch_report = NS(patches=[], to_dict=dict)
     doctor = NS(
         adoption_plan=plan,
         patch_report=patch_report,

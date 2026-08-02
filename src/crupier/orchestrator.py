@@ -10,8 +10,13 @@ from typing import Any, Protocol
 from .adapters import ProviderAdapter
 from .budgets import ExecutionBudget, request_with_timeout
 from .config import CrupierConfig, ProfileSettings, ollama_is_local
+from .constraints import request_allows_parallel
 from .costs import estimate_route_cost
-from .errors import CrupierBudgetExceededError, CrupierExecutionLimitError, CrupierRouteValidationError
+from .errors import (
+    CrupierBudgetExceededError,
+    CrupierExecutionLimitError,
+    CrupierRouteValidationError,
+)
 from .model_profiles import classify_task_signal_weights
 from .models import (
     CapabilityCard,
@@ -28,8 +33,8 @@ from .prompts import (
     build_orchestrator_planning_prompt,
     build_orchestrator_repair_prompt,
 )
-from .route_schema import ALLOWED_STRATEGIES, validate_route_plan_shape
 from .registry import ModelRegistry
+from .route_schema import ALLOWED_STRATEGIES, validate_route_plan_shape
 from .runtime_policy import apply_runtime_policy
 from .selector import ModelSelector
 
@@ -457,13 +462,23 @@ class DeterministicOrchestrator:
         if plan.strategy == "panel":
             panel = next((step.models for step in plan.steps if step.role == "panel"), [])
             latencies = [estimate(model) for model in panel]
-            return max(latencies, default=0) if self.config.routing.allow_parallel else sum(latencies)
+            allow_parallel = (
+                request_allows_parallel(self.config, request)
+                if request is not None
+                else self.config.routing.allow_parallel
+            )
+            return max(latencies, default=0) if allow_parallel else sum(latencies)
         if plan.strategy == "fusion":
             panel = next((step.models for step in plan.steps if step.role == "panel"), [])
             panel_latencies = [estimate(model) for model in panel]
+            allow_parallel = (
+                request_allows_parallel(self.config, request)
+                if request is not None
+                else self.config.routing.allow_parallel
+            )
             panel_total = (
                 max(panel_latencies, default=0)
-                if self.config.routing.allow_parallel
+                if allow_parallel
                 else sum(panel_latencies)
             )
             judge = next((step.model for step in plan.steps if step.role == "judge"), None)

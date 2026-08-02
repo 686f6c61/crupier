@@ -27,10 +27,10 @@ from typing import Any
 from uuid import uuid4
 
 from _example_support import offline_client, print_route
+
 from crupier import Crupier, ModelRef, OperationResult
 from crupier.compat.openai import OpenAI
 from crupier.server import build_openai_compatible_server
-
 
 CASE_NAMES = (
     "classifier",
@@ -658,9 +658,7 @@ def _models_for_kind(client: Crupier, kind: str) -> list[str]:
         adapter = client.adapters.get(card.model_ref.provider)
         if adapter is None:
             continue
-        if kind == "chat" and callable(getattr(adapter, "generate", None)):
-            models.append(key)
-        elif kind == "embedding" and callable(getattr(adapter, "embed", None)):
+        if kind == "chat" and callable(getattr(adapter, "generate", None)) or kind == "embedding" and callable(getattr(adapter, "embed", None)):
             models.append(key)
         else:
             supports = getattr(adapter, "supports_operation", None)

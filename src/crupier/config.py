@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-import tomllib
 import os
+import tomllib
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from math import isfinite
@@ -135,6 +135,38 @@ class ScoringSettings:
 
 
 @dataclass(slots=True)
+class PromotionSettings:
+    action: str = "recommend"
+    min_samples: int = 200
+    max_error_rate: float = 0.02
+    max_error_rate_delta: float = 0.02
+    min_quality_delta: float = 0.0
+    quality_check: str = "quality_delta"
+    require_quality_evaluator: bool = True
+    max_cost_ratio: float | None = 1.25
+    max_p95_latency_ratio: float | None = 1.20
+    confidence: float = 0.95
+
+
+@dataclass(slots=True)
+class ExperimentSettings:
+    name: str
+    enabled: bool = True
+    traffic: str = "shadow"
+    sample_rate: float = 0.0
+    execution: str = "plan_only"
+    candidate_models: list[str] = field(default_factory=list)
+    candidate_strategy: str | None = None
+    candidate_constraints: dict[str, Any] = field(default_factory=dict)
+    sticky_by: str = "session_id"
+    max_shadow_cost_usd: float | None = None
+    max_concurrency: int = 2
+    store_outputs: bool = False
+    allow_side_effecting_tools: bool = False
+    promotion: PromotionSettings = field(default_factory=PromotionSettings)
+
+
+@dataclass(slots=True)
 class PolicyRule:
     name: str
     effect: str
@@ -168,12 +200,13 @@ class CrupierConfig:
     routing: RoutingSettings = field(default_factory=RoutingSettings)
     orchestrator: OrchestratorSettings = field(default_factory=OrchestratorSettings)
     scoring: ScoringSettings = field(default_factory=ScoringSettings)
+    experiments: dict[str, ExperimentSettings] = field(default_factory=dict)
     policy: PolicySettings = field(default_factory=PolicySettings)
     profiles: dict[str, ProfileSettings] = field(default_factory=dict)
-    root: Path = field(default_factory=lambda: Path(".").resolve())
+    root: Path = field(default_factory=Path.cwd)
 
     @classmethod
-    def from_toml(cls, path: str | Path) -> "CrupierConfig":
+    def from_toml(cls, path: str | Path) -> CrupierConfig:
         toml_path = Path(path)
         if toml_path.is_dir():
             toml_path = toml_path / "crupier.toml"
@@ -192,7 +225,7 @@ class CrupierConfig:
         return config
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CrupierConfig":
+    def from_dict(cls, data: dict[str, Any]) -> CrupierConfig:
         if not isinstance(data, dict):
             raise CrupierConfigError("Crupier configuration must be an object/table.")
         try:
@@ -221,6 +254,7 @@ class CrupierConfig:
                     options={key: value for key, value in profile_data.items() if key not in known},
                 )
 
+            experiments = _experiment_settings_from_dict(data.get("experiments", {}))
             config = cls(
                 project=ProjectSettings(**data.get("project", {})),
                 logging=LoggingSettings(**data.get("logging", {})),
@@ -229,6 +263,7 @@ class CrupierConfig:
                 routing=RoutingSettings(**data.get("routing", {})),
                 orchestrator=OrchestratorSettings(**data.get("orchestrator", {})),
                 scoring=_scoring_settings_from_dict(data.get("scoring", {})),
+                experiments=experiments,
                 policy=_policy_settings_from_dict(data.get("policy", {})),
                 profiles=profiles,
             )
@@ -286,6 +321,73 @@ class CrupierConfig:
                 except ValueError as exc:
                     raise CrupierConfigError(str(exc)) from exc
 
+        for name, experiment in self.experiments.items():
+            if experiment.traffic not in {"shadow", "canary"}:
+                raise CrupierConfigError(
+                    f"experiments.{name}.traffic must be 'shadow' or 'canary'."
+                )
+            if experiment.execution not in {"plan_only", "sync", "async"}:
+                raise CrupierConfigError(
+                    f"experiments.{name}.execution must be plan_only, sync, or async."
+                )
+            if not 0.0 <= experiment.sample_rate <= 1.0:
+                raise CrupierConfigError(
+                    f"experiments.{name}.sample_rate must be between 0 and 1."
+                )
+            _require_int_at_least(
+                f"experiments.{name}.max_concurrency",
+                experiment.max_concurrency,
+                1,
+            )
+            if experiment.max_concurrency > 64:
+                raise CrupierConfigError(
+                    f"experiments.{name}.max_concurrency must be at most 64."
+                )
+            for model in experiment.candidate_models:
+                try:
+                    ModelRef.parse(model)
+                except ValueError as exc:
+                    raise CrupierConfigError(str(exc)) from exc
+            if experiment.candidate_strategy and experiment.candidate_strategy not in _ROUTE_STRATEGIES:
+                raise CrupierConfigError(
+                    f"experiments.{name}.candidate_strategy is unsupported."
+                )
+            promotion = experiment.promotion
+            if promotion.action not in {"recommend", "auto"}:
+                raise CrupierConfigError(
+                    f"experiments.{name}.promotion.action must be recommend or auto."
+                )
+            _require_int_at_least(
+                f"experiments.{name}.promotion.min_samples",
+                promotion.min_samples,
+                1,
+            )
+            for field_name in (
+                "max_error_rate",
+                "max_error_rate_delta",
+                "confidence",
+            ):
+                value = float(getattr(promotion, field_name))
+                if not 0.0 <= value <= 1.0:
+                    raise CrupierConfigError(
+                        f"experiments.{name}.promotion.{field_name} must be between 0 and 1."
+                    )
+            _require_finite_number(
+                f"experiments.{name}.promotion.min_quality_delta",
+                promotion.min_quality_delta,
+            )
+            if not promotion.quality_check.strip():
+                raise CrupierConfigError(
+                    f"experiments.{name}.promotion.quality_check cannot be empty."
+                )
+            for field_name in ("max_cost_ratio", "max_p95_latency_ratio"):
+                _require_finite_number(
+                    f"experiments.{name}.promotion.{field_name}",
+                    getattr(promotion, field_name),
+                    allow_none=True,
+                    allow_zero=False,
+                )
+
         for name, profile in self.profiles.items():
             if profile.strategy not in _ROUTE_STRATEGIES:
                 raise CrupierConfigError(f"Profile {name!r} has unsupported strategy {profile.strategy!r}.")
@@ -330,6 +432,10 @@ class CrupierConfig:
     def profiles_dir(self) -> Path:
         return self.crupier_dir / "profiles"
 
+    @property
+    def state_db_path(self) -> Path:
+        return self.crupier_dir / "state.sqlite3"
+
     def ensure_project_dirs(self) -> None:
         for directory in [
             self.crupier_dir,
@@ -364,6 +470,82 @@ def _scoring_settings_from_dict(data: dict[str, Any]) -> ScoringSettings:
         except (TypeError, ValueError):
             settings[field_name] = getattr(defaults, field_name)
     return ScoringSettings(**settings)
+
+
+def _experiment_settings_from_dict(data: Any) -> dict[str, ExperimentSettings]:
+    if not isinstance(data, dict):
+        return {}
+    experiments: dict[str, ExperimentSettings] = {}
+    for name, raw in data.items():
+        if not isinstance(raw, dict):
+            raise CrupierConfigError(f"Experiment {name!r} must be a table/object.")
+        promotion_raw = raw.get("promotion", raw.get("promote_after", {}))
+        promotion = (
+            PromotionSettings(**promotion_raw)
+            if isinstance(promotion_raw, dict)
+            else PromotionSettings()
+        )
+        percent = raw.get("percent")
+        sample_rate = (
+            float(percent) / 100.0
+            if percent is not None and "sample_rate" not in raw
+            else float(raw.get("sample_rate", 0.0))
+        )
+        known = {
+            "enabled",
+            "traffic",
+            "sample_rate",
+            "percent",
+            "execution",
+            "candidate_models",
+            "allow",
+            "candidate_strategy",
+            "strategy",
+            "candidate_constraints",
+            "sticky_by",
+            "max_shadow_cost_usd",
+            "max_concurrency",
+            "store_outputs",
+            "allow_side_effecting_tools",
+            "promotion",
+            "promote_after",
+        }
+        unknown = sorted(set(raw).difference(known))
+        if unknown:
+            raise CrupierConfigError(
+                f"Experiment {name!r} has unknown field(s): {', '.join(unknown)}."
+            )
+        candidate_models_raw = raw.get("candidate_models", raw.get("allow", [])) or []
+        if isinstance(candidate_models_raw, str):
+            candidate_models_raw = [candidate_models_raw]
+        if not isinstance(candidate_models_raw, list):
+            raise CrupierConfigError(
+                f"Experiment {name!r} candidate_models must be an array."
+            )
+        experiments[str(name)] = ExperimentSettings(
+            name=str(name),
+            enabled=bool(raw.get("enabled", True)),
+            traffic=str(raw.get("traffic", "shadow")),
+            sample_rate=sample_rate,
+            execution=str(raw.get("execution", "plan_only")),
+            candidate_models=[
+                ModelRef.parse(str(model)).key
+                for model in candidate_models_raw
+            ],
+            candidate_strategy=raw.get("candidate_strategy", raw.get("strategy")),
+            candidate_constraints=dict(raw.get("candidate_constraints", {})),
+            sticky_by=str(raw.get("sticky_by", "session_id")),
+            max_shadow_cost_usd=(
+                float(raw["max_shadow_cost_usd"])
+                if raw.get("max_shadow_cost_usd") is not None
+                else None
+            ),
+            max_concurrency=int(raw.get("max_concurrency", 2)),
+            store_outputs=bool(raw.get("store_outputs", False)),
+            allow_side_effecting_tools=bool(raw.get("allow_side_effecting_tools", False)),
+            promotion=promotion,
+        )
+    return experiments
 
 
 def _policy_settings_from_dict(data: dict[str, Any]) -> PolicySettings:
@@ -603,6 +785,8 @@ preview_stability_penalty = -5
 budget_over_penalty = -30
 budget_comfort_bonus = 3
 budget_within_bonus = 1
+
+[experiments]
 
 [policy]
 rules = []

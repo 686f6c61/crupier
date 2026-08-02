@@ -59,6 +59,15 @@ class CrupierToolApprovalRequired(CrupierError):
     """Raised when a route wants to execute a tool that requires human approval."""
 
 
+class CrupierApprovalRequired(CrupierPolicyError):
+    """Raised when a frozen route is awaiting a durable approval decision."""
+
+    def __init__(self, message: str, *, approval_id: str, trace_id: str):
+        super().__init__(message)
+        self.approval_id = approval_id
+        self.trace_id = trace_id
+
+
 class CrupierStructuredOutputError(CrupierError):
     """Raised when structured output cannot be validated or repaired."""
 

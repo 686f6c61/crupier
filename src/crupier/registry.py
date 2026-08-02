@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+import builtins
 import json
 import re
-import builtins
-from datetime import date, datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
+from .adapters import ProviderModel
 from .config import CrupierConfig, write_models_allow
 from .default_cards import BUILTIN_CAPABILITY_CARDS
 from .errors import CrupierConfigError, CrupierModelUnsupportedError
 from .model_profiles import apply_decision_profile
 from .models import CapabilityCard, ModelRef, UpdateReport
-from .adapters import ProviderModel
 
 SNAPSHOT_SCHEMA_VERSION = 1
 SNAPSHOT_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
@@ -93,7 +94,7 @@ def _retained_discovery_index_keys(index: dict[str, Any], *, exclude_providers: 
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _default_card_for(model_key: str) -> CapabilityCard:
@@ -141,7 +142,7 @@ def _card_from_provider_model(provider_model: ProviderModel) -> CapabilityCard:
                 stability=curated.model_ref.stability,
                 source="discovered",
             )
-            curated.last_updated = date.today().isoformat()
+            curated.last_updated = datetime.now(UTC).date().isoformat()
             curated.evidence = {
                 **curated.evidence,
                 "provider_discovery": {"metadata": provider_model.metadata},
@@ -254,7 +255,7 @@ def _card_from_provider_model(provider_model: ProviderModel) -> CapabilityCard:
 
     card = CapabilityCard(
         model_ref=ModelRef(provider=provider, model=model_ref.model, stability=stability, source="discovered"),
-        last_updated=date.today().isoformat(),
+        last_updated=datetime.now(UTC).date().isoformat(),
         model_kind=model_kind,
         modalities_input=modalities_input,
         modalities_output=modalities_output,
@@ -622,7 +623,11 @@ class ModelRegistry:
         report.removed_models = sorted(previous_discovered - set(model_keys))
         report.changed_models = sorted(set(report.changed_models) | set(report.removed_models))
         index_path = self.config.registry_dir / "models.json"
-        index_data = {"models": index_model_keys, "source": "provider_discovery", "updated_at": date.today().isoformat()}
+        index_data = {
+            "models": index_model_keys,
+            "source": "provider_discovery",
+            "updated_at": datetime.now(UTC).date().isoformat(),
+        }
         if not dry_run:
             index_path.write_text(_json_dumps(index_data), encoding="utf-8")
             report.written_files.append(str(index_path))
@@ -766,12 +771,12 @@ class ModelRegistry:
 
     @staticmethod
     def _default_snapshot_name() -> str:
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
         return f"reg_{stamp}"
 
     @staticmethod
     def _normalize_snapshot_name(name: str) -> str:
-        normalized = name[:-5] if name.endswith(".json") else name
+        normalized = name.removesuffix(".json")
         if not normalized or normalized in {".", ".."}:
             raise CrupierConfigError("Registry snapshot name cannot be empty.")
         if "/" in normalized or "\\" in normalized or not SNAPSHOT_NAME_RE.fullmatch(normalized):

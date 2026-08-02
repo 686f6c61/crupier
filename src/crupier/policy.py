@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 
 from .capabilities import capability_evidence, capability_reason
 from .config import CrupierConfig, PolicyRule
-from .errors import CrupierBudgetExceededError, CrupierPolicyError, CrupierRouteValidationError
+from .constraints import request_allows_parallel
+from .errors import (
+    CrupierBudgetExceededError,
+    CrupierPolicyError,
+    CrupierRouteValidationError,
+)
 from .models import CapabilityCard, ModelRef, RequestEnvelope, RoutePlan
 from .route_schema import planned_call_count, validate_route_plan_shape
 
@@ -45,19 +51,37 @@ class PolicyEngine:
         allow_preview = bool(constraints.get("allow_preview_models", self.config.routing.allow_preview_models))
         allow_deprecated = bool(constraints.get("allow_deprecated_models", False))
         require_verified_capabilities = bool(constraints.get("require_verified_capabilities", False))
-        has_tools = bool(request.tools)
+        has_tools = bool(request.tools) or bool(constraints.get("requires_tools"))
         wants_structured = request.response_schema is not None or bool(constraints.get("response_schema"))
         wants_streaming = bool(constraints.get("stream", False) or constraints.get("require_streaming", False))
         requested_model_kind = str(
             constraints.get("model_kind") or ("embedding" if request.mode == "embedding" else "chat")
         )
         offline_planning = bool(request.metadata.get("_crupier_offline_planning"))
+        allowed_models = _model_keys(constraints.get("allowed_models"))
+        allowed_providers = _string_set(constraints.get("allowed_providers"))
 
         for card in candidates:
             key = card.model_ref.key
             provider = card.model_ref.provider
             provider_settings = self.config.providers.get(provider)
 
+            if allowed_models and key not in allowed_models:
+                self._exclude(
+                    result,
+                    key,
+                    "model is outside request allowed_models",
+                    "request_allowed_models",
+                )
+                continue
+            if allowed_providers and provider not in allowed_providers:
+                self._exclude(
+                    result,
+                    key,
+                    "provider is outside request allowed_providers",
+                    "request_allowed_providers",
+                )
+                continue
             if card.model_kind != requested_model_kind:
                 self._exclude(
                     result,
@@ -151,8 +175,12 @@ class PolicyEngine:
         if plan.strategy == "fusion" and not self.config.routing.allow_fusion:
             raise CrupierRouteValidationError("Route uses fusion, but fusion is disabled by routing policy.")
 
-        if not self.config.routing.allow_parallel and plan.strategy in {"fusion", "panel"}:
-            raise CrupierRouteValidationError(f"Route uses {plan.strategy}, but parallel routing is disabled.")
+        if (
+            not request_allows_parallel(self.config, request)
+            and plan.strategy in {"fusion", "panel"}
+            and "sequential_panel_execution" not in plan.policy_filters_applied
+        ):
+            plan.policy_filters_applied.append("sequential_panel_execution")
 
         if plan.strategy in {"fusion", "panel"}:
             self._validate_panel_size_constraints(plan, request)
@@ -215,9 +243,7 @@ class PolicyEngine:
             return False
         if rule.providers and card.model_ref.provider not in rule.providers:
             return False
-        if rule.models and card.model_ref.key not in {ModelRef.parse(model).key for model in rule.models}:
-            return False
-        return True
+        return not rule.models or card.model_ref.key in {ModelRef.parse(model).key for model in rule.models}
 
     @staticmethod
     def _exclude(result: PolicyResult, model: str, reason: str, filter_name: str) -> None:
@@ -283,3 +309,19 @@ def _declared_capability(card: CapabilityCard, capability: str) -> bool:
     if capability in {"vision_input", "audio_input", "video_input", "file_input", "pdf_native_input"}:
         return _declared_file_capability(card, capability)
     return False
+
+
+def _string_set(value: object) -> set[str]:
+    if value is None:
+        return set()
+    if isinstance(value, str):
+        return {value}
+    if not isinstance(value, Iterable) or isinstance(value, Mapping):
+        raise CrupierRouteValidationError(
+            "allowed_models and allowed_providers must be a string or list of strings."
+        )
+    return {str(item) for item in value}
+
+
+def _model_keys(value: object) -> set[str]:
+    return {ModelRef.parse(model).key for model in _string_set(value)}

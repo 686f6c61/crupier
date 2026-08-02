@@ -14,12 +14,12 @@
 
 ## Validation
 
-- [ ] `python -m pytest`
-- [ ] `python -m pytest --cov=crupier --cov-fail-under=95`
-- [ ] `python -m ruff check src tests`
+- [ ] `python -m pytest -q`
+- [ ] `python -m pytest -q --cov=crupier --cov-report=term --cov-fail-under=95`
+- [ ] `python -m ruff check src tests examples`
 - [ ] `python -m mypy src/crupier`
-- [ ] `crupier release check`
-- [ ] `crupier release check --strict-public --verify-project-urls --check-pypi-name` for release-facing changes or first public uploads
+- [ ] `python -m pip_audit --skip-editable --progress-spinner off`
+- [ ] `crupier release check --strict-public --verify-project-urls --check-pypi-name --allow-existing-pypi-project` for release-facing changes
 - [ ] Real-provider checks documented when behavior touches OpenAI, Anthropic Claude, Google Gemini, Ollama Cloud, configurable inference servers, or OpenRouter adapters
 
 ## Safety

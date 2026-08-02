@@ -14,7 +14,9 @@ htmlcov/
 *.egg-info/
 dist/
 build/
+docs/
 .crupier/traces/
+.crupier/state.sqlite3*
 .crupier/registry/models.json
 .crupier/registry/capability-cards/
 .crupier/audits/

@@ -9,8 +9,8 @@ from time import perf_counter
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from .budgets import ExecutionBudget, request_with_timeout
 from .adapters import OperationResponse
+from .budgets import ExecutionBudget, request_with_timeout
 from .costs import actual_cost_from_calls, usage_estimated_cost_from_calls
 from .errors import (
     CrupierBudgetExceededError,
@@ -19,7 +19,14 @@ from .errors import (
     CrupierPolicyError,
     CrupierRouteValidationError,
 )
-from .models import CostEstimate, CrupierResult, DecisionTrace, ModelRef, OperationResult, RequestEnvelope
+from .models import (
+    CostEstimate,
+    CrupierResult,
+    DecisionTrace,
+    ModelRef,
+    OperationResult,
+    RequestEnvelope,
+)
 from .orchestrator import DeterministicOrchestrator, ModelOrchestrator
 from .policy import Exclusion
 from .prompts import build_operation_classification_prompt
@@ -804,8 +811,10 @@ def _successful_orchestrator(calls: list[dict[str, Any]]) -> str | None:
 def _operation_warnings(operation: str) -> list[str]:
     if operation in {"tts", "transcription", "image_generation", "reranker"}:
         return [
-            "Provider pricing for this operation is not token-comparable; estimated_usd excludes unreported "
-            "subscription or quota consumption."
+            (
+                "Provider pricing for this operation is not token-comparable; estimated_usd excludes unreported "
+                "subscription or quota consumption."
+            )
         ]
     return []
 

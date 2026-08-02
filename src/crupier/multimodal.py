@@ -13,8 +13,13 @@ from typing import Any
 from urllib.parse import unquote_to_bytes, urlparse
 
 from .errors import CrupierModelUnsupportedError
+from .extraction import (
+    ExtractedDocument,
+    OCRAdapter,
+    extract_docx,
+    extract_spreadsheet,
+)
 from .models import FileAsset, FileRepresentation, FileRoutingPlan
-
 
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".heic", ".heif"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg", ".opus", ".webm"}
@@ -232,6 +237,14 @@ def prepare_extracted_file_context(
     *,
     max_file_bytes: int = 2_000_000,
     max_chars: int = 80_000,
+    max_table_rows: int = 500,
+    max_table_columns: int = 100,
+    max_cell_chars: int = 2_000,
+    max_table_sheets: int = 25,
+    max_document_tables: int = 25,
+    max_pdf_pages: int = 200,
+    ocr_adapter: OCRAdapter | None = None,
+    ocr_timeout_seconds: float | None = 30.0,
 ) -> dict[str, Any]:
     """Read supported local files into a bounded text context for real execution."""
 
@@ -239,6 +252,7 @@ def prepare_extracted_file_context(
         raise CrupierModelUnsupportedError("No file routing plan is available for real file extraction.")
     sections: list[str] = []
     items: list[dict[str, Any]] = []
+    extracted_tables: list[dict[str, Any]] = []
     warnings: list[str] = []
     representations = {item.asset_name: item for item in file_plan.representations}
     remaining_chars = max_chars
@@ -251,8 +265,23 @@ def prepare_extracted_file_context(
         )
         if representation is None:
             raise CrupierModelUnsupportedError(f"No file representation is available for {asset.name or index!r}.")
-        extracted, item_warnings = _extract_asset_text(asset, representation.representation, max_file_bytes=max_file_bytes)
-        warnings.extend(item_warnings)
+        document = _extract_asset(
+            asset,
+            representation.representation,
+            max_file_bytes=max_file_bytes,
+            max_chars=max_chars,
+            max_table_rows=max_table_rows,
+            max_table_columns=max_table_columns,
+            max_cell_chars=max_cell_chars,
+            max_table_sheets=max_table_sheets,
+            max_document_tables=max_document_tables,
+            max_pdf_pages=max_pdf_pages,
+            ocr_adapter=ocr_adapter,
+            ocr_timeout_seconds=ocr_timeout_seconds,
+        )
+        extracted = document.to_prompt_text()
+        warnings.extend(document.warnings)
+        extracted_tables.extend(table.to_dict() for table in document.tables)
         if not extracted.strip():
             warnings.append(f"{asset.name or index}: extracted text was empty")
         truncated = extracted[:remaining_chars]
@@ -277,6 +306,7 @@ def prepare_extracted_file_context(
                 "representation": representation.representation,
                 "chars": len(truncated),
                 "truncated": len(extracted) > len(truncated),
+                "extraction": document.to_dict(include_content=False),
             }
         )
         if remaining_chars <= 0:
@@ -287,6 +317,7 @@ def prepare_extracted_file_context(
     return {
         "body": "\n\n".join(sections),
         "files": items,
+        "tables": extracted_tables,
         "warnings": warnings,
         "max_chars": max_chars,
     }
@@ -355,7 +386,7 @@ def _plan_asset(asset: FileAsset, *, task: str, constraints: dict[str, Any]) -> 
                 "ocr_text",
                 pipeline=["ocr"],
                 reason="Image was forced through text extraction/OCR before model routing.",
-                warnings=["ocr_extraction_not_implemented"],
+                warnings=["ocr_adapter_required_for_execution"],
             )
         return _representation(
             asset,
@@ -428,21 +459,24 @@ def _plan_asset(asset: FileAsset, *, task: str, constraints: dict[str, Any]) -> 
         )
 
     if asset.kind == "spreadsheet":
+        suffix = _suffix(asset.name or asset.uri)
+        executable = suffix in {".csv", ".tsv", ".xlsx"}
         return _representation(
             asset,
             "table_rows",
             pipeline=["table_extraction"],
             reason="Spreadsheet input should be parsed structurally before LLM routing.",
-            warnings=["spreadsheet_parsing_not_implemented"],
+            warnings=[] if executable else ["spreadsheet_format_not_supported_for_extraction"],
         )
 
     if asset.kind == "document":
+        executable = _suffix(asset.name or asset.uri) == ".docx"
         return _representation(
             asset,
             "extracted_text",
             pipeline=["document_text_extraction"],
             reason="Document input should be converted to text and tables before model routing.",
-            warnings=["document_extraction_not_implemented"],
+            warnings=[] if executable else ["document_format_not_supported_for_extraction"],
         )
 
     if asset.kind == "code":
@@ -496,6 +530,10 @@ def _guess_mime(name: str | None) -> str | None:
 
 
 def _kind_for(mime_type: str | None, suffix: str) -> str:
+    if suffix in SPREADSHEET_EXTENSIONS:
+        return "spreadsheet"
+    if suffix in DOCUMENT_EXTENSIONS:
+        return "document"
     if mime_type:
         if mime_type.startswith("image/"):
             return "image"
@@ -515,10 +553,6 @@ def _kind_for(mime_type: str | None, suffix: str) -> str:
         return "audio"
     if suffix in VIDEO_EXTENSIONS:
         return "video"
-    if suffix in SPREADSHEET_EXTENSIONS:
-        return "spreadsheet"
-    if suffix in DOCUMENT_EXTENSIONS:
-        return "document"
     if suffix in CODE_EXTENSIONS:
         return "code"
     if suffix in TEXT_EXTENSIONS:
@@ -557,13 +591,77 @@ def _sorted_unique(values: Any) -> list[str]:
     return sorted({str(value) for value in values if value})
 
 
-def _extract_asset_text(asset: FileAsset, representation: str, *, max_file_bytes: int) -> tuple[str, list[str]]:
+def _extract_asset(
+    asset: FileAsset,
+    representation: str,
+    *,
+    max_file_bytes: int,
+    max_chars: int,
+    max_table_rows: int,
+    max_table_columns: int,
+    max_cell_chars: int,
+    max_table_sheets: int,
+    max_document_tables: int,
+    max_pdf_pages: int,
+    ocr_adapter: OCRAdapter | None,
+    ocr_timeout_seconds: float | None,
+) -> ExtractedDocument:
     if asset.kind in {"text", "code"} or representation in {"inline_text", "code_chunks"}:
-        return _read_local_text(asset, max_file_bytes=max_file_bytes), []
+        return ExtractedDocument(
+            text=_read_local_text(asset, max_file_bytes=max_file_bytes),
+            extractor="local-text",
+        )
     if asset.kind == "pdf" and representation in {"extracted_text_chunks", "table_rows_and_text"}:
-        text = _extract_pdf_text(asset, max_file_bytes=max_file_bytes)
-        warnings = ["pdf_table_extraction_not_implemented_text_only"] if representation == "table_rows_and_text" else []
-        return text, warnings
+        text, truncated = _extract_pdf_text(
+            asset,
+            max_file_bytes=max_file_bytes,
+            max_chars=max_chars,
+            max_pages=max_pdf_pages,
+        )
+        warnings = (
+            ["pdf_table_extraction_not_implemented_text_only"]
+            if representation == "table_rows_and_text"
+            else []
+        )
+        if truncated:
+            warnings.append("pdf_text_truncated")
+        return ExtractedDocument(
+            text=text,
+            warnings=warnings,
+            extractor="pdf-text",
+            truncated=truncated,
+        )
+    path = _local_path(asset)
+    if asset.kind == "spreadsheet" and representation == "table_rows":
+        return extract_spreadsheet(
+            path,
+            max_file_bytes=max_file_bytes,
+            max_rows=max_table_rows,
+            max_columns=max_table_columns,
+            max_cell_chars=max_cell_chars,
+            max_sheets=max_table_sheets,
+        )
+    if asset.kind == "document" and representation == "extracted_text":
+        return extract_docx(
+            path,
+            max_file_bytes=max_file_bytes,
+            max_rows=max_table_rows,
+            max_columns=max_table_columns,
+            max_cell_chars=max_cell_chars,
+            max_chars=max_chars,
+            max_tables=max_document_tables,
+        )
+    if asset.kind == "image" and representation == "ocr_text":
+        if ocr_adapter is None:
+            raise CrupierModelUnsupportedError(
+                "Image OCR requires an OCRAdapter, for example "
+                "Crupier(config, ocr_adapter=TesseractOCRAdapter())."
+            )
+        return ocr_adapter.extract(
+            path,
+            max_chars=max_chars,
+            timeout_seconds=ocr_timeout_seconds,
+        )
     raise CrupierModelUnsupportedError(
         f"Real extraction for {asset.kind!r} as {representation!r} is not supported by the local extractor."
     )
@@ -588,7 +686,13 @@ def _read_local_text(asset: FileAsset, *, max_file_bytes: int) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def _extract_pdf_text(asset: FileAsset, *, max_file_bytes: int) -> str:
+def _extract_pdf_text(
+    asset: FileAsset,
+    *,
+    max_file_bytes: int,
+    max_chars: int,
+    max_pages: int,
+) -> tuple[str, bool]:
     path = _local_path(asset)
     size = path.stat().st_size
     if size > max_file_bytes:
@@ -600,8 +704,25 @@ def _extract_pdf_text(asset: FileAsset, *, max_file_bytes: int) -> str:
     except ImportError:
         reader = None
     else:
-        reader = PdfReader(str(path))
-        return "\n\n".join(page.extract_text() or "" for page in reader.pages)
+        try:
+            reader = PdfReader(str(path))
+            sections: list[str] = []
+            remaining = max_chars
+            pages = reader.pages
+            page_count = len(pages)
+            truncated = page_count > max_pages
+            for page_index in range(min(page_count, max_pages)):
+                page = pages[page_index]
+                text = page.extract_text() or ""
+                clipped = text[:remaining]
+                sections.append(clipped)
+                remaining -= len(clipped)
+                if len(clipped) < len(text) or remaining <= 0:
+                    truncated = True
+                    break
+            return "\n\n".join(sections), truncated
+        except Exception as exc:
+            raise CrupierModelUnsupportedError(f"PDF text extraction failed: {exc}") from exc
 
     pdftotext = shutil.which("pdftotext")
     if not pdftotext:
@@ -611,7 +732,16 @@ def _extract_pdf_text(asset: FileAsset, *, max_file_bytes: int) -> str:
     with tempfile.TemporaryDirectory(prefix="crupier-pdf-") as tmp_dir:
         out_path = Path(tmp_dir) / "out.txt"
         completed = subprocess.run(
-            [pdftotext, "-layout", str(path), str(out_path)],
+            [
+                pdftotext,
+                "-f",
+                "1",
+                "-l",
+                str(max_pages),
+                "-layout",
+                str(path),
+                str(out_path),
+            ],
             check=False,
             capture_output=True,
             text=True,
@@ -619,4 +749,6 @@ def _extract_pdf_text(asset: FileAsset, *, max_file_bytes: int) -> str:
         )
         if completed.returncode != 0:
             raise CrupierModelUnsupportedError(f"PDF text extraction failed: {completed.stderr.strip()}")
-        return out_path.read_text(encoding="utf-8", errors="replace")
+        with out_path.open("r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read(max_chars + 1)
+        return text[:max_chars], len(text) > max_chars

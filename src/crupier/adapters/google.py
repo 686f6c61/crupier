@@ -17,8 +17,12 @@ from crupier.models import RequestEnvelope
 from crupier.multimodal import native_image_payloads
 
 from .base import AdapterResponse, EmbeddingResponse, ProviderModel
-from .common import build_prompt, object_to_dict, provider_timeout_seconds, request_timeout_seconds
-
+from .common import (
+    build_prompt,
+    object_to_dict,
+    provider_timeout_seconds,
+    request_timeout_seconds,
+)
 
 GOOGLE_DEFAULT_ENV_KEYS = ("GOOGLE_API_KEY", "GEMINI_API_KEY")
 

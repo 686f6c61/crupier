@@ -2,6 +2,26 @@
 
 All notable changes to Crupier will be documented here.
 
+## 0.5.0 - 2026-08-02
+
+- Added an explicit request-constraint contract with boolean validation, visible warnings for unknown controls, opt-in strict rejection through `strict_constraints=True`, and drift coverage for controls such as `orchestrator_candidate_limit`.
+- Made `requires_tools` enforce a non-empty tool catalog and capability filtering instead of acting as application-only metadata.
+- Replaced caller-asserted approval with durable frozen-route approvals: plan/request hashes, expiring one-use tokens, reviewer-verifier hooks, local-file digests, remote-file digest requirements, append-only events, SDK/CLI lifecycle commands, and automatic gating for side-effecting tools.
+- Added `allow_parallel` as a real per-request limit for panel/fusion latency planning and execution, including sequential execution when disabled without bypassing the project-level policy.
+- Added persisted multi-turn sessions with compatible route stickiness, capability/risk/strategy replanning, bounded history, cumulative budgets, optimistic concurrency, route history, and cross-turn tool idempotency.
+- Bound approved session turns back to their originating session so foreign sessions cannot consume the token and authorized execution updates the original history and budget.
+- Added production shadow and canary experiments with deterministic sticky sampling, parallel or asynchronous shadow execution, candidate fallback, output-free observations by default, external quality checks, statistical promotion gates, pause/resume/promotion/rollback, and OpenAI-compatible SDK/HTTP controls.
+- Made experiment failures role-aware so baseline and candidate errors use the correct denominators, dual failures remain auditable, and control-plane persistence failures never replace or duplicate a live baseline response.
+- Added bounded executable CSV/TSV/XLSX and DOCX extraction plus an optional OCR adapter contract and Tesseract implementation; hardened Office expansion, sheet/table/row/column/cell limits and bounded PDF page/text extraction.
+- Added a lazy permission-restricted SQLite control-plane store shared by approvals, sessions, and experiments without creating project artifacts for ordinary one-shot routing.
+- Made SQLite record/event writes atomic and ensured every state connection commits or rolls back and closes on all success and error paths.
+- Reworked the public offline examples to load real scoring profiles, derive provider-call evidence from traces, expose warnings and trace errors, and distinguish sensitive BYOK routing from local/private execution.
+- Added executable approval, session/replan, shadow rollout, and spreadsheet extraction examples that run without provider keys or persistent local artifacts.
+- Expanded example contract tests to verify approval gates, tool requirements, profile loading, warnings, trace evidence, dataset paths, multimodal boundaries, and source-checkout execution without an editable install.
+- Raised provider and PDF dependency floors to current tested releases, including patched `pypdf` and `pyasn1` versions required by the dependency audit.
+- Updated GitHub CI and publishing to `actions/setup-python@v7`, synchronized public issue/PR templates with `0.5.0`, and enforced the repository policy that `.github/dependabot.yml` must remain absent.
+- Bumped the package to final `0.5.0`; publishing remains gated on full local, package, and real-provider verification.
+
 ## 0.4.0 - 2026-07-15
 
 - Added real configurable inference-server coverage with live model discovery, chat/structured/streaming probes, native multimodal input, embeddings, model-kind classification, and curated routing cards without invented benchmarks or pricing.

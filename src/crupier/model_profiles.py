@@ -987,7 +987,7 @@ def _apply_family_inference(card: CapabilityCard) -> None:
             card.supports_structured_output = False
             card.strengths.append("video_generation")
             return
-        if model.startswith("gpt-") or model.startswith("chat"):
+        if model.startswith(("gpt-", "chat")):
             card.supports_tools = True
             card.supports_structured_output = True
             _add_modality(card, "image")

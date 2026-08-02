@@ -42,7 +42,11 @@ body:
         - Provider adapter
         - Model discovery/update
         - Routing/orchestrator
+        - Shadow/canary experiments
+        - Sessions/replanning
+        - Approvals/tool execution
         - Multimodal/file routing
+        - Document extraction/OCR
         - Release/readiness check
         - README/examples/package metadata
     validations:
@@ -51,7 +55,7 @@ body:
     id: version
     attributes:
       label: Crupier version
-      placeholder: "0.3.0"
+      placeholder: "0.5.0"
     validations:
       required: true
   - type: textarea

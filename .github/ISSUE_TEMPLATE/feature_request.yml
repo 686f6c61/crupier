@@ -34,10 +34,14 @@ body:
       label: Area
       options:
         - Routing/orchestrator
+        - Shadow/canary experiments
+        - Sessions/replanning
+        - Approvals/tool execution
         - Provider adapter
         - Drop-in adoption
         - OpenAI-compatible server
         - Multimodal/file handling
+        - Document extraction/OCR
         - Evals/feedback
         - Security/privacy defaults
         - Release/readiness

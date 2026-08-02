@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -136,7 +136,7 @@ def test_provider_model_serializes_nested_non_json_metadata():
 
     class Legacy:
         def to_dict(self):
-            return {"at": datetime(2026, 7, 15, 12, tzinfo=timezone.utc)}
+            return {"at": datetime(2026, 7, 15, 12, tzinfo=UTC)}
 
     model = ProviderModel(
         id="model-1",

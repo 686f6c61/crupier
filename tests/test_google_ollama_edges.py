@@ -167,10 +167,10 @@ def test_google_probe_failures_errors_stream_limit_and_unknown_probe():
 
     class BrokenModels:
         def generate_content(self, **payload):
-            raise Exception("probe failed")
+            raise RuntimeError("probe failed")
 
         def generate_content_stream(self, **payload):
-            raise Exception("stream failed")
+            raise RuntimeError("stream failed")
 
     adapter._client = SimpleNamespace(models=BrokenModels())
     for probe in ["structured_output", "tool_call", "streaming"]:

@@ -101,12 +101,31 @@ class OpenAI:
         trace: bool | str = False,
         **kwargs: Any,
     ) -> CrupierResult:
+        crupier_options = kwargs.pop("crupier", {}) or {}
+        if not isinstance(crupier_options, dict):
+            raise TypeError("crupier options must be a dictionary.")
+        explicit_constraints = kwargs.pop("constraints", {}) or {}
+        if not isinstance(explicit_constraints, dict):
+            raise TypeError("constraints must be a dictionary.")
         constraints = _compat_constraints(
             model=model,
             stream=stream,
             compat_mode=str(kwargs.pop("compat_mode", self._compat_mode)),
             kwargs=kwargs,
         )
+        nested_constraints = crupier_options.get("constraints", {}) or {}
+        if not isinstance(nested_constraints, dict):
+            raise TypeError("crupier.constraints must be a dictionary.")
+        constraints.update(nested_constraints)
+        constraints.update(explicit_constraints)
+        experiment = kwargs.pop("experiment", crupier_options.get("experiment"))
+        approval_token = kwargs.pop(
+            "approval_token",
+            crupier_options.get("approval_token"),
+        )
+        metadata = kwargs.pop("metadata", crupier_options.get("metadata"))
+        if metadata is not None and not isinstance(metadata, dict):
+            raise TypeError("metadata must be a dictionary.")
         files, normalized_input, normalized_messages = _extract_file_inputs(input=input, messages=messages)
         response_schema = _response_schema_from_format(response_format)
         if dry_run is None:
@@ -120,8 +139,11 @@ class OpenAI:
             response_schema=response_schema,
             mode=mode,
             constraints=constraints,
+            metadata=dict(metadata or {}),
             dry_run=dry_run,
             trace=trace,
+            approval_token=str(approval_token) if approval_token else None,
+            experiment=str(experiment) if experiment else None,
         )
 
     def _operation_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -441,9 +463,8 @@ def _compat_constraints(
 def _response_schema_from_format(response_format: Any) -> Any:
     if response_format is None:
         return None
-    if isinstance(response_format, dict):
-        if response_format.get("type") in {"json_schema", "json_object"}:
-            return response_format
+    if isinstance(response_format, dict) and response_format.get("type") in {"json_schema", "json_object"}:
+        return response_format
     return response_format
 
 
@@ -666,6 +687,7 @@ def _crupier_metadata(result: CrupierResult) -> CompatObject:
         trace=trace,
         warnings=list(result.warnings),
         provider_metadata=dict(result.provider_metadata),
+        experiment=result.experiment.to_dict() if result.experiment else None,
     )
 
 

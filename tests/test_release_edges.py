@@ -8,7 +8,7 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
-import crupier.release as release
+from crupier import release
 
 
 class _Response:
@@ -463,7 +463,7 @@ def test_installed_init_smoke_handles_non_json_route(tmp_path: Path, monkeypatch
 def test_release_report_formatter_is_stable_json() -> None:
     report = release.ReleaseCheckReport(
         project="demo",
-        version="0.4.0",
+        version="0.5.0",
         checks=[release.ReleaseCheck(id="ready", status="pass", summary="Ready")],
     )
 

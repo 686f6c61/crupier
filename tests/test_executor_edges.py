@@ -605,3 +605,26 @@ def test_executor_parallel_panel_propagates_execution_limit(tmp_path):
             _trace(),
             dry_run=False,
         )
+
+
+def test_request_can_force_sequential_panel_execution(tmp_path, monkeypatch):
+    executor = RouteExecutor(_config(tmp_path, parallel=True))
+    request = RequestEnvelope(task="x", constraints={"allow_parallel": False})
+    calls = []
+
+    def run_sequential(request, panel_models, trace, raw_outputs, budget):
+        calls.append((request.constraints["allow_parallel"], panel_models))
+        return []
+
+    monkeypatch.setattr(executor, "_run_panel_models_sequential", run_sequential)
+
+    result = executor._run_panel_models(
+        request,
+        ["openai:a", "openai:b"],
+        _trace(),
+        [],
+        _budget(executor, request),
+    )
+
+    assert result == []
+    assert calls == [(False, ["openai:a", "openai:b"])]

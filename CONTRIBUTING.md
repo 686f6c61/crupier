@@ -70,9 +70,9 @@ The command must finish with `7/7` cases passing. Its report is local evidence o
 Before opening a PR, run:
 
 ```bash
-python -m pytest
-python -m pytest --cov=crupier --cov-fail-under=95
-python -m ruff check src tests
+python -m pytest -q
+python -m pytest -q --cov=crupier --cov-report=term --cov-fail-under=95
+python -m ruff check src tests examples
 python -m mypy src/crupier
 python -m pip_audit --skip-editable --progress-spinner off
 crupier release check
@@ -82,7 +82,7 @@ For release-facing changes, also run:
 
 ```bash
 crupier release check --strict-public
-crupier release check --strict-public --verify-project-urls --check-pypi-name
+crupier release check --strict-public --verify-project-urls --check-pypi-name --allow-existing-pypi-project
 ```
 
 `--strict-public` fails if real public `[project.urls]` are missing.
@@ -102,7 +102,8 @@ Before changing repository visibility to public, keep the public surface focused
 - Issues enabled; wiki and projects disabled unless there is an active maintainer workflow for them.
 - GitHub topics set for AI, agents, LLM routing, orchestration, and Python discoverability.
 - Pull requests merged with squash commits and head branches deleted after merge.
-- Dependabot security updates enabled and unpaused for dependency vulnerability remediation.
+- GitHub dependency alerts and private vulnerability reporting enabled.
+- No `.github/dependabot.yml`; automated dependency-update pull requests are intentionally disabled.
 - Protect `main` after the final single release commit is accepted: require the CI workflow, require pull-request review for public changes, and disallow force pushes.
 - Private vulnerability reporting enabled once GitHub exposes it for the public repository.
 - Secret scanning and push protection enabled once available for the repository visibility/account.
@@ -110,21 +111,21 @@ Before changing repository visibility to public, keep the public surface focused
 After the visibility change, rerun:
 
 ```bash
-crupier release check --strict-public --verify-project-urls --check-pypi-name
+crupier release check --strict-public --verify-project-urls --check-pypi-name --allow-existing-pypi-project
 crupier release check --strict-public --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference
 ```
 
-Publish `0.4.0` from a GitHub Release tagged `v0.4.0` or `0.4.0` only after
+Publish `0.5.0` from a GitHub Release tagged `v0.5.0` or `0.5.0` only after
 PyPI trusted publishing is configured for this repository and the `pypi`
 environment. The publish workflow checks the release tag against the package
 version before building or uploading distributions. Manual workflow dispatch
-must provide `version=0.4.0` and `confirm_publish=true`; use it only to retry an
+must provide `version=0.5.0` and `confirm_publish=true`; use it only to retry an
 intentional release operation.
 The workflow accepts the existing PyPI project for maintenance releases after
 the first upload has established ownership.
 
 ## Release Discipline
 
-Crupier public releases use final numeric versions such as `0.4.0`. Do not
+Crupier public releases use final numeric versions such as `0.5.0`. Do not
 publish non-final, development, or local build versions unless the release
 policy is intentionally changed.

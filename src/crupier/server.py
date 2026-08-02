@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Iterator
 from email import policy
 from email.parser import BytesParser
-from ipaddress import ip_address
-from collections.abc import Iterator
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from ipaddress import ip_address
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -17,6 +17,7 @@ from uuid import uuid4
 from .client import Crupier
 from .compat.openai import OpenAI
 from .errors import (
+    CrupierApprovalRequired,
     CrupierBudgetExceededError,
     CrupierConfigError,
     CrupierError,
@@ -96,12 +97,12 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
     browser_origin: str | None = None
     request_body_limit: int = 10_000_000
 
-    def do_OPTIONS(self) -> None:  # noqa: N802 - stdlib handler API
+    def do_OPTIONS(self) -> None:
         self.send_response(HTTPStatus.NO_CONTENT)
         self._send_common_headers("application/json")
         self.end_headers()
 
-    def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+    def do_GET(self) -> None:
         path = self._request_path()
         if path in {"/health", "/v1/health"}:
             self._write_json({"ok": True, "service": "crupier", "compat": "openai"})
@@ -111,13 +112,15 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
             return
         self._write_error(HTTPStatus.NOT_FOUND, f"Unknown endpoint {path!r}.", error_type="invalid_request_error")
 
-    def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+    def do_POST(self) -> None:
         try:
             path = self._request_path()
             if path in {"/v1/audio/transcriptions", "/v1/images/edits"}:
                 payload = self._read_multipart()
             else:
                 payload = self._read_json()
+            if path in {"/v1/responses", "/v1/chat/completions"}:
+                self._apply_control_headers(payload)
             if path == "/v1/responses":
                 self._handle_response(payload)
             elif path == "/v1/chat/completions":
@@ -181,7 +184,7 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         if "messages" not in payload:
             raise ValueError("Missing required parameter: 'messages'.")
         if not isinstance(payload["messages"], list):
-            raise ValueError("Parameter 'messages' must be a list.")
+            raise ValueError("Parameter 'messages' must be a list.")  # noqa: TRY004 - public API error contract
         stream = bool(payload.get("stream", False))
         result = self.client.chat.completions.create(**payload)
         if stream:
@@ -228,6 +231,14 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         result = self.client.audio.transcriptions.create(**payload)
         self._write_json(_plain(result))
 
+    def _apply_control_headers(self, payload: dict[str, Any]) -> None:
+        experiment = self.headers.get("x-crupier-experiment")
+        approval_token = self.headers.get("x-crupier-approval")
+        if experiment and "experiment" not in payload:
+            payload["experiment"] = experiment
+        if approval_token and "approval_token" not in payload:
+            payload["approval_token"] = approval_token
+
     def _request_path(self) -> str:
         return urlparse(self.path).path
 
@@ -238,7 +249,7 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError(f"Invalid JSON: {exc}") from exc
         if not isinstance(data, dict):
-            raise ValueError("JSON request body must be an object.")
+            raise ValueError("JSON request body must be an object.")  # noqa: TRY004 - public API error contract
         return data
 
     def _read_multipart(self) -> dict[str, Any]:
@@ -333,9 +344,9 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
     def _write_sse_event(self, event: Any) -> None:
         payload = _plain(event)
         if isinstance(payload, dict) and isinstance(payload.get("type"), str):
-            self.wfile.write(f"event: {payload['type']}\n".encode("utf-8"))
+            self.wfile.write(f"event: {payload['type']}\n".encode())
         data = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-        self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
+        self.wfile.write(f"data: {data}\n\n".encode())
 
     def _write_crupier_error(self, exc: CrupierError) -> None:
         status, error_type, code = _error_contract(exc)
@@ -367,7 +378,10 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         if self.browser_origin:
             self.send_header("access-control-allow-origin", self.browser_origin)
             self.send_header("access-control-allow-methods", "GET, POST, OPTIONS")
-            self.send_header("access-control-allow-headers", "authorization, content-type")
+            self.send_header(
+                "access-control-allow-headers",
+                "authorization, content-type, x-crupier-approval, x-crupier-experiment",
+            )
             if self.browser_origin != "*":
                 self.send_header("vary", "Origin")
 
@@ -375,7 +389,7 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         request_id = getattr(self, "_crupier_request_id", None)
         if request_id is None:
             request_id = f"req_{uuid4().hex[:24]}"
-            setattr(self, "_crupier_request_id", request_id)
+            self._crupier_request_id = request_id
         return request_id
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -446,6 +460,8 @@ def _audio_content_type(response_format: str) -> str:
 
 
 def _error_contract(exc: Exception) -> tuple[HTTPStatus, str, str]:
+    if isinstance(exc, CrupierApprovalRequired):
+        return HTTPStatus.CONFLICT, "invalid_request_error", "approval_required"
     if isinstance(exc, CrupierProviderAuthError):
         return HTTPStatus.UNAUTHORIZED, "authentication_error", "invalid_api_key"
     if isinstance(exc, CrupierProviderRateLimitError):
@@ -481,7 +497,7 @@ def _openai_error_payload(exc: Exception) -> dict[str, Any]:
         error_type = "server_error"
         code = "internal_error"
         message = "Internal server error."
-    return {
+    payload: dict[str, Any] = {
         "error": {
             "message": _sanitize_error_message(message),
             "type": error_type,
@@ -489,6 +505,12 @@ def _openai_error_payload(exc: Exception) -> dict[str, Any]:
             "code": code,
         }
     }
+    if isinstance(exc, CrupierApprovalRequired):
+        payload["error"]["crupier"] = {
+            "approval_id": exc.approval_id,
+            "trace_id": exc.trace_id,
+        }
+    return payload
 
 
 _SECRET_PATTERNS = (

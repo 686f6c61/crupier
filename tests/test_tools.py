@@ -1,8 +1,12 @@
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
-from crupier.errors import CrupierModelUnsupportedError, CrupierRouteValidationError, CrupierToolApprovalRequired
+from crupier.errors import (
+    CrupierModelUnsupportedError,
+    CrupierRouteValidationError,
+    CrupierToolApprovalRequired,
+)
 from crupier.models import RequestEnvelope
 from crupier.tools import (
     ToolCallRequest,
@@ -25,7 +29,7 @@ def test_normalize_callable_builds_schema_from_signature():
         ratio: float = 1.0,
         enabled: bool = False,
         tags: list = (),
-        payload: dict = None,
+        payload: dict = None,  # noqa: RUF013 - exercises legacy callable schema inference
         label="default",
         **extras,
     ):
@@ -221,7 +225,7 @@ def test_execute_tool_plan_skips_completed_execution_from_previous_round():
         (
             [ToolSpec(name="missing", handler=lambda: None, requires_approval=True)],
             RequestEnvelope(task="x"),
-            "requires approval",
+            "requires a granted approval token",
             CrupierToolApprovalRequired,
         ),
         (
@@ -241,20 +245,35 @@ def test_execute_tool_plan_enforces_catalog_allowlist_approval_and_handler(
 
 def test_execute_tool_plan_honors_approval_modes_and_validates_constraints():
     tools = [ToolSpec(name="write", handler=lambda: "ok", side_effects=True)]
+    approval_metadata = {"_crupier_approval": {"approval_id": "apr_test"}}
 
     approved = execute_tool_plan(
         [ToolCallRequest(name="write")],
         tools,
-        RequestEnvelope(task="x", constraints={"approved_tools": "write"}),
+        RequestEnvelope(
+            task="x",
+            constraints={"approved_tools": "write"},
+            metadata=approval_metadata,
+        ),
     )
     approve_all = execute_tool_plan(
         [ToolCallRequest(name="write")],
         tools,
-        RequestEnvelope(task="x", constraints={"approve_tool_calls": True, "require_approval_for": ["write"]}),
+        RequestEnvelope(
+            task="x",
+            constraints={"approve_tool_calls": True, "require_approval_for": ["write"]},
+            metadata=approval_metadata,
+        ),
     )
 
     assert approved[0].status == "completed"
     assert approve_all[0].requires_approval is True
+    with pytest.raises(CrupierToolApprovalRequired, match="granted approval token"):
+        execute_tool_plan(
+            [ToolCallRequest(name="write")],
+            tools,
+            RequestEnvelope(task="x", constraints={"approve_tool_calls": True}),
+        )
     with pytest.raises(CrupierModelUnsupportedError, match="string or list of names"):
         execute_tool_plan(
             [ToolCallRequest(name="write")],
@@ -294,7 +313,7 @@ def test_tool_execution_serializes_provider_objects_and_omits_none():
 
     class Legacy:
         def to_dict(self):
-            return {"at": datetime(2026, 7, 15, 12, tzinfo=timezone.utc), "items": (1, 2)}
+            return {"at": datetime(2026, 7, 15, 12, tzinfo=UTC), "items": (1, 2)}
 
     modern = ToolExecution("a", "modern", {}, "completed", result=Modern()).to_dict()
     legacy = ToolExecution("b", "legacy", {}, "completed", result=Legacy()).to_dict()

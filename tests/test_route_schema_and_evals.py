@@ -1,12 +1,12 @@
 import json
 
 from crupier import Crupier
+from crupier.cli import main
 from crupier.config import CrupierConfig
 from crupier.errors import CrupierRouteValidationError
 from crupier.evals import CompareVariant, RoutingEvalRunner, evaluate_expectations
 from crupier.models import CostEstimate, RoutePlan, RouteStep
 from crupier.route_schema import validate_route_plan_shape
-from crupier.cli import main
 
 
 def make_config(tmp_path):

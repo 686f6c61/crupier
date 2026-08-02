@@ -1,15 +1,17 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from time import sleep
+
+import pytest
 
 from crupier import Crupier
 from crupier.adapters import AdapterResponse
 from crupier.config import CrupierConfig
 from crupier.errors import (
+    CrupierApprovalRequired,
     CrupierBudgetExceededError,
     CrupierExecutionLimitError,
     CrupierProviderRateLimitError,
     CrupierProviderUnavailableError,
-    CrupierToolApprovalRequired,
 )
 
 
@@ -88,6 +90,44 @@ def test_real_single_uses_injected_adapter(tmp_path):
     assert result.trace.provider_calls[0]["provider"] == "openai"
     assert result.cost.estimated_usd > 0
     assert result.cost.actual_usd is None
+
+
+def test_live_execution_requires_and_records_human_approval(tmp_path):
+    adapter = FakeAdapter("openai")
+    client = Crupier(
+        make_config(tmp_path, allow=["openai:gpt-5.4-mini"]),
+        adapters={"openai": adapter},
+        approval_reviewer_verifier=lambda reviewer, context: {
+            "verified": True,
+            "subject": reviewer,
+            "issuer": "test",
+        },
+    )
+
+    with pytest.raises(CrupierApprovalRequired, match="requires human approval") as pending:
+        client.deal(
+            "Apply a risky change",
+            constraints={"requires_human_approval": True},
+            dry_run=False,
+        )
+    assert adapter.calls == []
+
+    approval = client.approvals.get(pending.value.approval_id)
+    granted = client.approvals.grant(
+        approval.approval_id,
+        reviewer="test-reviewer",
+        ttl_s=60,
+    )
+    assert granted.token is not None
+
+    result = client.execute_approved(granted.token, trace="summary")
+
+    assert result.route.requires_user_confirmation is True
+    assert result.provider_metadata["human_approval"] == {"required": True, "granted": True}
+    assert result.provider_metadata["approval"]["approval_id"] == approval.approval_id
+    assert result.provider_metadata["approval"]["reviewer_verified"] is True
+    assert client.approvals.get(approval.approval_id).status == "consumed"
+    assert len(adapter.calls) == 1
 
 
 def test_forced_model_bypasses_model_orchestrator_and_uses_one_call(tmp_path):
@@ -547,7 +587,7 @@ def test_tool_final_call_respects_live_call_budget(tmp_path):
 def test_tool_results_are_json_safe_and_bounded(tmp_path):
     def inspect_clock():
         return {
-            "at": datetime(2026, 7, 14, tzinfo=timezone.utc),
+            "at": datetime(2026, 7, 14, tzinfo=UTC),
             "payload": "x" * 2000,
         }
 
@@ -626,12 +666,63 @@ def test_real_tool_execution_blocks_sensitive_tool_without_approval(tmp_path):
 
     try:
         client.deal("Write a file", tools=[tool], dry_run=False)
-    except CrupierToolApprovalRequired as exc:
-        assert "requires approval" in str(exc)
+    except CrupierApprovalRequired as exc:
+        assert exc.approval_id.startswith("apr_")
     else:
         raise AssertionError("sensitive tool should require approval")
 
     assert called["value"] is False
+    assert adapter.calls == []
+
+
+def test_sensitive_tool_executes_only_after_frozen_route_approval(tmp_path):
+    writes = []
+
+    def write_file(path: str, content: str):
+        writes.append((path, content))
+        return {"path": path, "bytes": len(content)}
+
+    tool = {
+        "name": "write_file",
+        "description": "Write a file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "content"],
+        },
+        "handler": write_file,
+        "requires_approval": True,
+    }
+    adapter = FakeAdapter(
+        "openai",
+        outputs=[
+            '{"tool_calls":[{"name":"write_file","arguments":{"path":"x.txt","content":"hello"}}]}',
+            '{"tool_calls":[],"final":"written"}',
+        ],
+    )
+    client = Crupier(
+        make_config(tmp_path, allow=["openai:gpt-5.4-mini"]),
+        adapters={"openai": adapter},
+    )
+
+    with pytest.raises(CrupierApprovalRequired) as pending:
+        client.deal("Write a file", tools=[tool], dry_run=False)
+    granted = client.approvals.grant(
+        pending.value.approval_id,
+        reviewer="ana",
+        ttl_s=60,
+    )
+    assert granted.token is not None
+
+    result = client.execute_approved(granted.token, tools=[tool], trace="summary")
+
+    assert result.output_text == "written"
+    assert writes == [("x.txt", "hello")]
+    assert result.provider_metadata["approval"]["approval_id"] == pending.value.approval_id
+    assert len(adapter.calls) == 2
 
 
 def test_real_tool_execution_skips_duplicate_idempotency_key(tmp_path):
@@ -644,10 +735,12 @@ def test_real_tool_execution_skips_duplicate_idempotency_key(tmp_path):
     adapter = FakeAdapter(
         "openai",
         outputs=[
-            '{"tool_calls":['
-            '{"name":"lookup_user","arguments":{"name":"Ada"}},'
-            '{"name":"lookup_user","arguments":{"name":"Ada"}}'
-            "]}",
+            (
+                '{"tool_calls":['
+                '{"name":"lookup_user","arguments":{"name":"Ada"}},'
+                '{"name":"lookup_user","arguments":{"name":"Ada"}}'
+                "]}"
+            ),
             "Ada is usr_123.",
         ],
     )

@@ -5,10 +5,11 @@ from __future__ import annotations
 import io
 import json
 import wave
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
-from datetime import date
+from datetime import UTC, datetime
 from time import perf_counter
-from typing import Any, Iterable
+from typing import Any
 
 from .adapters import ProviderAdapter
 from .capabilities import capability_evidence
@@ -574,7 +575,7 @@ class CapabilityProbeRunner:
         )
 
     def _apply_results(self, card: CapabilityCard, results: list[ProbeResult]) -> CapabilityCard:
-        today = date.today().isoformat()
+        today = datetime.now(UTC).date().isoformat()
         card.last_updated = today
         for result in results:
             capability = str(result.metadata.get("capability", result.probe))

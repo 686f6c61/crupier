@@ -5,8 +5,18 @@ import pytest
 from crupier import Crupier
 from crupier.adapters import AdapterResponse, ProviderModel
 from crupier.config import CrupierConfig, PolicyRule, ProviderSettings
-from crupier.errors import CrupierPolicyError, CrupierProviderAuthError, CrupierRouteValidationError
-from crupier.models import CapabilityCard, ModelRef, RequestEnvelope, RoutePlan, RouteStep
+from crupier.errors import (
+    CrupierPolicyError,
+    CrupierProviderAuthError,
+    CrupierRouteValidationError,
+)
+from crupier.models import (
+    CapabilityCard,
+    ModelRef,
+    RequestEnvelope,
+    RoutePlan,
+    RouteStep,
+)
 from crupier.orchestrator import DeterministicOrchestrator, ModelOrchestrator
 from crupier.planner import RoutePlanner
 from crupier.policy import PolicyEngine
@@ -335,8 +345,19 @@ def test_profile_strategy_rules_override_orchestrated_strategy(tmp_path):
     ]
     client = Crupier(config)
 
-    short = client.deal("Use one tool", mode="agentic", tools=[object()])
-    long = client.deal("Use two tools", mode="agentic", tools=[object(), object()])
+    short = client.deal(
+        "Use one tool",
+        mode="agentic",
+        tools=[{"name": "lookup", "description": "Look up a record."}],
+    )
+    long = client.deal(
+        "Use two tools",
+        mode="agentic",
+        tools=[
+            {"name": "lookup", "description": "Look up a record."},
+            {"name": "summarize", "description": "Summarize a record."},
+        ],
+    )
 
     assert short.route.strategy == "single"
     assert long.route.strategy == "critique_repair"
@@ -361,6 +382,42 @@ def test_force_model_rejects_model_outside_allowlist(tmp_path):
         assert "not allowed" in str(exc)
     else:
         raise AssertionError("forced disallowed model should fail")
+
+
+def test_requires_tools_is_enforced_before_routing(tmp_path):
+    client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
+
+    with pytest.raises(CrupierRouteValidationError, match="requires at least one tool"):
+        client.deal("Review code", constraints={"requires_tools": True})
+
+
+def test_human_approval_requirement_is_visible_in_dry_run(tmp_path):
+    client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
+
+    result = client.deal(
+        "Review a high-risk change",
+        constraints={"requires_human_approval": True},
+        trace="summary",
+    )
+
+    assert result.route.requires_user_confirmation is True
+    assert result.provider_metadata["human_approval"] == {"required": True, "granted": False}
+    assert any("Human approval is required" in warning for warning in result.warnings)
+    assert result.trace is not None
+    assert result.trace.final_quality_signals["human_approval_required"] is True
+
+
+def test_unknown_constraint_is_visible_or_strictly_rejected(tmp_path):
+    client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
+
+    result = client.deal("Route this", constraints={"application_gate": "review"})
+
+    assert any("application_gate" in warning for warning in result.warnings)
+    with pytest.raises(CrupierRouteValidationError, match="application_gate"):
+        client.deal(
+            "Route this",
+            constraints={"application_gate": "review", "strict_constraints": True},
+        )
 
 
 def test_route_planner_builds_orchestrator_context(tmp_path):

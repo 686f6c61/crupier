@@ -8,10 +8,11 @@ use before turning on real execution:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from _example_support import offline_client, print_route
+
 from crupier import Crupier, CrupierResult
 
 
@@ -24,6 +25,7 @@ class WorkItem:
     task: str
     payload: dict[str, Any]
     constraints: dict[str, Any]
+    tools: list[dict[str, Any]] = field(default_factory=list)
 
 
 class ExistingAIBoundary:
@@ -38,6 +40,7 @@ class ExistingAIBoundary:
             input=item.payload,
             mode=item.mode,
             constraints=item.constraints,
+            tools=item.tools,
             trace="summary",
             dry_run=True,
         )
@@ -68,7 +71,7 @@ def main() -> None:
                 "account_segment": "startup",
             },
             constraints={
-                "max_latency_ms": 2500,
+                "max_latency_ms": 6000,
                 "max_cost_usd": 0.01,
             },
         ),
@@ -109,6 +112,16 @@ def main() -> None:
                 "requires_human_approval": True,
                 "max_cost_usd": 0.35,
             },
+            tools=[
+                {
+                    "name": "read_changed_file",
+                    "description": "Read an approved changed file from the checkout.",
+                },
+                {
+                    "name": "run_targeted_tests",
+                    "description": "Run an approved targeted test command.",
+                },
+            ],
         ),
         WorkItem(
             name="cost_sensitive_batch",

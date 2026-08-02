@@ -168,8 +168,8 @@ def test_openai_probe_and_param_repair_map_errors():
     class RepairFails:
         def create(self, **payload):
             if "temperature" in payload:
-                raise Exception("Unsupported parameter: 'temperature'")
-            raise Exception("still broken")
+                raise RuntimeError("Unsupported parameter: 'temperature'")
+            raise RuntimeError("still broken")
 
     adapter._client = SimpleNamespace(responses=RepairFails())
     with pytest.raises(CrupierProviderUnavailableError, match="still broken"):
@@ -322,8 +322,8 @@ def test_anthropic_probe_and_param_repair_map_errors():
     class RepairFails:
         def create(self, **payload):
             if "temperature" in payload:
-                raise Exception("temperature is deprecated")
-            raise Exception("still broken")
+                raise RuntimeError("temperature is deprecated")
+            raise RuntimeError("still broken")
 
     adapter._client = SimpleNamespace(messages=RepairFails())
     with pytest.raises(CrupierProviderUnavailableError, match="still broken"):

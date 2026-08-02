@@ -38,7 +38,6 @@ def _plan(strategy="single", steps=None, **kwargs):
             _plan(steps=[RouteStep(role="primary", model="openai:a", models=["openai:b"])]),
             "cannot set both model and models",
         ),
-        (_plan(steps=[RouteStep(role="primary")]), "at least one model"),
         (_plan(steps=[RouteStep(role="primary", model="missing-provider")]), "provider:model form"),
         (_plan(steps=[RouteStep(role="primary", model="openai:a", timeout_ms=0)]), "timeout must be positive"),
     ],

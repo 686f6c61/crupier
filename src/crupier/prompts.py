@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-
 ORCHESTRATOR_ROUTE_PLAN_PROMPT_VERSION = "orchestrator.route_plan.v3"
 OPERATION_CLASSIFIER_PROMPT_VERSION = "orchestrator.operation_classifier.v1"
 TOOL_CRITIQUE_PROMPT_VERSION = "executor.tool_critique.v1"

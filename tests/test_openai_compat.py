@@ -1,7 +1,7 @@
 import sys
 from types import SimpleNamespace
 
-from crupier import Crupier, install
+from crupier import Crupier, CrupierResult, install
 from crupier.adapters import AdapterResponse, EmbeddingResponse, OperationResponse
 from crupier.compat.openai import OpenAI
 from crupier.config import CrupierConfig
@@ -91,6 +91,38 @@ def make_client(tmp_path, *, dry_run=False):
     adapter = FakeAdapter()
     crupier = Crupier(config, adapters={"openai": adapter})
     return OpenAI(crupier=crupier, dry_run=dry_run), adapter
+
+
+def test_compat_forwards_control_options_constraints_and_metadata():
+    class SpyCrupier:
+        def __init__(self):
+            self.kwargs = None
+
+        def deal(self, **kwargs):
+            self.kwargs = kwargs
+            return CrupierResult(output_text="ok")
+
+    spy = SpyCrupier()
+    client = OpenAI(crupier=spy)
+
+    response = client.responses.create(
+        input="hello",
+        model="gpt-5.4-mini",
+        crupier={
+            "experiment": "model-rollout",
+            "approval_token": "apr_test.secret-value-long-enough",
+            "constraints": {"max_cost_usd": 0.02},
+        },
+        constraints={"max_latency_ms": 1500},
+        metadata={"session_id": "ses_123"},
+    )
+
+    assert spy.kwargs["experiment"] == "model-rollout"
+    assert spy.kwargs["approval_token"] == "apr_test.secret-value-long-enough"
+    assert spy.kwargs["metadata"] == {"session_id": "ses_123"}
+    assert spy.kwargs["constraints"]["max_cost_usd"] == 0.02
+    assert spy.kwargs["constraints"]["max_latency_ms"] == 1500
+    assert response.crupier.experiment is None
 
 
 def make_specialized_client(tmp_path):

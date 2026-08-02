@@ -35,7 +35,7 @@ def main() -> None:
         },
         mode="fast",
         constraints={
-            "max_latency_ms": 2500,
+            "max_latency_ms": 6000,
             "max_cost_usd": 0.01,
             "response_schema_name": "support_reply",
         },
@@ -49,6 +49,7 @@ def main() -> None:
             "required": ["reply", "escalation", "confidence"],
         },
         dry_run=True,
+        trace="summary",
     )
 
     print_route("support_triage", result, extra={"ticket_id": "SUP-18429"})

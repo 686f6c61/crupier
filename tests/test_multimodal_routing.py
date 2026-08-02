@@ -133,11 +133,18 @@ def test_real_execution_extracts_text_file_context(tmp_path):
 
 
 def test_real_execution_extracts_pdf_text_context(tmp_path, monkeypatch):
-    import crupier.multimodal as multimodal
+    from crupier import multimodal
 
     pdf = tmp_path / "contract.pdf"
     pdf.write_bytes(b"%PDF-1.4 fake enough for the monkeypatched extractor")
-    monkeypatch.setattr(multimodal, "_extract_pdf_text", lambda asset, max_file_bytes: "PDF passphrase: BERYL-42")
+    monkeypatch.setattr(
+        multimodal,
+        "_extract_pdf_text",
+        lambda asset, max_file_bytes, max_chars, max_pages: (
+            "PDF passphrase: BERYL-42",
+            False,
+        ),
+    )
     adapter = FakeVisionAdapter()
     client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]), adapters={"openai": adapter})
 
@@ -223,7 +230,7 @@ def test_real_execution_blocks_explicit_unimplemented_audio_transcription(tmp_pa
         raise AssertionError("audio transcription should be explicit unsupported until implemented")
 
 
-def test_real_execution_blocks_unimplemented_image_ocr(tmp_path):
+def test_real_execution_requires_an_ocr_adapter_for_extracted_images(tmp_path):
     image = tmp_path / "scan.png"
     image.write_bytes(b"fake image")
     client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
@@ -231,38 +238,60 @@ def test_real_execution_blocks_unimplemented_image_ocr(tmp_path):
     try:
         client.deal("OCR this scan", files=[image], constraints={"file_strategy": "extract"}, dry_run=False)
     except CrupierModelUnsupportedError as exc:
-        assert "image" in str(exc)
-        assert "ocr_text" in str(exc)
+        assert "OCRAdapter" in str(exc)
     else:
-        raise AssertionError("image OCR should be explicit unsupported until implemented")
+        raise AssertionError("image OCR should require an explicit adapter")
 
 
-def test_real_execution_blocks_unimplemented_spreadsheet_parsing(tmp_path):
-    sheet = tmp_path / "ledger.xlsx"
-    sheet.write_bytes(b"fake spreadsheet")
-    client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
+def test_real_execution_extracts_csv_rows(tmp_path):
+    sheet = tmp_path / "ledger.csv"
+    sheet.write_text("item,amount\nhosting,42.50\nsupport,15.00\n", encoding="utf-8")
+    adapter = FakeVisionAdapter()
+    client = Crupier(
+        make_config(tmp_path, allow=["openai:gpt-5.4-mini"]),
+        adapters={"openai": adapter},
+    )
 
-    try:
-        client.deal("Summarize this ledger", files=[sheet], dry_run=False)
-    except CrupierModelUnsupportedError as exc:
-        assert "spreadsheet" in str(exc)
-        assert "table_rows" in str(exc)
-    else:
-        raise AssertionError("spreadsheet parsing should be explicit unsupported until implemented")
+    result = client.deal("Summarize this ledger", files=[sheet], dry_run=False, trace="summary")
+
+    assert result.output_text == "image says total 12.50"
+    assert '"item": "hosting"' in adapter.calls[0]["prompt"]
+    assert '"amount": "42.50"' in adapter.calls[0]["prompt"]
+    assert result.route.input_plan["files"]["representations"][0]["representation"] == "table_rows"
+    assert result.trace is not None
+    assert result.trace.final_quality_signals["file_context"]["files"][0]["extraction"][
+        "extractor"
+    ].startswith("csv:")
 
 
-def test_real_execution_blocks_unimplemented_document_extraction(tmp_path):
+def test_real_execution_extracts_docx_text_and_tables(tmp_path):
+    from docx import Document
+
     document = tmp_path / "brief.docx"
-    document.write_bytes(b"fake docx")
-    client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
+    source = Document()
+    source.add_heading("Release brief", level=1)
+    source.add_paragraph("Rollback owner: Ana")
+    table = source.add_table(rows=2, cols=2)
+    table.rows[0].cells[0].text = "risk"
+    table.rows[0].cells[1].text = "owner"
+    table.rows[1].cells[0].text = "billing"
+    table.rows[1].cells[1].text = "Ana"
+    source.save(document)
+    adapter = FakeVisionAdapter()
+    client = Crupier(
+        make_config(tmp_path, allow=["openai:gpt-5.4-mini"]),
+        adapters={"openai": adapter},
+    )
 
-    try:
-        client.deal("Summarize this brief", files=[document], dry_run=False)
-    except CrupierModelUnsupportedError as exc:
-        assert "document" in str(exc)
-        assert "extracted_text" in str(exc)
-    else:
-        raise AssertionError("document extraction should be explicit unsupported until implemented")
+    result = client.deal("Summarize this brief", files=[document], dry_run=False, trace="summary")
+
+    assert result.output_text == "image says total 12.50"
+    assert "Rollback owner: Ana" in adapter.calls[0]["prompt"]
+    assert '"risk": "billing"' in adapter.calls[0]["prompt"]
+    assert result.trace is not None
+    assert result.trace.final_quality_signals["file_context"]["files"][0]["extraction"][
+        "extractor"
+    ] == "python-docx"
 
 
 def test_file_routing_plan_serializes_without_uri_by_default():

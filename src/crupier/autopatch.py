@@ -30,7 +30,7 @@ def install(
 def _patch_openai(**client_kwargs: Any) -> bool:
     try:
         import openai  # type: ignore[import-not-found]
-    except Exception:
+    except ImportError:
         return False
 
     from .compat.openai import OpenAI
@@ -40,5 +40,5 @@ def _patch_openai(**client_kwargs: Any) -> bool:
             merged = {**client_kwargs, **kwargs}
             super().__init__(**merged)
 
-    setattr(openai, "OpenAI", PatchedOpenAI)
+    setattr(openai, "OpenAI", PatchedOpenAI)  # noqa: B010 - intentional SDK monkeypatch
     return True

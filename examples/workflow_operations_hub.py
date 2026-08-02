@@ -62,7 +62,7 @@ def main() -> None:
                 "message": "The invoice doubled after we removed seats. We need this fixed today.",
                 "contract_value_usd": 84_000,
             },
-            constraints={"max_latency_ms": 2500, "max_cost_usd": 0.02},
+            constraints={"max_latency_ms": 6000, "max_cost_usd": 0.02},
             response_schema=_risk_schema(),
         ),
         WorkflowRequest(
@@ -97,9 +97,9 @@ def main() -> None:
             ],
         ),
         WorkflowRequest(
-            name="private_policy_summary",
-            mode="private",
-            task="Summarize a sensitive internal policy without leaving the configured private route when possible.",
+            name="sensitive_policy_summary",
+            mode="quality",
+            task="Summarize a sensitive internal policy using the configured BYOK providers.",
             payload={"document_class": "internal_policy", "contains_pii": True, "pages": 12},
             constraints={"max_cost_usd": 0.10, "requires_human_approval": True},
         ),
@@ -125,7 +125,7 @@ def main() -> None:
                 "mode": workflow.mode,
                 "files": len(workflow.files),
                 "tools": len(workflow.tools),
-                "human_review": bool(workflow.constraints.get("requires_human_approval")),
+                "human_review": result.route.requires_user_confirmation,
             },
         )
 

@@ -10,6 +10,7 @@ import crupier.server as server_module
 from crupier import Crupier
 from crupier.config import CrupierConfig
 from crupier.errors import (
+    CrupierApprovalRequired,
     CrupierBudgetExceededError,
     CrupierConfigError,
     CrupierError,
@@ -25,12 +26,12 @@ from crupier.errors import (
     CrupierUpdateRequiresConfirmation,
 )
 from crupier.server import (
-    _OpenAICompatibleHandler,
     _audio_content_type,
     _coerce_form_value,
     _error_contract,
     _is_loopback_bind_host,
     _openai_error_payload,
+    _OpenAICompatibleHandler,
     _plain,
     build_openai_compatible_server,
     serve_openai_compatible,
@@ -334,6 +335,12 @@ def test_audio_content_types(value, expected):
         (CrupierModelUnsupportedError("x"), HTTPStatus.BAD_REQUEST, "invalid_request_error", "model_not_supported"),
         (CrupierBudgetExceededError("x"), HTTPStatus.BAD_REQUEST, "invalid_request_error", "budget_exceeded"),
         (CrupierExecutionLimitError("x"), HTTPStatus.REQUEST_TIMEOUT, "server_error", "execution_limit_exceeded"),
+        (
+            CrupierApprovalRequired("x", approval_id="apr_1", trace_id="trc_1"),
+            HTTPStatus.CONFLICT,
+            "invalid_request_error",
+            "approval_required",
+        ),
         (CrupierToolApprovalRequired("x"), HTTPStatus.BAD_REQUEST, "invalid_request_error", "tool_approval_required"),
         (CrupierStructuredOutputError("x"), HTTPStatus.BAD_REQUEST, "invalid_request_error", "structured_output_error"),
         (CrupierUpdateRequiresConfirmation("x"), HTTPStatus.CONFLICT, "invalid_request_error", "update_requires_confirmation"),
@@ -355,6 +362,50 @@ def test_openai_error_payload_distinguishes_expected_and_unexpected_errors():
     assert expected["error"]["message"] == "Bearer [redacted]"
     assert unexpected["error"]["code"] == "internal_error"
     assert unexpected["error"]["message"] == "Internal server error."
+
+    approval = _openai_error_payload(
+        CrupierApprovalRequired(
+            "approval needed",
+            approval_id="apr_test",
+            trace_id="trc_test",
+        )
+    )
+    assert approval["error"]["crupier"] == {
+        "approval_id": "apr_test",
+        "trace_id": "trc_test",
+    }
+
+
+def test_control_headers_reach_chat_and_response_compat_calls(tmp_path):
+    captured = []
+
+    def callback(server, address):
+        server.RequestHandlerClass.client.responses.create = lambda **kwargs: (
+            captured.append(kwargs) or {"ok": True}
+        )
+        status, _, raw = request(
+            address,
+            "POST",
+            "/v1/responses",
+            body=json.dumps({"input": "hello"}).encode(),
+            headers={
+                "content-type": "application/json",
+                "x-crupier-experiment": "model-rollout",
+                "x-crupier-approval": "apr_test.secret-value-long-enough",
+            },
+        )
+        assert status == HTTPStatus.OK
+        assert json.loads(raw) == {"ok": True}
+
+    run_server(tmp_path, callback)
+
+    assert captured == [
+        {
+            "input": "hello",
+            "experiment": "model-rollout",
+            "approval_token": "apr_test.secret-value-long-enough",
+        }
+    ]
 
 
 def test_request_id_is_stable_per_handler_instance():

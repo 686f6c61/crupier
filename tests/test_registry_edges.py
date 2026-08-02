@@ -5,11 +5,11 @@ from pathlib import Path
 
 import pytest
 
+import crupier.registry as registry_module
 from crupier.adapters import ProviderModel
 from crupier.config import CrupierConfig
 from crupier.errors import CrupierConfigError, CrupierModelUnsupportedError
 from crupier.models import CapabilityCard, ModelRef, UpdateReport
-import crupier.registry as registry_module
 from crupier.registry import ModelRegistry
 
 

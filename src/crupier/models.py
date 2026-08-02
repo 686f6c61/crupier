@@ -35,7 +35,7 @@ class ModelRef:
     alias: str | None = None
 
     @classmethod
-    def parse(cls, value: str) -> "ModelRef":
+    def parse(cls, value: str) -> ModelRef:
         if ":" not in value:
             raise ValueError(f"Model reference must be provider:model, got {value!r}")
         provider, model = value.split(":", 1)
@@ -52,7 +52,7 @@ class ModelRef:
         return cls(provider=provider, model=model, stability=stability)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ModelRef":
+    def from_dict(cls, data: dict[str, Any]) -> ModelRef:
         return cls(
             provider=data["provider"],
             model=data["model"],
@@ -78,7 +78,7 @@ class CostEstimate:
     actual_usd: float | None = None
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any] | None) -> "CostEstimate":
+    def from_dict(cls, data: dict[str, Any] | None) -> CostEstimate:
         if not data:
             return cls()
         return cls(
@@ -132,7 +132,7 @@ class CapabilityCard:
     quality_tier: str = "unknown"
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CapabilityCard":
+    def from_dict(cls, data: dict[str, Any]) -> CapabilityCard:
         model_ref_data = data["model_ref"]
         model_ref = (
             ModelRef.from_dict(model_ref_data)
@@ -203,7 +203,7 @@ class FileAsset:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "FileAsset":
+    def from_dict(cls, data: dict[str, Any]) -> FileAsset:
         return cls(
             kind=str(data.get("kind", "unknown")),
             name=data.get("name"),
@@ -244,7 +244,7 @@ class FileRepresentation:
     warnings: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "FileRepresentation":
+    def from_dict(cls, data: dict[str, Any]) -> FileRepresentation:
         return cls(
             asset_name=data.get("asset_name"),
             kind=str(data.get("kind", "unknown")),
@@ -270,7 +270,7 @@ class FileRoutingPlan:
     warnings: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "FileRoutingPlan":
+    def from_dict(cls, data: dict[str, Any]) -> FileRoutingPlan:
         return cls(
             assets=[FileAsset.from_dict(item) for item in data.get("assets", [])],
             representations=[
@@ -353,7 +353,7 @@ class RouteStep:
     params: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "RouteStep":
+    def from_dict(cls, data: dict[str, Any]) -> RouteStep:
         return cls(
             role=data["role"],
             model=data.get("model"),
@@ -381,7 +381,7 @@ class RoutePlan:
     input_plan: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "RoutePlan":
+    def from_dict(cls, data: dict[str, Any]) -> RoutePlan:
         return cls(
             strategy=data["strategy"],
             steps=[RouteStep.from_dict(step) for step in data.get("steps", [])],
@@ -468,6 +468,25 @@ class DecisionTrace:
 
 
 @dataclass(slots=True)
+class ExperimentObservation:
+    observation_id: str
+    experiment: str
+    traffic: str
+    cohort: str
+    sampled: bool
+    status: str
+    primary: dict[str, Any] = field(default_factory=dict)
+    candidate: dict[str, Any] = field(default_factory=dict)
+    diffs: dict[str, Any] = field(default_factory=dict)
+    checks: dict[str, Any] = field(default_factory=dict)
+    warnings: list[str] = field(default_factory=list)
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return _compact_none(asdict(self))
+
+
+@dataclass(slots=True)
 class CrupierResult:
     output_text: str = ""
     output_json: Any = None
@@ -478,6 +497,7 @@ class CrupierResult:
     latency_ms: int | None = None
     warnings: list[str] = field(default_factory=list)
     provider_metadata: dict[str, Any] = field(default_factory=dict)
+    experiment: ExperimentObservation | None = None
 
     def to_dict(self, *, trace_summary: bool = True) -> dict[str, Any]:
         return {
@@ -490,6 +510,43 @@ class CrupierResult:
             "latency_ms": self.latency_ms,
             "warnings": self.warnings,
             "provider_metadata": self.provider_metadata,
+            "experiment": self.experiment.to_dict() if self.experiment else None,
+        }
+
+
+@dataclass(slots=True)
+class PreparedDeal:
+    request: RequestEnvelope
+    plan: RoutePlan
+    trace: DecisionTrace
+    dry_run: bool
+    warnings: list[str] = field(default_factory=list)
+    planning_calls: list[dict[str, Any]] = field(default_factory=list)
+    execution_budget_snapshot: dict[str, Any] = field(default_factory=dict)
+    started_at: float | None = None
+    execution_budget: Any = field(default=None, repr=False, compare=False)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request": {
+                "task": self.request.task,
+                "input": self.request.input,
+                "messages": self.request.messages,
+                "files": [item.to_dict() for item in self.request.files],
+                "file_plan": self.request.file_plan.to_dict() if self.request.file_plan else None,
+                "mode": self.request.mode,
+                "strategy": self.request.strategy,
+                "constraints": self.request.constraints,
+                "metadata": self.request.metadata,
+                "tenant_id": self.request.tenant_id,
+                "user_id_hash": self.request.user_id_hash,
+            },
+            "plan": self.plan.to_dict(),
+            "trace": self.trace.to_dict(),
+            "dry_run": self.dry_run,
+            "warnings": self.warnings,
+            "planning_calls": self.planning_calls,
+            "execution_budget_snapshot": self.execution_budget_snapshot,
         }
 
 

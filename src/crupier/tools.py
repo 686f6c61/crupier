@@ -11,13 +11,17 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any, Callable
+from typing import Any
 
 from .adapters.common import build_prompt
-from .errors import CrupierModelUnsupportedError, CrupierRouteValidationError, CrupierToolApprovalRequired
+from .errors import (
+    CrupierModelUnsupportedError,
+    CrupierRouteValidationError,
+    CrupierToolApprovalRequired,
+)
 from .models import RequestEnvelope
 
 
@@ -205,7 +209,11 @@ def execute_tool_plan(
     by_name = {tool.name: tool for tool in tools}
     allowed_tools = _name_set(request.constraints.get("allowed_tools"), default=set(by_name))
     approved_tools = _name_set(request.constraints.get("approved_tools"), default=set())
-    approve_all = bool(request.constraints.get("approve_tool_calls", False))
+    approval = request.metadata.get("_crupier_approval")
+    durable_approval = isinstance(approval, dict) and bool(approval.get("approval_id"))
+    approve_all = bool(request.constraints.get("approve_tool_calls", False)) and durable_approval
+    if not durable_approval:
+        approved_tools = set()
     require_approval_for = _name_set(request.constraints.get("require_approval_for"), default=set())
 
     executions: list[ToolExecution] = []
@@ -237,7 +245,7 @@ def execute_tool_plan(
         requires_approval = spec.requires_approval or spec.side_effects or call.name in require_approval_for
         if requires_approval and not (approve_all or call.name in approved_tools):
             raise CrupierToolApprovalRequired(
-                f"Tool {call.name!r} requires approval. Pass constraints.approved_tools or approve_tool_calls."
+                f"Tool {call.name!r} requires a granted approval token bound to the frozen route."
             )
         if spec.handler is None:
             raise CrupierModelUnsupportedError(f"Tool {call.name!r} has no local handler.")

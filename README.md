@@ -9,7 +9,7 @@ It is designed for two situations:
 
 Crupier is a BYOK orchestration layer: it runs with your own provider accounts across OpenAI, Anthropic Claude, Google Gemini, Ollama Cloud, configurable OpenAI-compatible inference servers, optional OpenRouter BYOK, or your own integration boundary. It keeps prompts/responses out of persistent logs by default and routes each request toward the best available model or model family for the task, quality target, latency, cost budget, and project policy.
 
-Current public package version: `0.4.0`.
+Current package source version: `0.5.0`.
 
 ## What It Does
 
@@ -41,6 +41,9 @@ pip install "crupier[google]"
 pip install "crupier[inference-server]"
 pip install "crupier[openrouter]"
 pip install "crupier[pdf]"
+pip install "crupier[spreadsheets]"
+pip install "crupier[documents]"
+pip install "crupier[files]"
 pip install "crupier[all]"
 ```
 
@@ -55,6 +58,9 @@ Optional provider extras:
 | `crupier[inference-server]` | Configurable OpenAI-compatible chat, image-input, and embedding servers. |
 | `crupier[openrouter]` | Optional OpenRouter BYOK adapter through OpenAI-compatible SDK calls. |
 | `crupier[pdf]` | PDF text extraction through `pypdf` for file-context execution. |
+| `crupier[spreadsheets]` | Bounded `.xlsx` extraction through `openpyxl`; CSV and TSV use the standard library. |
+| `crupier[documents]` | Bounded paragraph/table extraction from `.docx` through `python-docx`. |
+| `crupier[files]` | PDF, spreadsheet, and DOCX extraction helpers together. |
 | `crupier[all]` | All runtime provider/file extras. |
 
 ## Create A Project
@@ -121,6 +127,9 @@ python examples/agentic_pr_review.py
 python examples/multimodal_claim_review.py
 python examples/drop_in_agent_boundary.py
 python examples/workflow_operations_hub.py
+python examples/approval_workflow.py
+python examples/session_contract_review.py
+python examples/shadow_canary_rollout.py
 ```
 
 When you are ready to call providers:
@@ -134,6 +143,184 @@ result = crupier.deal(
 )
 
 print(result.output_text)
+```
+
+## Request Constraints
+
+Crupier validates the controls it owns instead of silently treating arbitrary
+dictionary keys as routing policy:
+
+```python
+plan = crupier.deal(
+    task="Review a high-risk repository change.",
+    tools=[
+        {"name": "read_changed_file", "description": "Read an approved repository file."},
+        {"name": "run_targeted_tests", "description": "Run an approved test command."},
+    ],
+    constraints={
+        "requires_tools": True,
+        "requires_human_approval": True,
+        "allow_parallel": False,
+    },
+    dry_run=True,
+    trace="summary",
+)
+
+assert plan.route.requires_user_confirmation is True
+```
+
+- `requires_tools=True` requires at least one entry in `tools=[...]` and filters
+  out models without tool capability.
+- `requires_human_approval=True` produces an inspectable dry-run route and
+  blocks live execution. Approval is a durable workflow bound to the frozen
+  request fingerprint and plan hash; a caller boolean cannot authorize it.
+- `allow_parallel=False` disables parallel execution for that request. Panel
+  and fusion routes then run sequentially; a request cannot bypass a
+  project-level `routing.allow_parallel=false` limit.
+- Unknown constraints are returned in `result.warnings`. Set
+  `strict_constraints=True` to reject them, or use `metadata` for values that
+  belong only to the embedding application.
+
+### Durable approvals
+
+Live approval creates a pending record in `.crupier/state.sqlite3` and raises
+`CrupierApprovalRequired` before provider or tool execution:
+
+```python
+from crupier import CrupierApprovalRequired
+
+try:
+    crupier.deal(
+        "Apply the reviewed deployment.",
+        constraints={"requires_human_approval": True},
+        dry_run=False,
+    )
+except CrupierApprovalRequired as pending:
+    approval = crupier.approvals.grant(
+        pending.approval_id,
+        reviewer="ana",
+        ttl_s=3600,
+        reason="Plan and rollback reviewed.",
+    )
+
+result = crupier.execute_approved(approval.token)
+```
+
+The token is shown once, stored only as a hash, expires, and is consumed before
+the single authorized execution attempt. Local files are content-hashed when
+the plan is frozen; remote files require caller-supplied `metadata.sha256`.
+Changed files, changed tool catalogs, reused tokens, expired approvals, and
+unserializable request values fail closed.
+
+Tools marked `requires_approval` or `side_effects` automatically make the route
+approvable. `approve_tool_calls` and `approved_tools` cannot bypass the durable
+token. For authenticated reviewer identity, construct `Crupier` with an
+`approval_reviewer_verifier`; without that application hook the audit record
+truthfully reports `reviewer_verified=false`.
+
+```bash
+crupier approvals list --status pending
+crupier approvals show trc_...
+crupier approve trc_... --reviewer ana
+export CRUPIER_APPROVAL_TOKEN='apr_...'
+crupier approvals execute
+crupier reject apr_... --reviewer ana --reason "Missing rollback"
+```
+
+### Multi-turn sessions
+
+`CrupierSession` keeps bounded conversation state, route history, cumulative
+cost, and tool idempotency across turns:
+
+```python
+session = crupier.session(
+    mode="agentic",
+    stickiness="compatible",
+    persist=True,
+    max_turns=50,
+    max_history_chars=100_000,
+    max_session_cost_usd=1.00,
+)
+
+r1 = session.deal("Summarize ticket T-42.", input=ticket, dry_run=False)
+r2 = session.deal("Draft the reply.", dry_run=False)
+r3 = session.deal("Now inspect this contract.", files=["contract.csv"], dry_run=False)
+
+print([item.to_dict() for item in session.route_history])
+```
+
+A compatible route is retained only while current policy, capabilities,
+circuit state, explicit strategy, context pressure, files/tools/schema, and
+budget still allow it. A new modality, risk, mode, strategy, or explicit budget
+causes a replan. Persisted sessions use optimistic versions so concurrent
+workers cannot silently overwrite each other.
+
+If a session turn raises `CrupierApprovalRequired`, grant it through
+`crupier.approvals` and resume with
+`session.execute_approved(approval.token)`. The frozen approval carries the
+session id; another session cannot consume it, and the authorized execution is
+recorded in the original session's history and budget.
+
+### Shadow and canary routes
+
+Experiments are named project configuration, not per-request ad hoc model
+overrides:
+
+```toml
+[experiments.support-rollout]
+traffic = "shadow"          # or "canary"
+sample_rate = 0.05
+execution = "async"         # plan_only, sync, async
+candidate_models = ["anthropic:claude-sonnet-4-6"]
+candidate_strategy = "critique_repair"
+sticky_by = "session_id"
+max_shadow_cost_usd = 0.02
+store_outputs = false
+
+[experiments.support-rollout.promotion]
+action = "recommend"        # auto is opt-in
+min_samples = 200
+max_error_rate = 0.02
+max_error_rate_delta = 0.01
+quality_check = "quality_delta"
+require_quality_evaluator = true
+max_cost_ratio = 1.25
+max_p95_latency_ratio = 1.20
+confidence = 0.95
+```
+
+```python
+result = crupier.deal(
+    "Draft a support reply.",
+    input=ticket,
+    metadata={"session_id": session_id},
+    experiment="support-rollout",
+    dry_run=False,
+)
+
+observation = result.experiment
+report = crupier.experiments.report("support-rollout")
+```
+
+Shadow returns the baseline response and contains candidate/evaluator failures;
+canary serves the sampled candidate and falls back to baseline when it fails.
+Sampling is deterministic for the configured sticky key. Outputs are not
+persisted by default: observations store hashes, route/cost/latency/error
+metrics, diffs, checks, and a configuration hash. Side-effecting tools force
+the shadow candidate to `plan_only` unless explicitly enabled.
+
+Promotion uses minimum samples, Wilson error bounds, error delta, external
+quality evidence, cost ratio, p95 latency ratio, and real-execution evidence.
+Non-empty text is not treated as sufficient quality evidence, and `plan_only`
+observations cannot authorize promotion.
+
+```bash
+crupier experiments report support-rollout
+crupier experiments evaluate obs_... --actor ana --checks '{"quality_delta":0.12}'
+crupier experiments pause support-rollout --actor ana
+crupier experiments resume support-rollout --actor ana
+crupier experiments promote support-rollout --actor ana
+crupier experiments rollback support-rollout --actor ana --reason "Latency regression"
 ```
 
 ## Configure Providers
@@ -254,7 +441,7 @@ crupier models show ollama:glm-5.2
 
 Every capability card carries a decision profile with `routing_status`, `lifecycle`, `production_default`, `requires_opt_in`, task skills, modality support, and source evidence. Expensive or narrow models can remain visible without being selected by default. For example, OpenAI `o3`, `o3-pro`, and `o4-mini` are treated as explicit opt-in models rather than Crupier production-default choices.
 
-For `0.4.0`, Crupier treats the provider catalog and the automatic routing set as different things. Provider discovery may produce hundreds of cards, but the production-default set stays intentionally small and source-backed: current OpenAI GPT defaults, current Claude Opus/Sonnet defaults, current Gemini Flash/Pro defaults, and selected Ollama Cloud defaults such as `ollama:glm-5.2` and `ollama:gpt-oss:120b`. Models from a configurable inference server remain selectable by the project owner through `[models].allow`, but are classified as `unknown`, `opt_in`, `specialized`, `legacy`, `deprecated`, or `shutdown` until project probes and eval evidence justify promotion.
+For `0.5.0`, Crupier treats the provider catalog and the automatic routing set as different things. Provider discovery may produce hundreds of cards, but the production-default set stays intentionally small and source-backed: current OpenAI GPT defaults, current Claude Opus/Sonnet defaults, current Gemini Flash/Pro defaults, and selected Ollama Cloud defaults such as `ollama:glm-5.2` and `ollama:gpt-oss:120b`. Models from a configurable inference server remain selectable by the project owner through `[models].allow`, but are classified as `unknown`, `opt_in`, `specialized`, `legacy`, `deprecated`, or `shutdown` until project probes and eval evidence justify promotion.
 
 Refresh reports now separate added, removed, stale, pricing, and profile/capability changes so maintainers can review what changed before updating an allowlist.
 
@@ -605,12 +792,22 @@ tool = {
 result = crupier.deal(
     task="Write the changelog.",
     tools=[tool],
-    constraints={"approved_tools": ["write_file"]},
     dry_run=False,
 )
 ```
 
-Tool execution is provider-agnostic: Crupier asks the selected model for a JSON tool plan, executes approved local tools, deduplicates identical tool calls with idempotency keys, and sends tool results back for the final answer. Provider-native tool-call execution is planned as an optimization.
+This first call raises `CrupierApprovalRequired`. Grant the frozen route and
+execute its one-use token with the identical runtime tool catalog:
+
+```python
+approval = crupier.approvals.grant(
+    pending.approval_id,
+    reviewer="ana",
+)
+result = crupier.execute_approved(approval.token, tools=[tool])
+```
+
+Tool execution is provider-agnostic: Crupier asks the selected model for a JSON tool plan, executes approval-bound local tools only after the durable gate, deduplicates identical tool calls with idempotency keys, and sends tool results back for the final answer. Provider-native tool-call execution is planned as an optimization.
 
 Tool workflows can re-plan for multiple rounds with `max_tool_rounds`, so a model can call one safe local tool, inspect the result, then call a second tool before producing the final answer.
 
@@ -642,10 +839,13 @@ Current execution behavior:
 - OpenAI-compatible inference servers can receive native images when the selected model card and configured adapter both declare image support.
 - Text, Markdown, JSON, YAML, HTML/CSS, code files, and PDFs can execute as extracted text context.
 - PDF extraction uses `pypdf` from `crupier[pdf]` when installed or a local `pdftotext` binary when available.
+- CSV and TSV extract with Python's standard library; `.xlsx` uses `crupier[spreadsheets]`. Rows, columns, cells, sheets, uncompressed Office size, and total prompt context are bounded.
+- `.docx` paragraphs and tables execute through `crupier[documents]`, with bounded text, rows, columns, cells, and table count. Embedded images/comments/extended content produce a warning rather than disappearing silently.
+- Image OCR is executable through an injected `OCRAdapter`. `TesseractOCRAdapter` is included, but the `tesseract` binary and requested language packs remain an explicit deployment dependency.
 - OpenAI Responses can receive native PDFs when `constraints={"require_native_file_input": True}` or `constraints={"file_strategy": "native"}` is set.
 - The CLI exposes `--file-strategy auto|native|extract` on `crupier deal`.
 - Crupier checks both model capability and adapter transport support before selecting a native-file route, so an unsupported adapter cannot silently drop a file.
-- Native video/office-document execution, OCR, table-aware PDF extraction, and transcript-first audio/video preprocessing remain explicitly unsupported.
+- Legacy `.xls`, non-DOCX Office files, table-aware PDF extraction, transcript-first audio/video preprocessing, and native video/document paths remain explicitly unsupported. They fail or warn with the specific missing representation instead of being sent as text accidentally.
 
 ## Embeddings And Specialized Operations
 
@@ -796,6 +996,21 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+Control-plane options can travel in the namespaced `crupier` object without
+changing ordinary OpenAI request fields:
+
+```python
+response = client.responses.create(
+    model="gpt-5.4-mini",
+    input="Summarize this ticket.",
+    crupier={
+        "experiment": "support-rollout",
+        "constraints": {"max_cost_usd": 0.02},
+    },
+    metadata={"session_id": "ses_123"},
+)
+```
+
 Opt-in monkeypatch for controlled experiments:
 
 ```python
@@ -826,7 +1041,15 @@ Implemented endpoints:
 - `POST /v1/audio/speech`
 - `POST /v1/audio/transcriptions` (multipart)
 
-The server returns OpenAI-like JSON errors, `x-request-id`, typed Responses SSE events, Chat Completions chunks, and binary speech responses. Add `--no-dry-run` when you want the proxy to call real providers. Request bodies default to a 10 MB ceiling; raise it deliberately with `--max-request-bytes` for larger audio or image uploads, while still respecting the selected provider's own limits.
+For HTTP callers, `X-Crupier-Experiment` selects a configured rollout and
+`X-Crupier-Approval` carries a one-use approval token. Approval-required
+requests return HTTP `409` with `approval_id` and `trace_id` in
+`error.crupier`; the token is never returned. The server returns OpenAI-like
+JSON errors, `x-request-id`, typed Responses SSE events, Chat Completions
+chunks, and binary speech responses. Add `--no-dry-run` when you want the proxy
+to call real providers. Request bodies default to a 10 MB ceiling; raise it
+deliberately with `--max-request-bytes` for larger audio or image uploads,
+while still respecting the selected provider's own limits.
 
 ## Provider Retries And Fallback
 
@@ -906,6 +1129,13 @@ crupier trace replay trc_...
 
 Stored traces live under `.crupier/traces/`. Secret-like values are redacted before writing.
 
+Approvals, persisted sessions, experiment observations, and their append-only
+events share `.crupier/state.sqlite3`. That database is created lazily only
+when one of those durable features is used, is ignored by Git, and is
+permission-restricted on POSIX systems. Approval persistence necessarily
+contains the frozen request required for later execution; experiment outputs
+remain off by default.
+
 ## Registry Snapshots
 
 Freeze the registry state used by a project:
@@ -941,6 +1171,9 @@ Snapshots live under `.crupier/registry/snapshots/` and include capability cards
 | `crupier capabilities probe` | Verify model capabilities and optionally persist evidence. |
 | `crupier eval` | Run routing evals and model comparisons. |
 | `crupier feedback` | Record and apply human feedback signals. |
+| `crupier approvals`, `approve`, `reject` | Inspect and decide frozen route approvals. |
+| `crupier sessions` | Inspect or close persisted multi-turn sessions. |
+| `crupier experiments` | Report, evaluate, pause, resume, promote, or roll back model rollouts. |
 | `crupier adopt` | Inspect existing projects and produce adoption reports. |
 | `crupier code comments` | Generate AI-integration review comments. |
 | `crupier trace` | Inspect, delete, or replay stored traces. |
@@ -1011,10 +1244,10 @@ Final public release order:
 5. Rerun `crupier release check --strict-public --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference`.
 6. Confirm Dependabot security updates are enabled and unpaused.
 7. Protect `main` with required CI, no force pushes, and pull-request review before accepting public changes.
-8. Publish a final GitHub Release from the current `main` tip tagged `v0.4.0` or `0.4.0`; the publish workflow rejects draft/non-final releases, non-main targets, commits that do not match `origin/main`, and tags that do not match the package version.
+8. Publish a final GitHub Release from the current `main` tip tagged `v0.5.0` or `0.5.0`; the publish workflow rejects draft/non-final releases, non-main targets, commits that do not match `origin/main`, and tags that do not match the package version.
 
 Manual workflow dispatch is only for retrying an intentional release operation.
-It must run from `main`, requires the `version` input to equal `0.4.0`, and
+It must run from `main`, requires the `version` input to equal `0.5.0`, and
 requires `confirm_publish=true` before any distribution is built or uploaded.
 The publish workflow verifies that the configured PyPI project is available for
 first uploads or already owned for maintenance releases, then requires the
@@ -1026,7 +1259,7 @@ permissions and links the `pypi` environment to the package page.
 
 For development and pull request expectations, see [CONTRIBUTING.md](https://github.com/686f6c61/crupier/blob/main/CONTRIBUTING.md).
 
-## What Is Implemented In 0.4.0
+## What Is Implemented In 0.5.0
 
 Implemented now:
 
@@ -1041,9 +1274,12 @@ Implemented now:
 - fallback, cascade, panel, fusion, critique-repair, local-first, and delegate routes
 - cascade validation/escalation, parallel panel/fusion execution, iterative tool planning, and bounded delegate sub-routes
 - structured-output validation and one repair attempt
-- provider-agnostic local tool execution with approval guardrails and idempotency
-- multimodal/file planning, adapter-aware native image execution, provider-specific native audio, OpenAI native PDF, and extracted text/PDF context
-- explicit unsupported errors for OCR, transcript-first audio/video preprocessing, spreadsheets, office documents, and unimplemented native paths
+- provider-agnostic local tool execution with durable approval guardrails and idempotency
+- durable plan-hash/request-fingerprint approvals with expiring one-use tokens, reviewer-verifier hooks, file hashing, and approval-bound tools
+- persistent multi-turn sessions with compatible route stickiness, automatic replanning, context compaction, cumulative budgets, route history, optimistic concurrency, and cross-turn tool idempotency
+- sampled shadow and canary routes with sticky cohorts, parallel/async execution, contained fallback, external eval checks, promotion gates, and reversible promotion state
+- multimodal/file planning, adapter-aware native image execution, provider-specific native audio, OpenAI native PDF, extracted text/PDF context, CSV/TSV/XLSX tables, DOCX text/tables, and optional OCR adapters
+- explicit unsupported errors for table-aware PDF extraction, legacy/non-DOCX Office files, transcript-first audio/video preprocessing, and unimplemented native paths
 - model discovery, capability cards, provider refresh, capability/profile/pricing change reports, probes, readiness checks, and registry snapshots
 - model-powered operation classification with deterministic fallback and shared end-to-end budgets
 - eval runner, compare reports, human review packets, human decision templates, and feedback application
@@ -1054,14 +1290,15 @@ Implemented now:
 - provider retries with jitter, circuit breakers, and route-time degraded-provider exclusion
 - typed errors and `py.typed`
 - release gate with build, artifact, install smoke, PyPI name, project URL, provider readiness, CI, security, and dependency checks
+- validated request constraints with visible unknown-key warnings, strict mode, tool requirements, human-approval gates, and per-request parallel execution control
 
-Planned after `0.4.0`:
+Planned after `0.5.0`:
 
 - production-calibrated model orchestrator evals
 - larger production eval datasets
 - provider-native structured-output parameter mapping beyond prompt+validate execution
 - broader provider-native PDF/audio/video/document execution
-- table-aware PDF extraction, OCR, transcript-first video processing, and office-document parsing
+- table-aware PDF extraction, richer OCR adapters, transcript-first video processing, and additional Office formats
 - broader SDK compatibility matrix
 - provider-native tool-calling optimizations
 - provider-native streaming proxy

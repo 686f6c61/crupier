@@ -318,13 +318,17 @@ def test_prepare_extracted_context_rejects_remote_missing_large_and_unsupported_
 
 
 def test_prepare_pdf_table_context_marks_text_only_warning(tmp_path, monkeypatch):
-    import crupier.multimodal as multimodal
+    from crupier import multimodal
 
     pdf = tmp_path / "invoice.pdf"
     pdf.write_bytes(b"pdf")
     asset = normalize_file(pdf)
     plan = plan_file_representations([asset], task="extract invoice table")
-    monkeypatch.setattr(multimodal, "_extract_pdf_text", lambda asset, max_file_bytes: "row 1")
+    monkeypatch.setattr(
+        multimodal,
+        "_extract_pdf_text",
+        lambda asset, max_file_bytes, max_chars, max_pages: ("row 1", False),
+    )
 
     context = prepare_extracted_file_context([asset], plan)
 
@@ -343,11 +347,16 @@ def test_extract_pdf_text_uses_pypdf_when_available(tmp_path, monkeypatch):
 
     monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=FakeReader))
 
-    assert _extract_pdf_text(normalize_file(pdf), max_file_bytes=100) == "first\n\n"
+    assert _extract_pdf_text(
+        normalize_file(pdf),
+        max_file_bytes=100,
+        max_chars=100,
+        max_pages=10,
+    ) == ("first\n\n", False)
 
 
 def test_extract_pdf_text_falls_back_to_pdftotext(tmp_path, monkeypatch):
-    import crupier.multimodal as multimodal
+    from crupier import multimodal
 
     pdf = tmp_path / "report.pdf"
     pdf.write_bytes(b"pdf")
@@ -355,7 +364,8 @@ def test_extract_pdf_text_falls_back_to_pdftotext(tmp_path, monkeypatch):
     monkeypatch.setattr(multimodal.shutil, "which", lambda name: "/usr/bin/pdftotext")
 
     def fake_run(command, **kwargs):
-        assert command[:2] == ["/usr/bin/pdftotext", "-layout"]
+        assert command[:2] == ["/usr/bin/pdftotext", "-f"]
+        assert "-layout" in command
         assert kwargs["timeout"] == 30
         output = command[-1]
         with open(output, "w", encoding="utf-8") as handle:
@@ -364,23 +374,28 @@ def test_extract_pdf_text_falls_back_to_pdftotext(tmp_path, monkeypatch):
 
     monkeypatch.setattr(multimodal.subprocess, "run", fake_run)
 
-    assert _extract_pdf_text(normalize_file(pdf), max_file_bytes=100) == "fallback text"
+    assert _extract_pdf_text(
+        normalize_file(pdf),
+        max_file_bytes=100,
+        max_chars=100,
+        max_pages=10,
+    ) == ("fallback text", False)
 
 
 def test_extract_pdf_text_reports_dependency_process_and_size_errors(tmp_path, monkeypatch):
-    import crupier.multimodal as multimodal
+    from crupier import multimodal
 
     pdf = tmp_path / "report.pdf"
     pdf.write_bytes(b"1234")
     asset = normalize_file(pdf)
 
     with pytest.raises(CrupierModelUnsupportedError, match="above max 3 bytes"):
-        _extract_pdf_text(asset, max_file_bytes=3)
+        _extract_pdf_text(asset, max_file_bytes=3, max_chars=100, max_pages=10)
 
     monkeypatch.setitem(sys.modules, "pypdf", None)
     monkeypatch.setattr(multimodal.shutil, "which", lambda name: None)
     with pytest.raises(CrupierModelUnsupportedError, match="requires `pypdf`"):
-        _extract_pdf_text(asset, max_file_bytes=100)
+        _extract_pdf_text(asset, max_file_bytes=100, max_chars=100, max_pages=10)
 
     monkeypatch.setattr(multimodal.shutil, "which", lambda name: "/usr/bin/pdftotext")
     monkeypatch.setattr(
@@ -389,4 +404,4 @@ def test_extract_pdf_text_reports_dependency_process_and_size_errors(tmp_path, m
         lambda *args, **kwargs: SimpleNamespace(returncode=1, stderr="invalid PDF"),
     )
     with pytest.raises(CrupierModelUnsupportedError, match="failed: invalid PDF"):
-        _extract_pdf_text(asset, max_file_bytes=100)
+        _extract_pdf_text(asset, max_file_bytes=100, max_chars=100, max_pages=10)

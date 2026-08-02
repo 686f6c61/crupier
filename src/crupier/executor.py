@@ -13,6 +13,7 @@ from .adapters import AdapterResponse, ProviderAdapter
 from .adapters.common import build_prompt
 from .budgets import ExecutionBudget, request_with_timeout
 from .config import CrupierConfig
+from .constraints import request_allows_parallel
 from .costs import actual_cost_from_calls, usage_estimated_cost_from_calls
 from .errors import (
     CrupierBudgetExceededError,
@@ -23,7 +24,14 @@ from .errors import (
     CrupierRouteValidationError,
     CrupierStructuredOutputError,
 )
-from .models import CapabilityCard, CostEstimate, CrupierResult, DecisionTrace, RequestEnvelope, RoutePlan
+from .models import (
+    CapabilityCard,
+    CostEstimate,
+    CrupierResult,
+    DecisionTrace,
+    RequestEnvelope,
+    RoutePlan,
+)
 from .prompts import (
     build_critique_instruction,
     build_repair_instruction,
@@ -32,7 +40,12 @@ from .prompts import (
 )
 from .registry import ModelRegistry
 from .runtime_policy import apply_runtime_policy
-from .structured import build_repair_prompt, build_structured_prompt, parse_and_validate_json, schema_from_request
+from .structured import (
+    build_repair_prompt,
+    build_structured_prompt,
+    parse_and_validate_json,
+    schema_from_request,
+)
 from .tools import (
     ToolExecution,
     build_tool_final_prompt,
@@ -264,7 +277,7 @@ class RouteExecutor:
         tools = normalize_tools(request.tools)
         model = self._models_in_execution_order(plan)[0]
         max_rounds = self._max_tool_rounds(request)
-        executions: list[ToolExecution] = []
+        executions = _previous_tool_executions(request)
         final: str | None = None
         for round_index in range(max_rounds):
             planning_prompt = (
@@ -791,7 +804,7 @@ class RouteExecutor:
     ) -> list[tuple[str, AdapterResponse]]:
         if not panel_models:
             return []
-        if not self.config.routing.allow_parallel or len(panel_models) == 1:
+        if not request_allows_parallel(self.config, request) or len(panel_models) == 1:
             return self._run_panel_models_sequential(request, panel_models, trace, raw_outputs, budget)
 
         max_workers = self._max_parallel_models(request, len(panel_models))
@@ -1332,3 +1345,33 @@ class RouteExecutor:
             provider = preferred[0].split(":", 1)[0]
             alternatives.sort(key=lambda model: model.split(":", 1)[0] == provider)
         return preferred + alternatives
+
+
+def _previous_tool_executions(request: RequestEnvelope) -> list[ToolExecution]:
+    raw = request.metadata.get("_crupier_previous_tool_executions")
+    if not isinstance(raw, list):
+        return []
+    executions: list[ToolExecution] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        key = item.get("idempotency_key")
+        name = item.get("name")
+        status = item.get("status")
+        arguments = item.get("arguments", {})
+        if not all(isinstance(value, str) and value for value in (key, name, status)):
+            continue
+        if not isinstance(arguments, dict):
+            continue
+        executions.append(
+            ToolExecution(
+                idempotency_key=str(key),
+                name=str(name),
+                arguments=dict(arguments),
+                status=str(status),
+                result=item.get("result"),
+                error=item.get("error"),
+                requires_approval=bool(item.get("requires_approval", False)),
+            )
+        )
+    return executions

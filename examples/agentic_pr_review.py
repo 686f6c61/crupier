@@ -61,6 +61,7 @@ def main() -> None:
             },
         ],
         dry_run=True,
+        trace="summary",
     )
 
     print_route("agentic_pr_review", result, extra={"changed_files": 3})

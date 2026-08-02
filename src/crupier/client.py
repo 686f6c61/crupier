@@ -10,14 +10,22 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import RLock
 from time import monotonic, perf_counter
-from typing import Any
+from typing import Any, Self
 from uuid import uuid4
 
 from .adapters import ProviderAdapter, ProviderModel, build_default_adapters
+from .approvals import ApprovalManager
 from .budgets import ExecutionBudget
 from .config import CrupierConfig, write_models_allow, write_orchestrator_settings
+from .constraints import (
+    human_approval_granted,
+    request_requires_human_approval,
+    validate_request_constraints,
+)
 from .errors import (
+    CrupierApprovalRequired,
     CrupierConfigError,
+    CrupierError,
     CrupierPolicyError,
     CrupierProviderAuthError,
     CrupierProviderRateLimitError,
@@ -25,6 +33,8 @@ from .errors import (
 )
 from .evals import RoutingEvalRunner
 from .executor import RouteExecutor
+from .experiments import ExperimentManager
+from .extraction import OCRAdapter
 from .feedback import HumanFeedbackStore
 from .models import (
     CapabilityCard,
@@ -32,7 +42,9 @@ from .models import (
     DecisionTrace,
     ModelRef,
     OperationResult,
+    PreparedDeal,
     RequestEnvelope,
+    RoutePlan,
     StreamEvent,
     UpdateReport,
 )
@@ -42,13 +54,15 @@ from .multimodal import (
     prepare_extracted_file_context,
     split_file_execution_inputs,
 )
-from .orchestrator import DeterministicOrchestrator, ModelOrchestrator
 from .operations import OperationRouter
+from .orchestrator import DeterministicOrchestrator, ModelOrchestrator
 from .planner import RoutePlanner
 from .policy import Exclusion, PolicyEngine
-from .project_audit import ProjectAuditRunner
 from .probes import CapabilityProbeRunner, ProbeReport, ReadinessReport
+from .project_audit import ProjectAuditRunner
 from .registry import ModelRegistry
+from .sessions import CrupierSession, SessionManager
+from .tools import normalize_tools
 from .trace_store import TraceStore
 
 
@@ -116,7 +130,7 @@ class CapabilityManager:
 class ResponsesFacade:
     """Small OpenAI-like compatibility facade."""
 
-    def __init__(self, client: "Crupier"):
+    def __init__(self, client: Crupier):
         self._client = client
 
     def create(self, *, input: Any, mode: str | None = None, **kwargs: Any) -> CrupierResult:
@@ -127,7 +141,15 @@ class ResponsesFacade:
 class Crupier:
     """Main SDK entrypoint."""
 
-    def __init__(self, config: CrupierConfig, *, adapters: dict[str, ProviderAdapter] | None = None):
+    def __init__(
+        self,
+        config: CrupierConfig,
+        *,
+        adapters: dict[str, ProviderAdapter] | None = None,
+        ocr_adapter: OCRAdapter | None = None,
+        experiment_evaluator: Any = None,
+        approval_reviewer_verifier: Any = None,
+    ):
         self.config = config
         self.registry = ModelRegistry(config)
         self.policy = PolicyEngine(config)
@@ -139,9 +161,20 @@ class Crupier:
         self.evals = RoutingEvalRunner(self)
         self.audit = ProjectAuditRunner(self)
         self.traces = TraceStore(config.traces_dir)
+        self.approvals = ApprovalManager(
+            config.state_db_path,
+            reviewer_verifier=approval_reviewer_verifier,
+        )
         self.feedback = HumanFeedbackStore(config.feedback_dir)
         self.responses = ResponsesFacade(self)
         self.operations = OperationRouter(self)
+        self.sessions = SessionManager(self, str(config.state_db_path))
+        self.experiments = ExperimentManager(
+            self,
+            str(config.state_db_path),
+            evaluator=experiment_evaluator,
+        )
+        self.ocr_adapter = ocr_adapter
         self._provider_visibility_cache: dict[
             str, tuple[float, str, set[str] | None, str | None]
         ] = {}
@@ -168,6 +201,18 @@ class Crupier:
     def run(self, task: str, input: Any = None, **kwargs: Any) -> CrupierResult | OperationResult:
         return self.operations.run(task, input, **kwargs)
 
+    def session(self, **kwargs: Any) -> CrupierSession:
+        return self.sessions.create(**kwargs)
+
+    def close(self, *, wait: bool = True) -> None:
+        self.experiments.close(wait=wait)
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
     def _build_orchestrator(self):
         mode = self.config.orchestrator.mode
         if mode in {"model", "hybrid"}:
@@ -175,15 +220,15 @@ class Crupier:
         return None
 
     @classmethod
-    def from_project(cls, path: str | Path = ".") -> "Crupier":
+    def from_project(cls, path: str | Path = ".") -> Crupier:
         return cls(CrupierConfig.from_toml(Path(path)))
 
     @classmethod
-    def from_toml(cls, path: str | Path) -> "Crupier":
+    def from_toml(cls, path: str | Path) -> Crupier:
         return cls(CrupierConfig.from_toml(path))
 
     @classmethod
-    def from_config(cls, config: CrupierConfig | dict[str, Any]) -> "Crupier":
+    def from_config(cls, config: CrupierConfig | dict[str, Any]) -> Crupier:
         if isinstance(config, CrupierConfig):
             return cls(config)
         return cls(CrupierConfig.from_dict(config))
@@ -201,7 +246,7 @@ class Crupier:
         candidate_limit: int | None = None,
         allow_prompt_summary_only: bool | None = None,
         persist: bool = False,
-    ) -> "Crupier":
+    ) -> Crupier:
         """Configure the model-powered route orchestrator.
 
         Set ``persist=True`` to write the change into ``crupier.toml``.
@@ -273,13 +318,97 @@ class Crupier:
         metadata: dict[str, Any] | None = None,
         trace: bool | str = False,
         dry_run: bool | None = None,
+        approval_token: str | None = None,
+        experiment: str | None = None,
     ) -> CrupierResult:
+        if approval_token:
+            return self.execute_approved(
+                approval_token,
+                tools=list(tools or []),
+                trace=trace,
+            )
+        if experiment:
+            return self.experiments.run(
+                experiment,
+                {
+                    "task": task,
+                    "input": input,
+                    "mode": mode,
+                    "strategy": strategy,
+                    "constraints": constraints,
+                    "files": files,
+                    "messages": messages,
+                    "tools": tools,
+                    "response_schema": response_schema,
+                    "metadata": metadata,
+                    "trace": trace,
+                    "dry_run": dry_run,
+                },
+            )
+        prepared = self.prepare(
+            task=task,
+            input=input,
+            mode=mode,
+            strategy=strategy,
+            constraints=constraints,
+            files=files,
+            messages=messages,
+            tools=tools,
+            response_schema=response_schema,
+            metadata=metadata,
+            dry_run=dry_run,
+        )
+        if (
+            prepared.plan.requires_user_confirmation
+            and not prepared.dry_run
+            and not human_approval_granted(prepared.request)
+        ):
+            approval = self.request_approval(
+                prepared,
+                ttl_s=int(prepared.request.constraints.get("approval_ttl_seconds", 86_400)),
+            )
+            raise CrupierApprovalRequired(
+                (
+                    "This frozen route requires human approval before live execution. "
+                    f"Approval {approval.approval_id} is pending for trace {approval.trace_id}."
+                ),
+                approval_id=approval.approval_id,
+                trace_id=approval.trace_id,
+            )
+        return self.execute(prepared, trace=trace)
+
+    def prepare(
+        self,
+        task: str,
+        input: Any = None,
+        *,
+        mode: str | None = None,
+        strategy: str | None = None,
+        constraints: dict[str, Any] | None = None,
+        files: list[Any] | None = None,
+        messages: list[dict[str, Any]] | None = None,
+        tools: list[Any] | None = None,
+        response_schema: Any = None,
+        metadata: dict[str, Any] | None = None,
+        dry_run: bool | None = None,
+    ) -> PreparedDeal:
         metadata = dict(metadata or {})
+        sticky_plan = metadata.pop("_crupier_sticky_plan", None)
         inherited_started = metadata.pop("_crupier_started_at", None)
         deal_started = float(inherited_started) if isinstance(inherited_started, int | float) else perf_counter()
         constraints = dict(constraints or {})
         if dry_run is None:
             dry_run = bool(constraints.pop("dry_run", True))
+        tool_definitions = list(tools or [])
+        constraint_warnings = validate_request_constraints(
+            constraints,
+            has_tools=bool(tool_definitions),
+        )
+        if constraints.get("human_approval_granted"):
+            constraint_warnings.append(
+                "human_approval_granted is not authorization by itself; "
+                "use a granted approval token bound to the frozen route."
+            )
         file_assets = normalize_files(files)
         file_plan = plan_file_representations(file_assets, task=task, constraints=constraints)
         metadata.setdefault("_crupier_orchestrator_calls", [])
@@ -294,6 +423,14 @@ class Crupier:
                 extraction_plan,
                 max_file_bytes=int(constraints.get("max_file_bytes", 2_000_000)),
                 max_chars=int(constraints.get("max_file_context_chars", 80_000)),
+                max_table_rows=int(constraints.get("max_table_rows", 500)),
+                max_table_columns=int(constraints.get("max_table_columns", 100)),
+                max_cell_chars=int(constraints.get("max_cell_chars", 2_000)),
+                max_table_sheets=int(constraints.get("max_table_sheets", 25)),
+                max_document_tables=int(constraints.get("max_document_tables", 25)),
+                max_pdf_pages=int(constraints.get("max_pdf_pages", 200)),
+                ocr_adapter=self.ocr_adapter,
+                ocr_timeout_seconds=float(constraints.get("ocr_timeout_seconds", 30.0)),
             )
             metadata["extracted_file_context"] = file_context
         request = RequestEnvelope(
@@ -302,7 +439,7 @@ class Crupier:
             messages=list(messages or []),
             files=execution_files,
             file_plan=file_plan,
-            tools=list(tools or []),
+            tools=tool_definitions,
             response_schema=response_schema,
             mode=mode or self.config.project.default_profile,
             strategy=strategy,
@@ -343,7 +480,25 @@ class Crupier:
                 policy_result.filters_applied.append(filter_name)
         force_model = bool(request.constraints.get("force_model"))
         single_candidate = len(policy_result.allowed) == 1
-        if isinstance(self.planner.orchestrator, ModelOrchestrator) and (dry_run or force_model or single_candidate):
+        sticky_route_reused = False
+        if isinstance(sticky_plan, RoutePlan):
+            candidate_plan = RoutePlan.from_dict(sticky_plan.to_dict())
+            try:
+                self.policy.validate_route(candidate_plan, policy_result, request)
+            except CrupierError as exc:
+                constraint_warnings.append(
+                    f"Session sticky route was invalidated and replanned: {exc}"
+                )
+            else:
+                plan = candidate_plan
+                plan.reason = (
+                    plan.reason
+                    + " Session retained the frozen route because it remains policy-compatible."
+                ).strip()
+                sticky_route_reused = True
+        if not sticky_route_reused and isinstance(self.planner.orchestrator, ModelOrchestrator) and (
+            dry_run or force_model or single_candidate
+        ):
             context = self.planner.build_context(
                 request,
                 policy_result.allowed,
@@ -363,9 +518,30 @@ class Crupier:
                 plan.reason
                 + f" Model-orchestrator provider calls were skipped because {skipped_reason}."
             ).strip()
-        else:
+        elif not sticky_route_reused:
             plan = self.planner.plan(request, policy_result.allowed, policy_result.filters_applied)
+        if request_requires_human_approval(request):
+            plan.requires_user_confirmation = True
+        normalized_tool_catalog = normalize_tools(tool_definitions)
+        approval_bound_tools = {
+            tool.name
+            for tool in normalized_tool_catalog
+            if tool.requires_approval or tool.side_effects
+        }
+        approval_bound_tools.update(
+            str(name)
+            for name in request.constraints.get("require_approval_for", [])
+        )
+        if approval_bound_tools:
+            plan.requires_user_confirmation = True
+            trace_tool_names = sorted(approval_bound_tools)
+        else:
+            trace_tool_names = []
         self.policy.validate_route(plan, policy_result, request)
+        if plan.requires_user_confirmation and dry_run:
+            constraint_warnings.append(
+                "Human approval is required before this route may execute with dry_run=False."
+            )
 
         planning_calls = metadata.pop("_crupier_orchestrator_calls", [])
         if not isinstance(planning_calls, list):
@@ -376,10 +552,6 @@ class Crupier:
                 for item in reversed(planning_calls)
                 if item.get("plan_status") == "validated"
             ),
-            None,
-        )
-        attempted_orchestrator = next(
-            (item.get("model") for item in planning_calls if item.get("model")),
             None,
         )
         traced_orchestrator = successful_orchestrator
@@ -418,8 +590,78 @@ class Crupier:
             ],
             storage_decision=self._storage_decision(constraints),
         )
+        trace_obj.final_quality_signals["sticky_route_reused"] = sticky_route_reused
+        if trace_tool_names:
+            trace_obj.final_quality_signals["approval_bound_tools"] = trace_tool_names
 
         request.metadata.pop("_crupier_execution_budget", None)
+        budget_snapshot = (
+            execution_budget.snapshot()
+            if isinstance(execution_budget, ExecutionBudget)
+            else {}
+        )
+        return PreparedDeal(
+            request=request,
+            plan=plan,
+            trace=trace_obj,
+            dry_run=dry_run,
+            warnings=constraint_warnings,
+            planning_calls=list(planning_calls),
+            execution_budget_snapshot=budget_snapshot,
+            started_at=deal_started,
+            execution_budget=execution_budget,
+        )
+
+    def request_approval(
+        self,
+        prepared: PreparedDeal,
+        *,
+        ttl_s: int = 86_400,
+        scope: str = "route",
+    ):
+        if not prepared.plan.requires_user_confirmation:
+            raise CrupierPolicyError(
+                "Only a route marked requires_user_confirmation can enter the approval queue."
+            )
+        return self.approvals.create(prepared, ttl_s=ttl_s, scope=scope)
+
+    def execute_approved(
+        self,
+        approval_token: str,
+        *,
+        tools: list[Any] | None = None,
+        trace: bool | str = False,
+    ) -> CrupierResult:
+        prepared = self.approvals.consume(approval_token, tools=tools)
+        prepared.dry_run = False
+        prepared.started_at = perf_counter()
+        return self.execute(prepared, trace=trace)
+
+    def execute(
+        self,
+        prepared: PreparedDeal,
+        *,
+        trace: bool | str = False,
+    ) -> CrupierResult:
+        request = prepared.request
+        plan = prepared.plan
+        trace_obj = prepared.trace
+        dry_run = prepared.dry_run
+        if plan.requires_user_confirmation and not dry_run and not human_approval_granted(request):
+            raise CrupierPolicyError(
+                "The frozen route requires a granted approval token before live execution."
+            )
+        deal_started = prepared.started_at if prepared.started_at is not None else perf_counter()
+        execution_budget = prepared.execution_budget
+        if not dry_run and not isinstance(execution_budget, ExecutionBudget):
+            execution_budget = ExecutionBudget(
+                self.config,
+                request,
+                self.registry.list(allowed_only=False),
+                started_at=deal_started,
+            )
+            if prepared.execution_budget_snapshot:
+                execution_budget.absorb(prepared.execution_budget_snapshot)
         result = self.executor.execute(
             request,
             plan,
@@ -432,6 +674,19 @@ class Crupier:
         result.latency_ms = total_latency_ms
         trace_obj.latency_ms = total_latency_ms
         trace_obj.final_quality_signals["execution_latency_ms"] = execution_latency_ms
+        planning_calls = prepared.planning_calls
+        successful_orchestrator = next(
+            (
+                item.get("model")
+                for item in reversed(planning_calls)
+                if item.get("plan_status") == "validated"
+            ),
+            None,
+        )
+        attempted_orchestrator = next(
+            (item.get("model") for item in planning_calls if item.get("model")),
+            None,
+        )
         trace_obj.final_quality_signals["orchestrator_calls"] = len(planning_calls)
         trace_obj.final_quality_signals["orchestrator_outcome"] = (
             "validated_model_plan"
@@ -444,7 +699,21 @@ class Crupier:
         trace_obj.final_quality_signals["orchestrator_validation_failures"] = sum(
             1 for item in planning_calls if item.get("plan_status") == "invalid"
         )
+        if prepared.warnings:
+            trace_obj.final_quality_signals["constraint_warnings"] = list(prepared.warnings)
+        if plan.requires_user_confirmation:
+            trace_obj.final_quality_signals["human_approval_required"] = True
+            trace_obj.final_quality_signals["human_approval_granted"] = human_approval_granted(request)
+        for warning in prepared.warnings:
+            if warning not in result.warnings:
+                result.warnings.append(warning)
         result.provider_metadata["orchestrator_calls"] = planning_calls
+        result.provider_metadata["human_approval"] = {
+            "required": plan.requires_user_confirmation,
+            "granted": human_approval_granted(request),
+        }
+        if isinstance(request.metadata.get("_crupier_approval"), dict):
+            result.provider_metadata["approval"] = dict(request.metadata["_crupier_approval"])
         stored_trace_path = self.traces.write(
             project=self.config.project.name,
             request=request,

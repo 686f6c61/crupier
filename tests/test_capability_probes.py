@@ -1,7 +1,12 @@
 import json
 
 from crupier import Crupier
-from crupier.adapters import AdapterResponse, EmbeddingResponse, OperationResponse, ProviderModel
+from crupier.adapters import (
+    AdapterResponse,
+    EmbeddingResponse,
+    OperationResponse,
+    ProviderModel,
+)
 from crupier.cli import main
 from crupier.config import CrupierConfig
 

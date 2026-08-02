@@ -18,7 +18,12 @@ from crupier.multimodal import native_file_payloads
 from crupier.structured import schema_from_request
 
 from .base import AdapterResponse, EmbeddingResponse, ProviderModel
-from .common import object_to_dict, provider_timeout_seconds, request_timeout_seconds, require_api_key
+from .common import (
+    object_to_dict,
+    provider_timeout_seconds,
+    request_timeout_seconds,
+    require_api_key,
+)
 
 
 class OpenAICompatibleAdapter:

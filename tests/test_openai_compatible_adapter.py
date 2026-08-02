@@ -6,9 +6,9 @@ from types import SimpleNamespace
 
 import pytest
 
+import crupier.adapters.openai_compatible as compatible
 from crupier.adapters import OpenAICompatibleAdapter
 from crupier.adapters.factory import build_default_adapters
-import crupier.adapters.openai_compatible as compatible
 from crupier.config import CrupierConfig, ProviderSettings
 from crupier.errors import (
     CrupierProviderAuthError,
