@@ -7,6 +7,7 @@ from crupier.adapters import AdapterResponse
 from crupier.budgets import ExecutionBudget
 from crupier.config import CrupierConfig
 from crupier.errors import (
+    CrupierBudgetExceededError,
     CrupierExecutionLimitError,
     CrupierProviderRateLimitError,
     CrupierProviderUnavailableError,
@@ -15,10 +16,12 @@ from crupier.errors import (
 )
 from crupier.executor import RouteExecutor
 from crupier.models import (
+    CapabilityCard,
     DecisionTrace,
     FileAsset,
     FileRepresentation,
     FileRoutingPlan,
+    ModelRef,
     RequestEnvelope,
     RoutePlan,
     RouteStep,
@@ -82,6 +85,49 @@ def _plan(strategy="single", steps=None):
         steps=steps or [RouteStep(role="primary", model="openai:a")],
         reason="test",
     )
+
+
+def test_execution_budget_reserve_call_raises_when_accumulated_cost_exceeds_max(tmp_path):
+    config = _config(tmp_path)
+    request = RequestEnvelope(task="x", constraints={"max_cost_usd": 0.05})
+    budget = ExecutionBudget(config, request, [])
+
+    reservation = budget.reserve_call(estimated_usd=0.03)
+
+    assert reservation.estimated_usd == 0.03
+    with pytest.raises(CrupierBudgetExceededError, match="would reserve"):
+        budget.reserve_call(estimated_usd=0.03)
+
+
+def test_route_second_call_blocked_by_accumulated_budget(tmp_path):
+    config = _config(tmp_path, allow=["openai:a", "openai:b"])
+    adapter = ScriptedAdapter(errors=[CrupierProviderUnavailableError("first model failed")])
+    executor = RouteExecutor(config, adapters={"openai": adapter})
+    request = RequestEnvelope(
+        task="x",
+        constraints={"max_cost_usd": 0.05, "max_output_tokens": 1000, "max_provider_retries": 0},
+    )
+    cards = [
+        CapabilityCard(
+            model_ref=ModelRef.parse(model),
+            last_updated="2026-08-22",
+            pricing={"input_per_million_usd": 0.0, "output_per_million_usd": 30.0},
+        )
+        for model in ("openai:a", "openai:b")
+    ]
+    budget = ExecutionBudget(config, request, cards)
+    plan = _plan(
+        strategy="fallback",
+        steps=[
+            RouteStep(role="primary", model="openai:a"),
+            RouteStep(role="fallback", model="openai:b"),
+        ],
+    )
+
+    with pytest.raises(CrupierBudgetExceededError, match="would reserve"):
+        executor.execute(request, plan, _trace(), dry_run=False, budget=budget)
+
+    assert len(adapter.calls) == 1
 
 
 @pytest.mark.parametrize(
