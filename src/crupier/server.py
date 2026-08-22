@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable, Iterator
+from datetime import UTC, datetime
 from email import policy
 from email.parser import BytesParser
 from hmac import compare_digest
@@ -130,6 +132,9 @@ def build_openai_compatible_server(
     file_root: str | Path | None = None,
     bearer_token: str | None = None,
     authenticator: Callable[[str], bool] | None = None,
+    access_log: bool = True,
+    access_log_sink: Callable[[str], None] | None = None,
+    expose_policy_metadata: bool = False,
 ) -> ThreadingHTTPServer:
     """Create a stdlib HTTP server exposing a small OpenAI-compatible API."""
 
@@ -163,6 +168,10 @@ def build_openai_compatible_server(
         expected_bearer_token = bearer_token
         request_authenticator = authenticator
         require_authentication = allow_remote or dry_run is not True
+        has_authentication = authentication_configured
+        access_log_enabled = access_log
+        access_log_writer = access_log_sink
+        expose_policy_internals = expose_policy_metadata
 
     return ThreadingHTTPServer((host, port), Handler)
 
@@ -180,6 +189,9 @@ def serve_openai_compatible(
     file_root: str | Path | None = None,
     bearer_token: str | None = None,
     authenticator: Callable[[str], bool] | None = None,
+    access_log: bool = True,
+    access_log_sink: Callable[[str], None] | None = None,
+    expose_policy_metadata: bool = False,
 ) -> None:
     server = build_openai_compatible_server(
         crupier=crupier,
@@ -193,6 +205,9 @@ def serve_openai_compatible(
         file_root=file_root,
         bearer_token=bearer_token,
         authenticator=authenticator,
+        access_log=access_log,
+        access_log_sink=access_log_sink,
+        expose_policy_metadata=expose_policy_metadata,
     )
     try:
         server.serve_forever()
@@ -210,6 +225,10 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
     expected_bearer_token: str | None = None
     request_authenticator: Callable[[str], bool] | None = None
     require_authentication: bool = True
+    has_authentication: bool = False
+    access_log_enabled: bool = True
+    access_log_writer: Callable[[str], None] | None = None
+    expose_policy_internals: bool = False
 
     def do_OPTIONS(self) -> None:
         if not self._validate_request_context(authenticate=False):
@@ -219,9 +238,10 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        if not self._validate_request_context(authenticate=False):
-            return
         path = self._request_path()
+        authenticate = path == "/v1/models" and self.has_authentication
+        if not self._validate_request_context(authenticate=authenticate):
+            return
         if path in {"/health", "/v1/health"}:
             self._write_json({"ok": True, "service": "crupier", "compat": "openai"})
             return
@@ -512,7 +532,10 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length else b""
 
     def _write_json(self, payload: dict[str, Any], *, status: HTTPStatus = HTTPStatus.OK) -> None:
+        if not self.expose_policy_internals:
+            payload = _omit_policy_internals(payload)
         body = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+        self._crupier_response_size = len(body)
         self.send_response(status)
         self._send_common_headers("application/json")
         self.send_header("content-length", str(len(body)))
@@ -521,6 +544,7 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _write_bytes(self, payload: bytes, *, content_type: str) -> None:
+        self._crupier_response_size = len(payload)
         self.send_response(HTTPStatus.OK)
         self._send_common_headers(content_type)
         self.send_header("content-length", str(len(payload)))
@@ -531,6 +555,7 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
     def _write_sse(self, events: Any) -> None:
         if not isinstance(events, Iterator):
             events = iter([events])
+        self._crupier_response_size = None
         self.send_response(HTTPStatus.OK)
         self._send_common_headers("text/event-stream")
         self.send_header("cache-control", "no-cache")
@@ -594,6 +619,23 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
             self._crupier_request_id = request_id
         return request_id
 
+    def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+        if not self.access_log_enabled:
+            return
+        response_size = getattr(self, "_crupier_response_size", size)
+        record = {
+            "timestamp": datetime.now(UTC).isoformat(),
+            "path": self._request_path(),
+            "status": int(code) if isinstance(code, int | HTTPStatus) else code,
+            "request_id": self._request_id(),
+            "response_bytes": response_size,
+        }
+        line = json.dumps(record, ensure_ascii=False, sort_keys=True)
+        if self.access_log_writer is not None:
+            self.access_log_writer(line)
+        else:
+            print(line, file=sys.stderr)
+
     def log_message(self, format: str, *args: Any) -> None:
         return
 
@@ -604,6 +646,27 @@ class _RequestBodyTooLarge(Exception):
 
 class _LengthRequired(Exception):
     pass
+
+
+def _omit_policy_internals(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(payload)
+    metadata = sanitized.get("crupier")
+    if not isinstance(metadata, dict):
+        return sanitized
+    metadata = dict(metadata)
+    route = metadata.get("route")
+    if isinstance(route, dict):
+        route = dict(route)
+        route.pop("policy_filters_applied", None)
+        metadata["route"] = route
+    trace = metadata.get("trace")
+    if isinstance(trace, dict):
+        trace = dict(trace)
+        for key in ("candidate_models", "excluded_models", "policy_filters"):
+            trace.pop(key, None)
+        metadata["trace"] = trace
+    sanitized["crupier"] = metadata
+    return sanitized
 
 
 def _models_payload(client: Crupier) -> dict[str, Any]:

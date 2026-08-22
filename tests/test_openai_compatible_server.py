@@ -139,6 +139,7 @@ def with_server(
     max_request_bytes=10_000_000,
     file_root=None,
     bearer_token="test-server-token",
+    **server_options,
 ):
     kwargs = {}
     if file_root is not None:
@@ -151,6 +152,7 @@ def with_server(
         cors_origin=cors_origin,
         max_request_bytes=max_request_bytes,
         bearer_token=bearer_token,
+        **server_options,
         **kwargs,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -340,6 +342,63 @@ def test_live_server_rejects_missing_or_invalid_bearer_before_body_processing(tm
         assert adapter.calls == []
 
     with_server(tmp_path, run, adapter=adapter)
+
+
+def test_server_emits_access_log_without_body_or_authorization(tmp_path):
+    lines = []
+
+    def run(address):
+        status, _, _ = request_json(
+            address,
+            "POST",
+            "/v1/responses",
+            {"model": "gpt-5.4-mini", "input": "cuerpo-secreto"},
+            token="token-super-secreto",
+        )
+        assert status == 401
+
+    with_server(
+        tmp_path,
+        run,
+        bearer_token="token-distinto",
+        access_log_sink=lines.append,
+    )
+
+    assert len(lines) == 1
+    record = json.loads(lines[0])
+    assert record["path"] == "/v1/responses"
+    assert record["status"] == 401
+    assert record["request_id"].startswith("req_")
+    assert record["response_bytes"] > 0
+    assert "cuerpo-secreto" not in lines[0]
+    assert "token-super-secreto" not in lines[0]
+
+
+def test_models_endpoint_requires_authentication_when_token_is_configured(tmp_path):
+    def run(address):
+        status, _, data = request_json(address, "GET", "/v1/models", token=None)
+        assert status == 401
+        assert data["error"]["code"] == "invalid_api_key"
+
+    with_server(tmp_path, run, dry_run=True)
+
+
+def test_response_metadata_omits_policy_internals_by_default(tmp_path):
+    def run(address):
+        status, _, data = request_json(
+            address,
+            "POST",
+            "/v1/responses",
+            {"model": "gpt-5.4-mini", "input": "Hello"},
+        )
+        assert status == 200
+        assert "policy_filters_applied" not in data["crupier"]["route"]
+        trace = data["crupier"]["trace"] or {}
+        assert "candidate_models" not in trace
+        assert "excluded_models" not in trace
+        assert "policy_filters" not in trace
+
+    with_server(tmp_path, run, dry_run=True)
 
 
 def test_chunked_request_body_is_rejected_instead_of_ignored(tmp_path):

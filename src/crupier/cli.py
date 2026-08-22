@@ -823,6 +823,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="CRUPIER_SERVER_TOKEN",
         help="Environment variable containing the bearer token for live requests",
     )
+    serve.add_argument("--no-access-log", action="store_true", help="Disable structured HTTP access logs")
+    serve.add_argument(
+        "--expose-policy-metadata",
+        action="store_true",
+        help="Include candidate, exclusion and policy-filter details in API responses",
+    )
     serve.add_argument("--no-dry-run", action="store_true", help="Attempt real provider execution")
     serve.set_defaults(func=cmd_serve)
 
@@ -2871,6 +2877,8 @@ def cmd_serve(args: argparse.Namespace) -> int:
         cors_origin=args.cors_origin,
         max_request_bytes=args.max_request_bytes,
         bearer_token=bearer_token,
+        access_log=not getattr(args, "no_access_log", False),
+        expose_policy_metadata=getattr(args, "expose_policy_metadata", False),
     )
     address = server.server_address
     if isinstance(address, tuple):
