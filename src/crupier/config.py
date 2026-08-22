@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import tomllib
+import warnings
 from dataclasses import dataclass, field
 from ipaddress import ip_address
 from math import isfinite
@@ -37,6 +38,7 @@ CANONICAL_ENV_KEYS = frozenset(
         "NAN_API_KEY",
     }
 )
+DEFAULT_CREDENTIAL_ENV_KEYS = CANONICAL_ENV_KEYS | {"INFERENCE_API_KEY"}
 _ROUTE_STRATEGIES = {
     "single",
     "fallback",
@@ -73,6 +75,12 @@ class ProviderSettings:
     host: str | None = None
     mode: str | None = None
     options: dict[str, Any] = field(default_factory=dict)
+    env_values: dict[str, str] = field(default_factory=dict, repr=False)
+
+    def env_value(self, key: str) -> str | None:
+        """Devuelve primero una credencial exportada y después la del `.env` local."""
+
+        return os.environ.get(key) or self.env_values.get(key)
 
 
 @dataclass(slots=True)
@@ -237,7 +245,12 @@ class CrupierConfig:
         config = cls.from_dict(data)
         config.root = toml_path.parent.resolve()
         load_profile_files(config)
-        load_env_file(config.root)
+        allowed_env_keys = DEFAULT_CREDENTIAL_ENV_KEYS | {
+            settings.env_key for settings in config.providers.values() if settings.env_key
+        }
+        local_env = load_env_file(config.root, allowed_keys=allowed_env_keys)
+        for settings in config.providers.values():
+            settings.env_values = local_env.copy()
         apply_env_overrides(config)
         config.validate()
         return config
@@ -996,8 +1009,8 @@ def _ensure_gitignore_entries(path: Path, entries: list[str]) -> None:
     path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
 
-def load_env_file(root: str | Path) -> dict[str, str]:
-    """Load a local .env file into os.environ without overwriting exported values."""
+def load_env_file(root: str | Path, *, allowed_keys: set[str] | frozenset[str]) -> dict[str, str]:
+    """Carga credenciales permitidas de un `.env` sin mutar el entorno del proceso."""
 
     path = Path(root) / ".env"
     loaded: dict[str, str] = {}
@@ -1011,9 +1024,15 @@ def load_env_file(root: str | Path) -> dict[str, str]:
         key = key.strip()
         if not key or not key.replace("_", "").isalnum() or key[0].isdigit():
             continue
+        if key not in allowed_keys:
+            warnings.warn(
+                f"Se ha ignorado {key!r} del .env porque no es una credencial permitida.",
+                UserWarning,
+                stacklevel=2,
+            )
+            continue
         value = _env_value(value.strip())
         if key not in os.environ:
-            os.environ[key] = value
             loaded[key] = value
     return loaded
 

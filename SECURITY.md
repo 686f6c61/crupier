@@ -56,6 +56,10 @@ local `.env` file excluded from source control. Do not pass API keys as CLI
 arguments, write them into `crupier.toml`, or include them in eval datasets,
 feedback notes, trace metadata, bug reports, or release artifacts.
 
+El `.env` local solo admite los nombres canónicos de credenciales y los
+`env_key` declarados en `crupier.toml`. Crupier ignora y avisa sobre cualquier
+otra clave, y no copia valores del fichero al entorno global del proceso.
+
 By default, Crupier should not persist prompts or responses. Any storage of
 prompts, responses, traces, or replayable inputs must stay opt-in and should be
 redacted before it is shared outside the local project.

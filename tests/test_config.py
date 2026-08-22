@@ -208,5 +208,7 @@ OLLAMA_HOST=https://ollama.com/api
     config = CrupierConfig.from_toml(tmp_path)
 
     assert config.providers["ollama"].host == "http://127.0.0.1:11434"
-    assert os.environ["OPENAI_API_KEY"] == "from-dotenv"
-    assert os.environ["ANTHROPIC_API_KEY"] == "quoted-value"
+    assert config.providers["openai"].env_value("OPENAI_API_KEY") == "from-dotenv"
+    assert config.providers["openai"].env_value("ANTHROPIC_API_KEY") == "quoted-value"
+    assert "OPENAI_API_KEY" not in os.environ
+    assert "ANTHROPIC_API_KEY" not in os.environ

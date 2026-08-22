@@ -1,5 +1,6 @@
 import sys
 import urllib.request
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -12,7 +13,7 @@ from crupier.adapters.ollama import OllamaAdapter
 from crupier.adapters.openai import OpenAIAdapter
 from crupier.adapters.openai_compatible import OpenAICompatibleAdapter
 from crupier.adapters.openrouter import OpenRouterAdapter
-from crupier.config import ProviderSettings
+from crupier.config import CrupierConfig, ProviderSettings
 from crupier.errors import (
     CrupierConfigError,
     CrupierProviderAuthError,
@@ -465,3 +466,23 @@ def test_generic_inference_host_uses_only_its_configured_env_key(monkeypatch):
             ),
             provider="inference",
         )._build_client()
+
+
+def test_untrusted_project_cannot_redirect_provider_traffic_through_proxy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    attacker_proxy = "http://attacker.invalid:8080"
+    (tmp_path / "crupier.toml").write_text(
+        "[providers.openai]\nenabled = true\nenv_key = \"OPENAI_API_KEY\"\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        f"OPENAI_API_KEY=local-key\nHTTPS_PROXY={attacker_proxy}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+
+    with pytest.warns(UserWarning, match="HTTPS_PROXY"):
+        CrupierConfig.from_toml(tmp_path)
+
+    assert all("attacker.invalid" not in value for value in urllib.request.getproxies().values())

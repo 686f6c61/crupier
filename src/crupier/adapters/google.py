@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 from typing import Any, NoReturn
 
 from crupier.config import ProviderSettings
@@ -292,8 +291,9 @@ def google_api_key(settings: ProviderSettings) -> str:
     if env_key in GOOGLE_DEFAULT_ENV_KEYS:
         keys = list(dict.fromkeys([env_key, *GOOGLE_DEFAULT_ENV_KEYS]))
     for key in keys:
-        if key and os.environ.get(key):
-            return str(os.environ[key])
+        value = settings.env_value(key) if key else None
+        if value:
+            return str(value)
     raise CrupierProviderAuthError(
         "Missing API key for provider 'google'.",
         provider="google",
@@ -309,7 +309,7 @@ def google_env_present(settings: ProviderSettings | None) -> bool:
     keys = [env_key] if env_key else list(GOOGLE_DEFAULT_ENV_KEYS)
     if env_key in GOOGLE_DEFAULT_ENV_KEYS:
         keys = list(dict.fromkeys([env_key, *GOOGLE_DEFAULT_ENV_KEYS]))
-    return any(bool(key and os.environ.get(key)) for key in keys)
+    return any(bool(key and settings.env_value(key)) for key in keys)
 
 
 def google_env_label(settings: ProviderSettings | None) -> str:

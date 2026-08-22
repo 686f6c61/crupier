@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 from crupier.config import ProviderSettings
@@ -13,7 +12,7 @@ from crupier.models import RequestEnvelope
 
 def env_value(settings: ProviderSettings, default_env_key: str, *, provider: str) -> str | None:
     env_key = settings.env_key or default_env_key
-    value = os.environ.get(env_key)
+    value = settings.env_value(env_key)
     if not value:
         return None
     return value
@@ -21,7 +20,7 @@ def env_value(settings: ProviderSettings, default_env_key: str, *, provider: str
 
 def require_api_key(settings: ProviderSettings, default_env_key: str, *, provider: str) -> str:
     env_key = settings.env_key or default_env_key
-    value = os.environ.get(env_key)
+    value = settings.env_value(env_key)
     if not value:
         raise CrupierProviderAuthError(
             f"Missing API key for provider {provider!r}.",

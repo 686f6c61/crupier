@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import pytest
@@ -179,10 +180,67 @@ def test_env_loader_skips_invalid_names_and_preserves_exported_values(tmp_path: 
     monkeypatch.setenv("EXPORTED", "from-shell")
     monkeypatch.delenv("QUOTED", raising=False)
 
-    loaded = config_module.load_env_file(tmp_path)
+    loaded = config_module.load_env_file(tmp_path, allowed_keys={"EXPORTED", "QUOTED"})
 
     assert loaded == {"QUOTED": "hello"}
-    assert config_module.load_env_file(tmp_path / "missing") == {}
+    assert "QUOTED" not in os.environ
+    assert config_module.load_env_file(tmp_path / "missing", allowed_keys=set()) == {}
+
+
+def test_env_file_ignores_non_credential_variables(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "crupier.toml").write_text(
+        "[providers.openai]\nenabled = true\nenv_key = \"OPENAI_API_KEY\"\n",
+        encoding="utf-8",
+    )
+    blocked = {
+        "HTTPS_PROXY": "http://attacker.invalid:8080",
+        "PYTHONPATH": "/tmp/attacker",
+        "SSL_CERT_FILE": "/tmp/attacker.pem",
+        "LD_PRELOAD": "/tmp/attacker.so",
+    }
+    (tmp_path / ".env").write_text(
+        "\n".join(f"{key}={value}" for key, value in blocked.items()),
+        encoding="utf-8",
+    )
+    for key in blocked:
+        monkeypatch.delenv(key, raising=False)
+
+    with pytest.warns(UserWarning) as caught:
+        CrupierConfig.from_toml(tmp_path)
+
+    warning_text = " ".join(str(item.message) for item in caught)
+    assert all(key not in os.environ for key in blocked)
+    assert all(key in warning_text for key in blocked)
+
+
+def test_env_file_loads_declared_provider_keys_only(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "crupier.toml").write_text(
+        """
+[providers.openai]
+enabled = true
+env_key = "OPENAI_API_KEY"
+
+[providers.private_gateway]
+enabled = true
+mode = "openai_compatible"
+host = "https://gateway.example/v1"
+env_key = "PRIVATE_GATEWAY_TOKEN"
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text(
+        "OPENAI_API_KEY=openai-local\nPRIVATE_GATEWAY_TOKEN=gateway-local\nIGNORED=value\n",
+        encoding="utf-8",
+    )
+    for key in ("OPENAI_API_KEY", "PRIVATE_GATEWAY_TOKEN", "IGNORED"):
+        monkeypatch.delenv(key, raising=False)
+
+    with pytest.warns(UserWarning, match="IGNORED"):
+        config = CrupierConfig.from_toml(tmp_path)
+
+    assert config.providers["openai"].env_values["OPENAI_API_KEY"] == "openai-local"
+    assert config.providers["private_gateway"].env_values["PRIVATE_GATEWAY_TOKEN"] == "gateway-local"
+    assert all(key not in os.environ for key in ("OPENAI_API_KEY", "PRIVATE_GATEWAY_TOKEN", "IGNORED"))
 
 
 def test_model_allow_writer_handles_missing_file_appended_section_and_denylist(tmp_path: Path) -> None:
