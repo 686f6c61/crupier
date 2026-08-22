@@ -1,3 +1,4 @@
+import socket
 from datetime import UTC, datetime
 from time import sleep
 
@@ -5,6 +6,7 @@ import pytest
 
 from crupier import Crupier
 from crupier.adapters import AdapterResponse
+from crupier.adapters.ollama import OllamaAdapter
 from crupier.config import CrupierConfig
 from crupier.errors import (
     CrupierApprovalRequired,
@@ -422,6 +424,66 @@ def test_real_fallback_tries_next_adapter(tmp_path):
     assert result.trace is not None
     assert result.trace.fallbacks[0]["model"] == "anthropic:claude-opus-4-8"
     assert result.trace.errors[0]["max_provider_retries"] == 1
+
+
+def test_ollama_invalid_json_is_typed_and_fallback_runs(tmp_path, monkeypatch):
+    class InvalidJsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b"not-json"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: InvalidJsonResponse())
+    config = make_config(
+        tmp_path,
+        allow=["ollama:gpt-oss:120b", "openai:gpt-5.4-mini"],
+        strategy="fallback",
+    )
+    config.routing.require_operational_providers = False
+    openai = FakeAdapter("openai", outputs=["fallback recovered"])
+    client = Crupier(
+        config,
+        adapters={
+            "ollama": OllamaAdapter(config.providers["ollama"]),
+            "openai": openai,
+        },
+    )
+
+    result = client.deal("Use fallback", dry_run=False, trace="debug")
+
+    assert result.output_text == "fallback recovered"
+    assert len(openai.calls) == 1
+    assert result.trace is not None
+    assert result.trace.fallbacks[0]["model"] == "ollama:gpt-oss:120b"
+    assert result.trace.errors[0]["error_type"] == "CrupierProviderUnavailableError"
+
+
+def test_ollama_socket_timeout_is_retryable_provider_error(tmp_path, monkeypatch):
+    calls = 0
+
+    def time_out(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise socket.timeout("timed out")
+
+    monkeypatch.setattr("urllib.request.urlopen", time_out)
+    config = make_config(tmp_path, allow=["ollama:gpt-oss:120b"])
+    config.routing.require_operational_providers = False
+    client = Crupier(config, adapters={"ollama": OllamaAdapter(config.providers["ollama"])})
+
+    with pytest.raises(CrupierProviderUnavailableError) as exc_info:
+        client.deal(
+            "Retry timeout",
+            constraints={"max_provider_retries": 1},
+            dry_run=False,
+        )
+
+    assert exc_info.value.retryable is True
+    assert calls == 2
 
 
 def test_real_cascade_escalates_when_primary_validation_fails(tmp_path):

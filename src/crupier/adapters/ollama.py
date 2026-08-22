@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from typing import Any, NoReturn
 
 from crupier.config import (
@@ -77,15 +78,14 @@ class OllamaAdapter:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        try:
-            req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-            timeout = request_timeout_seconds(request, default=provider_timeout_seconds(self.settings, default=120))
-            with urllib.request.urlopen(req, timeout=float(timeout or 120)) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            self._raise_http_error(exc)
-        except urllib.error.URLError as exc:
-            raise CrupierProviderUnavailableError(f"Ollama request failed: {exc.reason}") from exc
+        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        timeout = request_timeout_seconds(request, default=provider_timeout_seconds(self.settings, default=120))
+        body = self._request_json(
+            req,
+            timeout=float(timeout or 120),
+            operation="request",
+            valid_shape=lambda value: isinstance(value.get("message"), dict),
+        )
 
         message = body.get("message", {}) if isinstance(body, dict) else {}
         text = message.get("content", "")
@@ -122,15 +122,14 @@ class OllamaAdapter:
             )
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
-        try:
-            req = urllib.request.Request(url, headers=headers, method="GET")
-            timeout = provider_timeout_seconds(self.settings, default=30)
-            with urllib.request.urlopen(req, timeout=float(timeout or 30)) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            self._raise_http_error(exc)
-        except urllib.error.URLError as exc:
-            raise CrupierProviderUnavailableError(f"Ollama model listing failed: {exc.reason}") from exc
+        req = urllib.request.Request(url, headers=headers, method="GET")
+        timeout = provider_timeout_seconds(self.settings, default=30)
+        body = self._request_json(
+            req,
+            timeout=float(timeout or 30),
+            operation="model listing",
+            valid_shape=lambda value: isinstance(value.get("models"), list),
+        )
 
         models: list[ProviderModel] = []
         for item in body.get("models", []):
@@ -155,14 +154,15 @@ class OllamaAdapter:
         payload = {"model": model, "input": input}
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(self._embed_url(), data=data, headers=self._headers(), method="POST")
-        try:
-            timeout = provider_timeout_seconds(self.settings, default=120)
-            with urllib.request.urlopen(req, timeout=float(timeout or 120)) as response:
-                body = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            self._raise_http_error(exc)
-        except urllib.error.URLError as exc:
-            raise CrupierProviderUnavailableError(f"Ollama embedding request failed: {exc.reason}") from exc
+        timeout = provider_timeout_seconds(self.settings, default=120)
+        body = self._request_json(
+            req,
+            timeout=float(timeout or 120),
+            operation="embedding request",
+            valid_shape=lambda value: isinstance(
+                value.get("embeddings", value.get("embedding")), list
+            ),
+        )
 
         embeddings = _ollama_embeddings(body)
         usage = {
@@ -308,13 +308,12 @@ class OllamaAdapter:
     def _chat_json(self, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         data = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(self._chat_url(), data=data, headers=self._headers(), method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            self._raise_http_error(exc)
-        except urllib.error.URLError as exc:
-            raise CrupierProviderUnavailableError(f"Ollama request failed: {exc.reason}") from exc
+        return self._request_json(
+            req,
+            timeout=timeout,
+            operation="request",
+            valid_shape=lambda value: isinstance(value.get("message"), dict),
+        )
 
     def _chat_stream(self, payload: dict[str, Any], *, timeout: float):
         data = json.dumps(payload).encode("utf-8")
@@ -325,11 +324,55 @@ class OllamaAdapter:
                     line = raw_line.decode("utf-8").strip()
                     if not line:
                         continue
-                    yield json.loads(line)
+                    body = json.loads(line)
+                    if not isinstance(body, dict):
+                        raise CrupierProviderUnavailableError(
+                            "Ollama request failed: invalid response shape.",
+                            retryable=True,
+                        )
+                    yield body
         except urllib.error.HTTPError as exc:
             self._raise_http_error(exc)
         except urllib.error.URLError as exc:
-            raise CrupierProviderUnavailableError(f"Ollama request failed: {exc.reason}") from exc
+            self._raise_transport_error("request", exc.reason, exc)
+        except TimeoutError as exc:
+            self._raise_transport_error("request", "timed out", exc)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._raise_transport_error("request", "invalid JSON response", exc)
+
+    def _request_json(
+        self,
+        request: urllib.request.Request,
+        *,
+        timeout: float,
+        operation: str,
+        valid_shape: Callable[[dict[str, Any]], bool],
+    ) -> dict[str, Any]:
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            self._raise_http_error(exc)
+        except urllib.error.URLError as exc:
+            self._raise_transport_error(operation, exc.reason, exc)
+        except TimeoutError as exc:
+            self._raise_transport_error(operation, "timed out", exc)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._raise_transport_error(operation, "invalid JSON response", exc)
+
+        if not isinstance(body, dict) or not valid_shape(body):
+            raise CrupierProviderUnavailableError(
+                f"Ollama {operation} failed: invalid response shape.",
+                retryable=True,
+            )
+        return body
+
+    @staticmethod
+    def _raise_transport_error(operation: str, reason: object, exc: BaseException) -> NoReturn:
+        raise CrupierProviderUnavailableError(
+            f"Ollama {operation} failed: {reason}",
+            retryable=True,
+        ) from exc
 
     def _headers(self) -> dict[str, str]:
         validate_provider_endpoint(self.provider, self.settings)

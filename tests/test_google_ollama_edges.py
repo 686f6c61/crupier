@@ -378,7 +378,8 @@ def test_ollama_catalog_skips_missing_ids_and_embedding_constraints(monkeypatch)
     embedded = adapter.embed(model="embed", input="x")
     assert embedded.embeddings == [[1.0, 2.0]]
     assert embedded.usage == {"eval_count": 3, "load_duration": 4}
-    assert adapter.embed(model="embed", input="x").metadata.get("embedding_dimensions") is None
+    with pytest.raises(CrupierProviderUnavailableError, match="invalid response shape"):
+        adapter.embed(model="embed", input="x")
     with pytest.raises(CrupierModelUnsupportedError, match="do not expose"):
         adapter.embed(model="embed", input="x", dimensions=2)
 
@@ -436,6 +437,36 @@ def test_ollama_chat_helpers_parse_json_lines_and_map_network_errors(monkeypatch
         adapter._chat_json({"model": "x"}, timeout=1)
     with pytest.raises(CrupierProviderUnavailableError, match="offline"):
         list(adapter._chat_stream({"model": "x"}, timeout=1))
+
+
+@pytest.mark.parametrize("surface", ["list", "embed", "probe"])
+def test_ollama_list_embed_and_probe_share_error_mapping(monkeypatch, surface):
+    class InvalidJsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b"not-json"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: InvalidJsonResponse())
+    adapter = OllamaAdapter(ProviderSettings(enabled=True, host="http://localhost:11434"))
+
+    with pytest.raises(CrupierProviderUnavailableError) as exc_info:
+        if surface == "list":
+            adapter.list_models()
+        elif surface == "embed":
+            adapter.embed(model="embed", input="hello")
+        else:
+            adapter.probe_capability(
+                model="chat",
+                probe="structured_output",
+                request=RequestEnvelope(task="probe"),
+            )
+
+    assert exc_info.value.retryable is True
 
 
 def test_ollama_headers_urls_and_cloud_auth(monkeypatch):
