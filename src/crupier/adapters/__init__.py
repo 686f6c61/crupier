@@ -2,8 +2,10 @@
 
 from .base import (
     AdapterResponse,
+    CapabilityProbeAdapter,
     EmbeddingProviderAdapter,
     EmbeddingResponse,
+    ModelDiscoveryAdapter,
     OperationProviderAdapter,
     OperationResponse,
     ProviderAdapter,
@@ -16,8 +18,10 @@ from .openrouter import OpenRouterAdapter
 
 __all__ = [
     "AdapterResponse",
+    "CapabilityProbeAdapter",
     "EmbeddingProviderAdapter",
     "EmbeddingResponse",
+    "ModelDiscoveryAdapter",
     "NaNAdapter",
     "OpenAICompatibleAdapter",
     "OpenRouterAdapter",

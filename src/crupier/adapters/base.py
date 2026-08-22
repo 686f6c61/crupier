@@ -63,9 +63,17 @@ class ProviderAdapter(Protocol):
         """Generate text for a normalized prompt."""
         ...
 
+
+class ModelDiscoveryAdapter(Protocol):
+    provider: str
+
     def list_models(self) -> list[ProviderModel]:
         """List models available to the configured account/provider."""
         ...
+
+
+class CapabilityProbeAdapter(Protocol):
+    provider: str
 
     def probe_capability(self, *, model: str, probe: str, request: RequestEnvelope) -> AdapterResponse:
         """Run a provider-native capability probe when supported."""

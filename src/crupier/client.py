@@ -10,10 +10,15 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import RLock
 from time import monotonic, perf_counter
-from typing import Any, Self
+from typing import Any, Self, cast
 from uuid import uuid4
 
-from .adapters import ProviderAdapter, ProviderModel, build_default_adapters
+from .adapters import (
+    ModelDiscoveryAdapter,
+    ProviderAdapter,
+    ProviderModel,
+    build_default_adapters,
+)
 from .approvals import ApprovalManager
 from .budgets import ExecutionBudget
 from .config import CrupierConfig, write_models_allow, write_orchestrator_settings
@@ -93,7 +98,16 @@ class ModelManager:
             if adapter is None:
                 continue
             try:
-                models.extend(adapter.list_models())
+                list_models = getattr(adapter, "list_models", None)
+                if not callable(list_models):
+                    error = _missing_adapter_capability(provider_name, "list_models")
+                    if not skip_unavailable:
+                        raise error
+                    if warnings is not None:
+                        warnings.append(f"Skipped provider {provider_name!r}: {error}")
+                    continue
+                discovery_adapter = cast(ModelDiscoveryAdapter, adapter)
+                models.extend(discovery_adapter.list_models())
             except (CrupierProviderAuthError, CrupierProviderRateLimitError, CrupierProviderUnavailableError) as exc:
                 if not skip_unavailable:
                     raise
@@ -126,6 +140,12 @@ class CapabilityManager:
 
     def readiness(self, models: list[str], *, strict: bool = False) -> ReadinessReport:
         return self._runner.readiness(models, strict=strict)
+
+
+def _missing_adapter_capability(provider: str, capability: str) -> CrupierError:
+    return CrupierError(
+        f"Adapter for provider {provider!r} does not implement optional capability {capability!r}."
+    )
 
 
 class ResponsesFacade:

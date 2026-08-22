@@ -9,9 +9,9 @@ from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from time import perf_counter
-from typing import Any
+from typing import Any, cast
 
-from .adapters import ProviderAdapter
+from .adapters import CapabilityProbeAdapter, ProviderAdapter
 from .capabilities import capability_evidence
 from .models import CapabilityCard, ModelRef, RequestEnvelope
 from .registry import ModelRegistry
@@ -356,6 +356,7 @@ class CapabilityProbeRunner:
         native_probe = getattr(adapter, "probe_capability", None)
         if not callable(native_probe):
             return self._probe_declared(card, probe_name, capability=capability, declared=declared)
+        probe_adapter = cast(CapabilityProbeAdapter, adapter)
 
         request = RequestEnvelope(
             task=f"Capability probe: {capability}",
@@ -363,7 +364,11 @@ class CapabilityProbeRunner:
         )
         started = perf_counter()
         try:
-            response = native_probe(model=card.model_ref.model, probe=probe_name, request=request)
+            response = probe_adapter.probe_capability(
+                model=card.model_ref.model,
+                probe=probe_name,
+                request=request,
+            )
             latency_ms = int((perf_counter() - started) * 1000)
             metadata = {"capability": capability} | response.metadata
             status = str(metadata.get("probe_status", "verified"))
