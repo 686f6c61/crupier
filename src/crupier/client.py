@@ -64,7 +64,7 @@ from .project_audit import ProjectAuditRunner
 from .registry import ModelRegistry
 from .sessions import CrupierSession, SessionManager
 from .tools import normalize_tools
-from .trace_store import TraceStore
+from .trace_store import TraceStore, task_summary_for_storage
 
 
 class ModelManager:
@@ -561,10 +561,14 @@ class Crupier:
             None,
         )
         traced_orchestrator = successful_orchestrator
+        storage_decision = self._storage_decision(constraints)
 
         trace_obj = DecisionTrace(
             trace_id=f"trc_{uuid4().hex[:16]}",
-            request_summary=self._summarize_task(task),
+            request_summary=self._summarize_task(
+                task,
+                store_prompt=bool(storage_decision.get("store_prompt")),
+            ),
             candidate_models=[card.model_ref.key for card in cards],
             excluded_models=policy_result.excluded_dicts(),
             policy_filters=policy_result.filters_applied,
@@ -594,7 +598,7 @@ class Crupier:
                 for item in planning_calls
                 if item.get("plan_status") == "invalid"
             ],
-            storage_decision=self._storage_decision(constraints),
+            storage_decision=storage_decision,
         )
         trace_obj.final_quality_signals["sticky_route_reused"] = sticky_route_reused
         if trace_tool_names:
@@ -971,7 +975,9 @@ class Crupier:
             "redact_secrets": bool(self.config.logging.redact_secrets),
         }
 
-    @staticmethod
-    def _summarize_task(task: str) -> str:
-        task = " ".join(task.split())
-        return task if len(task) <= 180 else task[:177] + "..."
+    def _summarize_task(self, task: str, *, store_prompt: bool = False) -> str:
+        return task_summary_for_storage(
+            task,
+            store_prompt=store_prompt,
+            salt=self.config.project.name,
+        )

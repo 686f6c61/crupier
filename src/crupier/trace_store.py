@@ -6,6 +6,7 @@ raw prompts or responses, while replay requires explicit prompt storage.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -151,9 +152,19 @@ class TraceStore:
             "trace_level": trace_level,
             "replayable": replayable,
             "storage_decision": dict(decision),
-            "request": _request_record(request, store_prompt=store_prompt),
+            "request": _request_record(
+                request,
+                store_prompt=store_prompt,
+                salt=project,
+            ),
             "result": _result_record(result, store_response=store_response, store_prompt=store_prompt),
-            "trace": _jsonable(_redact_value(result.trace.to_dict(summary=trace_level != "debug"))),
+            "trace": _trace_record(
+                result.trace,
+                request=request,
+                store_prompt=store_prompt,
+                salt=project,
+                trace_level=trace_level,
+            ),
         }
 
     def _path(self, trace_id: str) -> Path:
@@ -164,9 +175,9 @@ class TraceStore:
         return path
 
 
-def _request_record(request: RequestEnvelope, *, store_prompt: bool) -> dict[str, Any]:
+def _request_record(request: RequestEnvelope, *, store_prompt: bool, salt: str = "") -> dict[str, Any]:
     data: dict[str, Any] = {
-        "summary": _redact(_summarize(request.task)),
+        "summary": task_summary_for_storage(request.task, store_prompt=store_prompt, salt=salt),
         "mode": request.mode,
         "strategy": request.strategy,
                 "constraints": _jsonable(_safe_constraints(request.constraints)),
@@ -285,6 +296,39 @@ def _redact(text: str) -> str:
     for pattern, replacement in _SECRET_REPLACERS:
         redacted = pattern.sub(replacement, redacted)
     return redacted
+
+
+_TRACE_SUMMARY_SALT = "crupier.metadata-trace.v1"
+
+
+def task_summary_for_storage(task: str, *, store_prompt: bool, salt: str = "") -> str:
+    """Resume de la tarea para persistencia.
+
+    Si store_prompt es falso no se serializa ningún texto derivado de la
+    tarea: solo una etiqueta explícita, la longitud y un hash con sal.
+    """
+
+    if store_prompt:
+        return _redact(_summarize(task))
+    digest = hashlib.sha256(f"{_TRACE_SUMMARY_SALT}:{salt}\0{task}".encode("utf-8")).hexdigest()[:16]
+    return f"[prompt omitted; chars={len(task)}; sha256={digest}]"
+
+
+def _trace_record(
+    trace: Any,
+    *,
+    request: RequestEnvelope,
+    store_prompt: bool,
+    salt: str,
+    trace_level: bool | str,
+) -> dict[str, Any]:
+    payload = _jsonable(_redact_value(trace.to_dict(summary=trace_level != "debug")))
+    payload["request_summary"] = task_summary_for_storage(
+        request.task,
+        store_prompt=store_prompt,
+        salt=salt,
+    )
+    return payload
 
 
 def _summarize(text: str) -> str:

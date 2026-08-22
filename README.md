@@ -1120,7 +1120,11 @@ crupier trace show trc_...
 crupier trace delete trc_...
 ```
 
-Metadata-only traces are inspectable but not replayable. To allow replay, explicitly store prompt/input data:
+Metadata-only traces are inspectable but not replayable. They keep route
+metrics (model, strategy, cost, latency) and a non-content fingerprint of
+the task (length and a salted hash). They never persist task text, prompts,
+or inputs, even as a truncated `request.summary` or `trace.request_summary`.
+To allow replay, explicitly store prompt/input data:
 
 ```bash
 crupier deal "Plan this route" --store-prompt --store-response --trace summary

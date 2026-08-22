@@ -129,9 +129,13 @@ class OperationRouter:
         planning_calls = request.metadata.pop("_crupier_orchestrator_calls", [])
         if not isinstance(planning_calls, list):
             planning_calls = []
+        storage_decision = self.client._storage_decision(constraints)
         trace_obj = DecisionTrace(
             trace_id=f"trc_{uuid4().hex[:16]}",
-            request_summary=self.client._summarize_task(task),
+            request_summary=self.client._summarize_task(
+                task,
+                store_prompt=bool(storage_decision.get("store_prompt")),
+            ),
             candidate_models=[card.model_ref.key for card in policy_result.allowed],
             excluded_models=policy_result.excluded_dicts(),
             policy_filters=policy_result.filters_applied,
@@ -149,7 +153,7 @@ class OperationRouter:
                 for item in planning_calls
                 if item.get("error")
             ],
-            storage_decision=self.client._storage_decision(constraints),
+            storage_decision=storage_decision,
         )
         selected = plan.models[0]
         warnings = _operation_warnings(operation)

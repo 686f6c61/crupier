@@ -47,8 +47,60 @@ def test_trace_store_metadata_does_not_store_prompt_response_or_secret(tmp_path)
     assert "input" not in record["request"]
     assert "output_text" not in record["result"]
     assert fake_secret not in serialized
-    assert "[redacted]" in serialized
+    assert "Plan this with" not in serialized
     assert record["replayable"] is False
+
+
+def test_metadata_trace_contains_no_task_substring_when_store_prompt_is_false(tmp_path):
+    client = Crupier(make_config(tmp_path))
+    task = (
+        "Revisa el expediente de Marta Pérez con NIF 12345678Z "
+        "en Calle Falsa 123, teléfono 600111222."
+    )
+    fragments = ["Marta Pérez", "12345678Z", "Calle Falsa", "600111222"]
+
+    client.deal(
+        task,
+        input={"customer": "Marta Pérez", "nif": "12345678Z"},
+        constraints={"store_trace": True, "store_prompt": False},
+        dry_run=True,
+        trace="summary",
+    )
+
+    refs = client.traces.list()
+    assert len(refs) == 1
+    record = client.traces.read(refs[0].trace_id)
+    serialized = json.dumps(record)
+    for fragment in fragments:
+        assert fragment not in serialized
+        assert fragment not in record["request"].get("summary", "")
+        assert fragment not in str(record.get("trace", {}).get("request_summary", ""))
+    assert "task" not in record["request"]
+
+
+def test_metadata_trace_keeps_non_content_metrics(tmp_path):
+    client = Crupier(make_config(tmp_path))
+    task = "Tarea con datos personales de Marta Pérez para medir la longitud."
+
+    result = client.deal(
+        task,
+        constraints={"store_trace": True, "store_prompt": False},
+        dry_run=True,
+        trace="summary",
+    )
+
+    record = client.traces.read(result.trace.trace_id)
+    route = record["result"]["route"]
+    summary = record["request"]["summary"]
+    trace_summary = record["trace"]["request_summary"]
+    assert route["strategy"] == "single"
+    assert "openai:gpt-5.4-mini" in json.dumps(route)
+    assert "cost" in record["result"]
+    assert record["result"]["cost"] is not None
+    assert f"chars={len(task)}" in summary
+    assert f"chars={len(task)}" in trace_summary
+    assert "prompt omitted" in summary
+    assert "sha256=" in summary
 
 
 def test_trace_store_replay_requires_prompt_storage(tmp_path):
