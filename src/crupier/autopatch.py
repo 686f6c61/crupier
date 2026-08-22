@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 
@@ -21,9 +22,18 @@ def install(
         providers = [item.strip() for item in providers.split(",") if item.strip()]
 
     patched: list[str] = []
+    omitted: list[str] = []
     for provider in providers:
         if provider == "openai" and _patch_openai(**client_kwargs):
             patched.append("openai")
+        else:
+            omitted.append(provider)
+    if omitted:
+        warnings.warn(
+            f"Crupier autopatch: proveedores omitidos: {', '.join(omitted)}.",
+            UserWarning,
+            stacklevel=2,
+        )
     return patched
 
 
