@@ -12,6 +12,7 @@ SUPPORTED_CONSTRAINTS = frozenset(
     {
         "allow_deprecated_models",
         "allow_latest_aliases",
+        "allow_local_file_uris",
         "allow_parallel",
         "allow_preview_models",
         "allowed_models",
@@ -28,6 +29,7 @@ SUPPORTED_CONSTRAINTS = frozenset(
         "dry_run",
         "enable_thinking",
         "extra_body",
+        "file_root",
         "file_strategy",
         "force_model",
         "human_approval_granted",
@@ -94,6 +96,7 @@ BOOLEAN_CONSTRAINTS = frozenset(
     {
         "allow_deprecated_models",
         "allow_latest_aliases",
+        "allow_local_file_uris",
         "allow_parallel",
         "allow_preview_models",
         "approve_tool_calls",
