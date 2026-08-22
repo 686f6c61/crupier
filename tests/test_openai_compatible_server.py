@@ -4,6 +4,9 @@ import threading
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
+
+import crupier.server as server_module
 from crupier import Crupier
 from crupier.adapters import AdapterResponse, EmbeddingResponse, OperationResponse
 from crupier.config import CrupierConfig
@@ -124,6 +127,7 @@ def with_server(
     cors_origin=None,
     max_request_bytes=10_000_000,
     file_root=None,
+    bearer_token="test-server-token",
 ):
     kwargs = {}
     if file_root is not None:
@@ -135,6 +139,7 @@ def with_server(
         dry_run=dry_run,
         cors_origin=cors_origin,
         max_request_bytes=max_request_bytes,
+        bearer_token=bearer_token,
         **kwargs,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -147,10 +152,13 @@ def with_server(
         thread.join(timeout=2)
 
 
-def request_json(address, method, path, payload=None):
+def request_json(address, method, path, payload=None, *, token="test-server-token", headers=None):
     conn = http.client.HTTPConnection(address[0], address[1], timeout=5)
     body = json.dumps(payload or {})
-    conn.request(method, path, body=body if method == "POST" else None, headers={"content-type": "application/json"})
+    request_headers = {"content-type": "application/json", **(headers or {})}
+    if token is not None:
+        request_headers["authorization"] = f"Bearer {token}"
+    conn.request(method, path, body=body if method == "POST" else None, headers=request_headers)
     response = conn.getresponse()
     data = response.read().decode("utf-8")
     conn.close()
@@ -160,7 +168,12 @@ def request_json(address, method, path, payload=None):
 def request_text(address, method, path, payload=None):
     conn = http.client.HTTPConnection(address[0], address[1], timeout=5)
     body = json.dumps(payload or {})
-    conn.request(method, path, body=body if method == "POST" else None, headers={"content-type": "application/json"})
+    conn.request(
+        method,
+        path,
+        body=body if method == "POST" else None,
+        headers={"content-type": "application/json", "authorization": "Bearer test-server-token"},
+    )
     response = conn.getresponse()
     data = response.read().decode("utf-8")
     conn.close()
@@ -170,7 +183,12 @@ def request_text(address, method, path, payload=None):
 def request_bytes(address, method, path, payload=None):
     conn = http.client.HTTPConnection(address[0], address[1], timeout=5)
     body = json.dumps(payload or {})
-    conn.request(method, path, body=body, headers={"content-type": "application/json"})
+    conn.request(
+        method,
+        path,
+        body=body,
+        headers={"content-type": "application/json", "authorization": "Bearer test-server-token"},
+    )
     response = conn.getresponse()
     data = response.read()
     conn.close()
@@ -208,7 +226,10 @@ def request_multipart(address, path, *, fields, files):
         "POST",
         path,
         body=body,
-        headers={"content-type": f"multipart/form-data; boundary={boundary}"},
+        headers={
+            "content-type": f"multipart/form-data; boundary={boundary}",
+            "authorization": "Bearer test-server-token",
+        },
     )
     response = conn.getresponse()
     data = response.read()
@@ -257,6 +278,72 @@ def test_remote_bind_requires_explicit_opt_in(tmp_path):
         assert "--allow-remote" in str(exc)
     else:
         raise AssertionError("remote bind should require explicit opt-in")
+
+
+def test_live_server_rejects_missing_or_invalid_bearer_before_body_processing(tmp_path):
+    adapter = FakeAdapter()
+
+    def run(address):
+        for token in (None, "wrong-token"):
+            status, _, data = request_json(
+                address,
+                "POST",
+                "/v1/responses",
+                {"model": "gpt-5.4-mini", "input": "must not execute"},
+                token=token,
+            )
+            assert status == 401
+            assert data["error"]["code"] == "invalid_api_key"
+        assert adapter.calls == []
+
+    with_server(tmp_path, run, adapter=adapter)
+
+
+def test_loopback_live_server_rejects_cross_origin_simple_request(tmp_path):
+    def run(address):
+        status, _, data = request_json(
+            address,
+            "POST",
+            "/v1/responses",
+            {"model": "gpt-5.4-mini", "input": "must not execute"},
+            headers={"origin": "https://attacker.example", "content-type": "text/plain"},
+        )
+        assert status == 403
+        assert data["error"]["code"] == "origin_not_allowed"
+
+    with_server(tmp_path, run)
+
+
+def test_remote_bind_requires_authentication_configuration(tmp_path, monkeypatch):
+    monkeypatch.setattr(server_module, "ThreadingHTTPServer", lambda address, handler: object())
+    with pytest.raises(CrupierConfigError, match="authentication"):
+        build_openai_compatible_server(
+            crupier=make_crupier(tmp_path),
+            host="0.0.0.0",
+            port=0,
+            allow_remote=True,
+            dry_run=True,
+        )
+
+
+def test_remote_bind_checks_configured_authentication_even_in_dry_run(tmp_path, monkeypatch):
+    captured = {}
+
+    def fake_server(address, handler):
+        captured["handler"] = handler
+        return object()
+
+    monkeypatch.setattr(server_module, "ThreadingHTTPServer", fake_server)
+    build_openai_compatible_server(
+        crupier=make_crupier(tmp_path),
+        host="0.0.0.0",
+        port=0,
+        allow_remote=True,
+        dry_run=True,
+        bearer_token="remote-test-token",
+    )
+
+    assert captured["handler"].require_authentication is True
 
 
 def test_responses_endpoint_returns_openai_like_json(tmp_path):

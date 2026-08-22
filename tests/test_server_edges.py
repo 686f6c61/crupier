@@ -57,6 +57,7 @@ def run_server(tmp_path, callback, *, cors_origin=None):
         host="127.0.0.1",
         port=0,
         cors_origin=cors_origin,
+        bearer_token="test-server-token",
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -84,7 +85,7 @@ def json_request(address, method, path, payload):
         method,
         path,
         body=json.dumps(payload).encode(),
-        headers={"content-type": "application/json"},
+        headers={"content-type": "application/json", "authorization": "Bearer test-server-token"},
     )
     return status, headers, json.loads(raw)
 
@@ -162,7 +163,7 @@ def test_required_multipart_fields_and_content_type(tmp_path):
             "POST",
             "/v1/audio/transcriptions",
             body=body,
-            headers={"content-type": content_type},
+            headers={"content-type": content_type, "authorization": "Bearer test-server-token"},
         )
         assert status == 400
         assert "file" in json.loads(raw)["error"]["message"]
@@ -172,7 +173,7 @@ def test_required_multipart_fields_and_content_type(tmp_path):
             "POST",
             "/v1/images/edits",
             body=body,
-            headers={"content-type": content_type},
+            headers={"content-type": content_type, "authorization": "Bearer test-server-token"},
         )
         assert status == 400
         assert "prompt" in json.loads(raw)["error"]["message"]
@@ -182,9 +183,9 @@ def test_required_multipart_fields_and_content_type(tmp_path):
             "POST",
             "/v1/audio/transcriptions",
             body=b"{}",
-            headers={"content-type": "application/json"},
+            headers={"content-type": "application/json", "authorization": "Bearer test-server-token"},
         )
-        assert status == 400
+        assert status == 415
         assert "multipart/form-data" in json.loads(raw)["error"]["message"]
 
     run_server(tmp_path, check)
@@ -198,7 +199,7 @@ def test_invalid_json_shapes_and_content_lengths(tmp_path):
                 "POST",
                 "/v1/responses",
                 body=body,
-                headers={"content-type": "application/json"},
+                headers={"content-type": "application/json", "authorization": "Bearer test-server-token"},
             )
             assert status == 400
             assert json.loads(raw)["error"]["code"] == "invalid_request"
@@ -207,6 +208,7 @@ def test_invalid_json_shapes_and_content_lengths(tmp_path):
             connection = http.client.HTTPConnection(address[0], address[1], timeout=5)
             connection.putrequest("POST", "/v1/responses")
             connection.putheader("Content-Type", "application/json")
+            connection.putheader("Authorization", "Bearer test-server-token")
             connection.putheader("Content-Length", length)
             connection.endheaders()
             response = connection.getresponse()
@@ -269,7 +271,7 @@ def json_request_raw(address, path, payload):
         "POST",
         path,
         body=json.dumps(payload).encode(),
-        headers={"content-type": "application/json"},
+        headers={"content-type": "application/json", "authorization": "Bearer test-server-token"},
     )
 
 
@@ -390,6 +392,7 @@ def test_control_headers_reach_chat_and_response_compat_calls(tmp_path):
             body=json.dumps({"input": "hello"}).encode(),
             headers={
                 "content-type": "application/json",
+                "authorization": "Bearer test-server-token",
                 "x-crupier-experiment": "model-rollout",
                 "x-crupier-approval": "apr_test.secret-value-long-enough",
             },

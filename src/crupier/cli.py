@@ -812,6 +812,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=10_000_000,
         help="Maximum JSON or multipart request body size",
     )
+    serve.add_argument(
+        "--auth-token-env",
+        default="CRUPIER_SERVER_TOKEN",
+        help="Environment variable containing the bearer token for live requests",
+    )
     serve.add_argument("--no-dry-run", action="store_true", help="Attempt real provider execution")
     serve.set_defaults(func=cmd_serve)
 
@@ -2818,6 +2823,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
 
 def cmd_serve(args: argparse.Namespace) -> int:
     client = Crupier.from_project(args.project)
+    bearer_token = os.environ.get(args.auth_token_env)
     server = build_openai_compatible_server(
         crupier=client,
         host=args.host,
@@ -2827,6 +2833,7 @@ def cmd_serve(args: argparse.Namespace) -> int:
         allow_remote=args.allow_remote,
         cors_origin=args.cors_origin,
         max_request_bytes=args.max_request_bytes,
+        bearer_token=bearer_token,
     )
     address = server.server_address
     if isinstance(address, tuple):

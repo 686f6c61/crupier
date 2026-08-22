@@ -735,6 +735,7 @@ def test_serve_command_reports_address_cors_interrupt_and_closes(monkeypatch, ca
         allow_remote=False,
         cors_origin="http://localhost:3000",
         max_request_bytes=100,
+        auth_token_env="CRUPIER_SERVER_TOKEN",
         compat="openai",
     )
 
@@ -768,6 +769,7 @@ def test_serve_command_supports_non_tuple_server_addresses(monkeypatch):
         allow_remote=False,
         cors_origin=None,
         max_request_bytes=100,
+        auth_token_env="CRUPIER_SERVER_TOKEN",
         compat="openai",
     )
 

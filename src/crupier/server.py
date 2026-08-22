@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from hmac import compare_digest
 from collections.abc import Iterator
 from email import policy
 from email.parser import BytesParser
@@ -11,7 +12,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -46,6 +47,8 @@ def build_openai_compatible_server(
     cors_origin: str | None = None,
     max_request_bytes: int = 10_000_000,
     file_root: str | Path | None = None,
+    bearer_token: str | None = None,
+    authenticator: Callable[[str], bool] | None = None,
 ) -> ThreadingHTTPServer:
     """Create a stdlib HTTP server exposing a small OpenAI-compatible API."""
 
@@ -54,6 +57,13 @@ def build_openai_compatible_server(
             "crupier serve binds to loopback by default. Pass allow_remote=True or CLI --allow-remote "
             "only when this compatibility server is protected by your own network/auth boundary."
         )
+    if bearer_token is not None and not bearer_token.strip():
+        raise CrupierConfigError("The server bearer token cannot be empty.")
+    authentication_configured = bearer_token is not None or authenticator is not None
+    if allow_remote and not authentication_configured:
+        raise CrupierConfigError("Remote binds require a configured authentication token or authenticator.")
+    if dry_run is not True and not authentication_configured:
+        raise CrupierConfigError("Live server execution requires a configured authentication token or authenticator.")
     compat_client = OpenAI(
         crupier=crupier,
         dry_run=dry_run,
@@ -67,6 +77,10 @@ def build_openai_compatible_server(
         crupier_client = crupier
         browser_origin = cors_origin
         request_body_limit = max(1, int(max_request_bytes))
+        bind_host = host
+        expected_bearer_token = bearer_token
+        request_authenticator = authenticator
+        require_authentication = allow_remote or dry_run is not True
 
     return ThreadingHTTPServer((host, port), Handler)
 
@@ -82,6 +96,8 @@ def serve_openai_compatible(
     cors_origin: str | None = None,
     max_request_bytes: int = 10_000_000,
     file_root: str | Path | None = None,
+    bearer_token: str | None = None,
+    authenticator: Callable[[str], bool] | None = None,
 ) -> None:
     server = build_openai_compatible_server(
         crupier=crupier,
@@ -93,6 +109,8 @@ def serve_openai_compatible(
         cors_origin=cors_origin,
         max_request_bytes=max_request_bytes,
         file_root=file_root,
+        bearer_token=bearer_token,
+        authenticator=authenticator,
     )
     try:
         server.serve_forever()
@@ -106,13 +124,21 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
     crupier_client: Crupier
     browser_origin: str | None = None
     request_body_limit: int = 10_000_000
+    bind_host: str = "127.0.0.1"
+    expected_bearer_token: str | None = None
+    request_authenticator: Callable[[str], bool] | None = None
+    require_authentication: bool = True
 
     def do_OPTIONS(self) -> None:
+        if not self._validate_request_context(authenticate=False):
+            return
         self.send_response(HTTPStatus.NO_CONTENT)
         self._send_common_headers("application/json")
         self.end_headers()
 
     def do_GET(self) -> None:
+        if not self._validate_request_context(authenticate=False):
+            return
         path = self._request_path()
         if path in {"/health", "/v1/health"}:
             self._write_json({"ok": True, "service": "crupier", "compat": "openai"})
@@ -125,6 +151,10 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         try:
             path = self._request_path()
+            if not self._validate_request_context(authenticate=self.require_authentication):
+                return
+            if not self._validate_content_type(path):
+                return
             if path in {"/v1/audio/transcriptions", "/v1/images/edits"}:
                 payload = self._read_multipart()
             else:
@@ -181,6 +211,67 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
                 error_type="server_error",
                 code="internal_error",
             )
+
+    def _validate_request_context(self, *, authenticate: bool) -> bool:
+        host = self.headers.get("host", "")
+        if not _host_matches_bind(host, self.bind_host):
+            self._write_error(
+                HTTPStatus.BAD_REQUEST,
+                "Host header is not allowed.",
+                error_type="invalid_request_error",
+                code="host_not_allowed",
+            )
+            return False
+        origin = self.headers.get("origin")
+        if origin is not None and self.browser_origin != "*" and origin != self.browser_origin:
+            self._write_error(
+                HTTPStatus.FORBIDDEN,
+                "Origin is not allowed.",
+                error_type="invalid_request_error",
+                code="origin_not_allowed",
+            )
+            return False
+        if not authenticate:
+            return True
+        authorization = self.headers.get("authorization", "")
+        scheme, separator, credential = authorization.partition(" ")
+        valid = separator == " " and scheme.lower() == "bearer" and bool(credential)
+        if valid and self.expected_bearer_token is not None:
+            valid = compare_digest(credential, self.expected_bearer_token)
+        elif valid and self.request_authenticator is not None:
+            try:
+                valid = bool(self.request_authenticator(credential))
+            except Exception:  # noqa: BLE001 - custom authenticator fails closed
+                valid = False
+        else:
+            valid = False
+        if valid:
+            return True
+        self._write_error(
+            HTTPStatus.UNAUTHORIZED,
+            "Missing or invalid bearer token.",
+            error_type="authentication_error",
+            code="invalid_api_key",
+        )
+        return False
+
+    def _validate_content_type(self, path: str) -> bool:
+        raw_content_type = self.headers.get("content-type", "")
+        media_type = raw_content_type.partition(";")[0].strip().lower()
+        expected = (
+            "multipart/form-data"
+            if path in {"/v1/audio/transcriptions", "/v1/images/edits"}
+            else "application/json"
+        )
+        if media_type == expected:
+            return True
+        self._write_error(
+            HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+            f"This endpoint requires {expected}.",
+            error_type="invalid_request_error",
+            code="unsupported_media_type",
+        )
+        return False
 
     def _handle_response(self, payload: dict[str, Any]) -> None:
         stream = bool(payload.get("stream", False))
@@ -432,6 +523,22 @@ def _is_loopback_bind_host(host: str) -> bool:
         return ip_address(lowered).is_loopback
     except ValueError:
         return False
+
+
+def _host_matches_bind(host_header: str, bind_host: str) -> bool:
+    if not host_header or any(character.isspace() for character in host_header):
+        return False
+    parsed = urlparse(f"//{host_header}")
+    request_host = parsed.hostname
+    if request_host is None:
+        return False
+    normalized_bind = bind_host.strip().lower()
+    normalized_request = request_host.lower()
+    if _is_loopback_bind_host(normalized_bind):
+        return normalized_request == "localhost" or _is_loopback_bind_host(normalized_request)
+    if normalized_bind in {"0.0.0.0", "::"}:
+        return True
+    return normalized_request == normalized_bind
 
 
 def _plain(value: Any) -> Any:
