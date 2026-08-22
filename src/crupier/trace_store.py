@@ -17,6 +17,7 @@ from typing import Any
 from .errors import CrupierError
 from .models import CrupierResult, OperationResult, RequestEnvelope
 from .redaction import redact_text, redact_value
+from .state import private_write_text
 
 
 @dataclass(slots=True)
@@ -62,11 +63,10 @@ class TraceStore:
         decision = result.trace.storage_decision
         if not self.should_store(decision):
             return None
-        self.root.mkdir(parents=True, exist_ok=True)
         trace_id = result.trace.trace_id
         path = self.root / f"{_safe_trace_id(trace_id)}.json"
         record = self._record(project=project, request=request, result=result, dry_run=dry_run, trace_level=trace_level)
-        path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        private_write_text(path, json.dumps(record, indent=2, sort_keys=True) + "\n")
         return path
 
     def list(self) -> list[StoredTraceRef]:

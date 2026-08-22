@@ -19,6 +19,7 @@ from uuid import uuid4
 from .errors import CrupierError
 from .models import ModelRef
 from .redaction import redact_text
+from .state import ensure_private_directory, private_append_text, private_write_text
 
 VERDICTS = {"accept", "reject", "needs_work", "unknown"}
 
@@ -171,9 +172,10 @@ class HumanFeedbackStore:
             note=_redact(_truncate_note(note)),
             reviewer_hash=reviewer_hash,
         )
-        self.root.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"schema_version": 1, **record.to_dict()}, sort_keys=True) + "\n")
+        private_append_text(
+            self.path,
+            json.dumps({"schema_version": 1, **record.to_dict()}, sort_keys=True) + "\n",
+        )
         return record
 
     def list(self) -> list[HumanFeedbackRecord]:
@@ -335,15 +337,15 @@ def build_human_review_packet(
 
 
 def write_human_review_packet(root: str | Path, packet: HumanReviewPacket) -> list[Path]:
-    reviews_dir = Path(root) / ".crupier" / "feedback" / "reviews"
-    reviews_dir.mkdir(parents=True, exist_ok=True)
+    feedback_dir = ensure_private_directory(Path(root) / ".crupier" / "feedback")
+    reviews_dir = ensure_private_directory(feedback_dir / "reviews")
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     json_path = reviews_dir / f"human_review_{timestamp}.json"
     md_path = reviews_dir / f"human_review_{timestamp}.md"
-    json_path.write_text(json.dumps(packet.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    md_path.write_text(format_human_review_markdown(packet), encoding="utf-8")
+    private_write_text(json_path, json.dumps(packet.to_dict(), indent=2, sort_keys=True) + "\n")
+    private_write_text(md_path, format_human_review_markdown(packet))
     packet.written_files = [str(json_path), str(md_path)]
-    json_path.write_text(json.dumps(packet.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    private_write_text(json_path, json.dumps(packet.to_dict(), indent=2, sort_keys=True) + "\n")
     return [json_path, md_path]
 
 
@@ -399,12 +401,12 @@ def write_human_decision_template(
     *,
     reviewer_hash: str | None = None,
 ) -> Path:
-    decisions_dir = Path(root) / ".crupier" / "feedback" / "decisions"
-    decisions_dir.mkdir(parents=True, exist_ok=True)
+    feedback_dir = ensure_private_directory(Path(root) / ".crupier" / "feedback")
+    decisions_dir = ensure_private_directory(feedback_dir / "decisions")
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = decisions_dir / f"human_decisions_{timestamp}.json"
     template = build_human_decision_template(packet, reviewer_hash=reviewer_hash)
-    path.write_text(json.dumps(template, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    private_write_text(path, json.dumps(template, indent=2, sort_keys=True) + "\n")
     return path
 
 

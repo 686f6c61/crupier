@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -29,6 +31,37 @@ def test_trace_store_is_opt_in(tmp_path):
     client.deal("Plan this", dry_run=True, trace=False)
 
     assert client.traces.list() == []
+
+
+def test_sensitive_artifacts_are_private_under_permissive_umask(tmp_path):
+    client = Crupier(make_config(tmp_path))
+    previous_umask = os.umask(0o022)
+    try:
+        trace = client.deal(
+            "Store private evidence",
+            constraints={"store_trace": True},
+            dry_run=True,
+            trace="summary",
+        )
+        client.feedback.record(
+            project=client.config.project.name,
+            models=["openai:gpt-5.4-mini"],
+            rating=4,
+        )
+        eval_report = client.evals.compare(task="Private eval", write_report=True, dry_run=True)
+    finally:
+        os.umask(previous_umask)
+
+    assert trace.trace is not None
+    assert eval_report.written_path is not None
+    files = [
+        client.config.traces_dir / f"{trace.trace.trace_id}.json",
+        client.config.feedback_dir / "feedback.jsonl",
+        Path(eval_report.written_path),
+    ]
+    directories = [client.config.traces_dir, client.config.feedback_dir, client.config.evals_dir]
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in files)
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o700 for path in directories)
 
 
 def test_trace_store_metadata_does_not_store_prompt_response_or_secret(tmp_path):

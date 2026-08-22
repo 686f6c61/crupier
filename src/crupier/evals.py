@@ -15,6 +15,7 @@ from typing import Any
 
 from .models import RoutePlan
 from .redaction import redact_value
+from .state import ensure_private_directory, private_append_text, private_write_text
 
 BUILTIN_ROUTING_EVALS: list[dict[str, Any]] = [
     {
@@ -756,35 +757,31 @@ def apply_compare_scores_to_registry(
 
 
 def write_eval_report(root: Path, report: EvalRunReport) -> Path:
-    runs_dir = root / "runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir = ensure_private_directory(ensure_private_directory(root) / "runs")
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = runs_dir / f"routing_{timestamp}.json"
-    path.write_text(json.dumps(redact_value(report.to_dict()), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    private_write_text(path, json.dumps(redact_value(report.to_dict()), indent=2, sort_keys=True) + "\n")
     return path
 
 
 def write_compare_report(root: Path, report: CompareRunReport) -> Path:
-    runs_dir = root / "runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir = ensure_private_directory(ensure_private_directory(root) / "runs")
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = runs_dir / f"compare_{timestamp}.json"
-    path.write_text(json.dumps(redact_value(report.to_dict()), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    private_write_text(path, json.dumps(redact_value(report.to_dict()), indent=2, sort_keys=True) + "\n")
     return path
 
 
 def write_compare_dataset_report(root: Path, report: CompareDatasetReport) -> Path:
-    runs_dir = root / "runs"
-    runs_dir.mkdir(parents=True, exist_ok=True)
+    runs_dir = ensure_private_directory(ensure_private_directory(root) / "runs")
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = runs_dir / f"compare_dataset_{timestamp}.json"
-    path.write_text(json.dumps(redact_value(report.to_dict()), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    private_write_text(path, json.dumps(redact_value(report.to_dict()), indent=2, sort_keys=True) + "\n")
     return path
 
 
 def write_compare_history(root: Path, report: CompareDatasetReport) -> Path:
-    history_dir = root / "history"
-    history_dir.mkdir(parents=True, exist_ok=True)
+    history_dir = ensure_private_directory(ensure_private_directory(root) / "history")
     path = history_dir / "compare_runs.jsonl"
     record = {
         "schema_version": 1,
@@ -798,8 +795,7 @@ def write_compare_history(root: Path, report: CompareDatasetReport) -> Path:
         "case_ids": [case.id for case in report.cases],
         "model_scores": [score.to_dict() for score in report.model_scores],
     }
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(redact_value(record), sort_keys=True) + "\n")
+    private_append_text(path, json.dumps(redact_value(record), sort_keys=True) + "\n")
     return path
 
 

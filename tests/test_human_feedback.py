@@ -1,9 +1,13 @@
 import json
+import stat
 from pathlib import Path
+
+import pytest
 
 from crupier import Crupier
 from crupier.cli import main
 from crupier.config import CrupierConfig, write_default_project
+from crupier.errors import CrupierError
 from crupier.models import CapabilityCard, ModelRef
 
 
@@ -90,6 +94,37 @@ def test_human_feedback_can_derive_route_from_stored_trace(tmp_path):
     assert record.models == [result.route.models[0]]
     assert record.mode == "agentic"
     assert record.strategy == "single"
+
+
+def test_sensitive_artifact_writer_rejects_symlink_targets(tmp_path):
+    client = make_feedback_client(tmp_path)
+    client.config.feedback_dir.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep me", encoding="utf-8")
+    client.feedback.path.symlink_to(victim)
+
+    with pytest.raises(CrupierError, match="symbolic link"):
+        client.feedback.record(
+            project=client.config.project.name,
+            models=["openai:good-model"],
+            rating=5,
+        )
+
+    assert victim.read_text(encoding="utf-8") == "keep me"
+
+
+def test_sensitive_append_is_atomic_and_preserves_private_mode(tmp_path):
+    client = make_feedback_client(tmp_path)
+    for rating in (1, 3, 5):
+        client.feedback.record(
+            project=client.config.project.name,
+            models=["openai:good-model"],
+            rating=rating,
+        )
+
+    lines = client.feedback.path.read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["rating"] for line in lines] == [1, 3, 5]
+    assert stat.S_IMODE(client.feedback.path.stat().st_mode) == 0o600
 
 
 def test_cli_feedback_record_summary_and_apply(tmp_path, capsys):

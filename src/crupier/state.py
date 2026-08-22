@@ -6,6 +6,7 @@ import builtins
 import json
 import os
 import sqlite3
+import stat
 from collections.abc import Iterator
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
@@ -13,8 +14,84 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 from typing import Any
+from uuid import uuid4
 
 from .errors import CrupierError
+
+
+_PRIVATE_IO_LOCK = RLock()
+
+
+def ensure_private_directory(path: str | Path) -> Path:
+    """Create a private artifact directory without following a symlink at its leaf."""
+
+    directory = Path(path)
+    if directory.is_symlink():
+        raise CrupierError(f"Sensitive artifact directory {directory} cannot be a symbolic link.")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if directory.is_symlink() or not directory.is_dir():
+        raise CrupierError(f"Sensitive artifact directory {directory} must be a regular directory.")
+    os.chmod(directory, 0o700)
+    return directory
+
+
+def private_write_text(path: str | Path, content: str) -> Path:
+    """Publish a UTF-8 file atomically with mode 0600 and a private parent."""
+
+    target = Path(path)
+    with _PRIVATE_IO_LOCK:
+        ensure_private_directory(target.parent)
+        if target.is_symlink():
+            raise CrupierError(f"Sensitive artifact target {target} cannot be a symbolic link.")
+        if target.exists() and not target.is_file():
+            raise CrupierError(f"Sensitive artifact target {target} must be a regular file.")
+        temporary = target.parent / f".{target.name}.{uuid4().hex}.tmp"
+        descriptor: int | None = None
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(temporary, flags, 0o600)
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                descriptor = None
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+            os.chmod(target, 0o600)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            temporary.unlink(missing_ok=True)
+    return target
+
+
+def private_append_text(path: str | Path, content: str) -> Path:
+    """Append by atomic replacement so a partial JSONL record is never published."""
+
+    target = Path(path)
+    with _PRIVATE_IO_LOCK:
+        ensure_private_directory(target.parent)
+        if target.is_symlink():
+            raise CrupierError(f"Sensitive artifact target {target} cannot be a symbolic link.")
+        existing = ""
+        if target.exists():
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(target, flags)
+            try:
+                metadata = os.fstat(descriptor)
+                if not stat.S_ISREG(metadata.st_mode):
+                    raise CrupierError(f"Sensitive artifact target {target} must be a regular file.")
+                with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                    descriptor = -1
+                    existing = handle.read()
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+        private_write_text(target, existing + content)
+    return target
 
 
 @dataclass(slots=True)
@@ -210,11 +287,7 @@ class SQLiteStateStore:
                 )
             if self.path.exists() and not self.path.is_file():
                 raise CrupierError(f"State path {self.path} must be a regular file.")
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                self.path.parent.chmod(0o700)
-            except OSError:
-                pass
+            ensure_private_directory(self.path.parent)
             with closing(self._raw_connect()) as connection:
                 connection.executescript(
                     """
