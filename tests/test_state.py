@@ -82,6 +82,37 @@ def test_sqlite_state_store_rejects_symbolic_link_paths(tmp_path):
         store.list("session")
 
 
+def test_state_store_fails_loudly_when_chmod_cannot_be_applied(tmp_path, monkeypatch):
+    path = tmp_path / "state.sqlite3"
+    real_chmod = os.chmod
+
+    def fail_state_chmod(target, mode):
+        if os.fspath(target) == os.fspath(path):
+            raise OSError("chmod unavailable")
+        real_chmod(target, mode)
+
+    monkeypatch.setattr(os, "chmod", fail_state_chmod)
+
+    with pytest.raises(CrupierError, match=r"state\.sqlite3.*mode 0600.*chmod unavailable"):
+        SQLiteStateStore(path).list("session")
+
+
+def test_state_store_verifies_resulting_mode_is_private(tmp_path, monkeypatch):
+    path = tmp_path / "state.sqlite3"
+    real_chmod = os.chmod
+
+    def ignore_state_chmod(target, mode):
+        if os.fspath(target) == os.fspath(path):
+            real_chmod(target, 0o644)
+            return
+        real_chmod(target, mode)
+
+    monkeypatch.setattr(os, "chmod", ignore_state_chmod)
+
+    with pytest.raises(CrupierError, match=r"state\.sqlite3.*effective mode is 0644"):
+        SQLiteStateStore(path).list("session")
+
+
 def test_sqlite_state_store_rolls_back_record_when_audit_event_fails(
     tmp_path,
     monkeypatch,

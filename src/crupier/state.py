@@ -336,8 +336,15 @@ class SQLiteStateStore:
                 )
             try:
                 os.chmod(self.path, 0o600)
-            except OSError:
-                pass
+                mode = stat.S_IMODE(self.path.stat().st_mode)
+            except OSError as exc:
+                raise CrupierError(
+                    f"State path {self.path} could not be protected with mode 0600: {exc}"
+                ) from exc
+            if mode != 0o600:
+                raise CrupierError(
+                    f"State path {self.path} must have mode 0600, but its effective mode is {mode:04o}."
+                )
             self._initialized = True
 
     @contextmanager
