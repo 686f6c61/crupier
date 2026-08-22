@@ -22,6 +22,7 @@ from crupier.config import (
 from crupier.errors import (
     CrupierModelUnsupportedError,
     CrupierProviderAuthError,
+    CrupierProviderRateLimitError,
     CrupierProviderUnavailableError,
 )
 from crupier.models import FileAsset, RequestEnvelope
@@ -307,6 +308,38 @@ def test_openrouter_adapter_builds_openai_compatible_client(monkeypatch):
         "X-OpenRouter-Title": "Crupier",
     }
     assert calls["timeout"] == 9.0
+
+
+def test_openrouter_missing_sdk_raises_unavailable(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", None)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    adapter = OpenRouterAdapter(ProviderSettings(enabled=True))
+
+    with pytest.raises(CrupierProviderUnavailableError, match=r"crupier\[openrouter\]") as raised:
+        adapter._build_client()
+
+    assert raised.value.retryable is False
+
+
+def test_openrouter_maps_auth_and_rate_limit_errors():
+    class AuthenticationError(Exception):
+        pass
+
+    class RateLimitError(Exception):
+        pass
+
+    adapter = OpenRouterAdapter(ProviderSettings(enabled=True, env_key="CUSTOM_OPENROUTER_KEY"))
+
+    with pytest.raises(CrupierProviderAuthError) as auth:
+        adapter._raise_mapped_error(AuthenticationError("bad key"))
+    assert auth.value.provider == "openrouter"
+    assert auth.value.env_key == "CUSTOM_OPENROUTER_KEY"
+
+    with pytest.raises(CrupierProviderRateLimitError):
+        adapter._raise_mapped_error(RateLimitError("slow down"))
+
+    with pytest.raises(CrupierProviderUnavailableError, match="OpenRouter request failed"):
+        adapter._raise_mapped_error(RuntimeError("offline"))
 
 
 def test_openrouter_adapter_lists_models_with_openrouter_provider():
