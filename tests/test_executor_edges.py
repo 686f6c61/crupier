@@ -4,7 +4,7 @@ import pytest
 
 import crupier.executor as executor_module
 from crupier.adapters import AdapterResponse
-from crupier.budgets import ExecutionBudget
+from crupier.budgets import ExecutionBudget, request_with_timeout
 from crupier.config import CrupierConfig
 from crupier.errors import (
     CrupierBudgetExceededError,
@@ -140,6 +140,40 @@ def test_execution_budget_coerces_invalid_constraint_values(tmp_path):
     assert budget.max_calls == config.routing.max_calls
     assert budget.max_cost_usd == config.routing.max_cost_per_request_usd
     assert budget.max_latency_ms == config.routing.max_latency_ms
+
+
+@pytest.mark.parametrize(
+    ("constraints", "remaining_seconds", "expected"),
+    [
+        ({"timeout": 30.0}, 2.0, 2.0),
+        ({"timeout_seconds": 1.0}, 2.0, 1.0),
+    ],
+)
+def test_request_with_timeout_merges_configured_and_remaining(
+    constraints, remaining_seconds, expected
+):
+    request = RequestEnvelope(task="x", constraints=constraints)
+
+    result = request_with_timeout(request, remaining_seconds)
+
+    assert result.constraints["timeout_seconds"] == expected
+
+
+def test_request_with_timeout_ignores_non_numeric_timeout():
+    request = RequestEnvelope(task="x", constraints={"timeout": "lento"})
+
+    result = request_with_timeout(request, 5.0)
+
+    assert result.constraints["timeout_seconds"] == 5.0
+
+
+def test_request_with_timeout_passthrough_without_deadline():
+    request = RequestEnvelope(task="x", constraints={"timeout": 3.0})
+
+    result = request_with_timeout(request, None)
+
+    assert result is request
+    assert result.constraints == {"timeout": 3.0}
 
 
 def test_route_second_call_blocked_by_accumulated_budget(tmp_path):
