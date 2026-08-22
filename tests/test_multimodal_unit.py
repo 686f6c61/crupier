@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from crupier.errors import CrupierModelUnsupportedError
+from crupier.errors import CrupierConfigError, CrupierModelUnsupportedError
 from crupier.models import FileAsset, FileRepresentation, FileRoutingPlan
 from crupier.multimodal import (
     _extract_pdf_text,
@@ -208,6 +208,159 @@ def test_file_reference_helpers_cover_suffix_url_and_platform_forms():
         (".docx", "document"),
     ]:
         assert _kind_for(None, suffix) == expected
+    assert _kind_for(None, ".pdf") == "pdf"
+
+
+def test_host_file_policy_covers_data_remote_rooted_and_denied_references(tmp_path):
+    from crupier import multimodal
+
+    root = tmp_path / "allowed"
+    root.mkdir()
+    inside = root / "inside.txt"
+    inside.write_text("ok", encoding="utf-8")
+    rooted_asset = FileAsset(kind="text", name="inside.txt", uri="inside.txt")
+    rooted_dict = {"path": "inside.txt"}
+    files = [
+        {},
+        {"uri": "data:text/plain,ok"},
+        {"url": "https://example.com/remote.txt"},
+        rooted_dict,
+        rooted_asset,
+    ]
+
+    multimodal.enforce_file_access_policy(files, allowed_root=root)
+
+    assert rooted_dict["uri"] == str(inside)
+    assert rooted_asset.uri == str(inside)
+    assert rooted_asset.metadata["file_root"] == str(root.resolve())
+    assert multimodal.is_host_filesystem_uri(None) is False
+    assert multimodal.is_host_filesystem_uri("data:text/plain,ok") is False
+    assert multimodal.is_host_filesystem_uri("file:///tmp/example") is True
+
+    with pytest.raises(CrupierConfigError, match="cannot reference local paths"):
+        multimodal.enforce_file_access_policy([{"uri": str(inside)}], allow_host_paths=False)
+
+
+def test_file_root_resolution_rejects_escape_and_missing_and_decodes_file_uris(tmp_path):
+    from crupier import multimodal
+
+    root = tmp_path / "root"
+    root.mkdir()
+    with pytest.raises(CrupierConfigError, match="escapes"):
+        multimodal.resolve_path_inside_root(str(root), root)
+    with pytest.raises(CrupierConfigError, match="does not exist"):
+        multimodal.resolve_path_inside_root("missing.txt", root)
+
+    local = multimodal._path_from_filesystem_uri("file://localhost/tmp/a%20b.txt")
+    remote = multimodal._path_from_filesystem_uri("file://server/share/a.txt")
+    assert local == Path("/tmp/a b.txt")
+    assert remote == Path("/server/share/a.txt")
+
+
+def test_bounded_data_url_rejects_shape_encoding_and_size():
+    from crupier import multimodal
+
+    for uri, message in [
+        ("data:text/plain", "Invalid data URL"),
+        ("data:text/plain;base64,***", "Invalid data URL encoding"),
+        ("data:text/plain,abcd", "above max 3 bytes"),
+    ]:
+        with pytest.raises(CrupierConfigError, match=message):
+            multimodal._require_bounded_data_url(uri, 3)
+
+
+def test_native_payload_and_local_extraction_honor_file_root(tmp_path):
+    from crupier import multimodal
+
+    root = tmp_path / "root"
+    root.mkdir()
+    image = root / "image.png"
+    image.write_bytes(b"image")
+    asset = FileAsset(
+        kind="image",
+        name="image.png",
+        uri="image.png",
+        metadata={"file_root": str(root)},
+    )
+
+    payload = native_image_payloads([asset])[0]
+    assert base64.b64decode(payload["base64"]) == b"image"
+    assert multimodal._local_path(asset) == image
+
+
+def test_extracted_pdf_and_ocr_context_propagate_truncation_and_adapter(tmp_path, monkeypatch):
+    from crupier import multimodal
+
+    pdf = tmp_path / "report.pdf"
+    pdf.write_bytes(b"pdf")
+    pdf_asset = normalize_file(pdf)
+    pdf_plan = plan_file_representations([pdf_asset])
+    monkeypatch.setattr(
+        multimodal,
+        "_extract_pdf_text",
+        lambda *args, **kwargs: ("clipped", True),
+    )
+    context = prepare_extracted_file_context([pdf_asset], pdf_plan)
+    assert "pdf_text_truncated" in context["warnings"]
+
+    image = tmp_path / "scan.png"
+    image.write_bytes(b"image")
+    image_asset = normalize_file(image)
+    image_plan = plan_file_representations([image_asset], constraints={"file_strategy": "extract"})
+
+    class OCR:
+        name = "test"
+
+        def extract(self, path, *, max_chars, timeout_seconds=None):
+            assert path == image
+            assert timeout_seconds == 7
+            return SimpleNamespace(
+                text="recognized",
+                warnings=[],
+                extractor="test-ocr",
+                truncated=False,
+                tables=[],
+                to_prompt_text=lambda: "recognized",
+                to_dict=lambda include_content=False: {"extractor": "test-ocr"},
+            )
+
+    ocr_context = prepare_extracted_file_context(
+        [image_asset],
+        image_plan,
+        ocr_adapter=OCR(),
+        ocr_timeout_seconds=7,
+    )
+    assert "recognized" in ocr_context["body"]
+
+
+def test_pypdf_marks_character_truncation_and_wraps_parse_errors(tmp_path, monkeypatch):
+    pdf = tmp_path / "report.pdf"
+    pdf.write_bytes(b"pdf")
+
+    class TruncatingReader:
+        def __init__(self, path):
+            self.pages = [SimpleNamespace(extract_text=lambda: "long text")]
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=TruncatingReader))
+    assert _extract_pdf_text(
+        normalize_file(pdf),
+        max_file_bytes=100,
+        max_chars=4,
+        max_pages=10,
+    ) == ("long", True)
+
+    class BrokenReader:
+        def __init__(self, path):
+            raise ValueError("corrupt PDF")
+
+    monkeypatch.setitem(sys.modules, "pypdf", SimpleNamespace(PdfReader=BrokenReader))
+    with pytest.raises(CrupierModelUnsupportedError, match="failed: corrupt PDF"):
+        _extract_pdf_text(
+            normalize_file(pdf),
+            max_file_bytes=100,
+            max_chars=100,
+            max_pages=10,
+        )
 
 
 def test_native_file_payloads_encode_local_and_data_url_assets(tmp_path):

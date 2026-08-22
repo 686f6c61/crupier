@@ -1,4 +1,6 @@
 import subprocess
+import zipfile
+from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,6 +32,12 @@ def test_extracted_types_render_model_context_without_requiring_persistence():
     assert '"amount": "42.50"' in document.to_prompt_text()
     assert "rows" not in document.to_dict()["tables"][0]
     assert document.to_dict(include_content=True)["tables"][0]["rows"][0]["item"] == "hosting"
+
+
+def test_extracted_table_prompt_marks_truncation():
+    table = ExtractedTable(name="bounded", columns=[], rows=[], truncated=True)
+
+    assert table.to_prompt_text().endswith("[table truncated by configured extraction limits]")
 
 
 def test_csv_classification_and_extraction_support_quotes_limits_and_encoding(tmp_path):
@@ -208,6 +216,206 @@ def test_unsupported_and_invalid_office_files_fail_explicitly(tmp_path):
             max_columns=10,
             max_cell_chars=10,
         )
+
+
+def test_docx_rejects_wrong_suffix_missing_dependency_and_parse_failure(tmp_path, monkeypatch):
+    from crupier import extraction
+
+    wrong = tmp_path / "document.txt"
+    wrong.write_bytes(b"plain")
+    with pytest.raises(CrupierModelUnsupportedError, match="currently supports .docx"):
+        extract_docx(
+            wrong,
+            max_file_bytes=100,
+            max_rows=10,
+            max_columns=10,
+            max_cell_chars=10,
+            max_chars=100,
+        )
+
+    document = tmp_path / "document.docx"
+    with zipfile.ZipFile(document, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+
+    real_import = __import__
+
+    def missing_docx(name, *args, **kwargs):
+        if name == "docx":
+            raise ImportError("optional dependency unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", missing_docx)
+    with pytest.raises(CrupierModelUnsupportedError, match="optional dependency"):
+        extract_docx(
+            document,
+            max_file_bytes=10_000,
+            max_rows=10,
+            max_columns=10,
+            max_cell_chars=10,
+            max_chars=100,
+        )
+
+    monkeypatch.setattr("builtins.__import__", real_import)
+    monkeypatch.setattr(extraction, "_validate_office_zip", lambda *args, **kwargs: None)
+    import docx
+
+    monkeypatch.setattr(docx, "Document", lambda path: (_ for _ in ()).throw(ValueError("broken XML")))
+    with pytest.raises(CrupierModelUnsupportedError, match="Could not parse DOCX.*broken XML"):
+        extract_docx(
+            document,
+            max_file_bytes=10_000,
+            max_rows=10,
+            max_columns=10,
+            max_cell_chars=10,
+            max_chars=100,
+        )
+
+
+def test_docx_skips_blank_paragraphs(tmp_path):
+    pytest.importorskip("docx")
+    from docx import Document
+
+    path = tmp_path / "paragraphs.docx"
+    source = Document()
+    source.add_paragraph("   ")
+    source.add_paragraph("kept")
+    source.save(path)
+
+    document = extract_docx(
+        path,
+        max_file_bytes=1_000_000,
+        max_rows=10,
+        max_columns=10,
+        max_cell_chars=10,
+        max_chars=100,
+    )
+
+    assert document.text == "kept"
+
+
+def test_delimited_parser_falls_back_from_sniffer_and_wraps_csv_errors(tmp_path, monkeypatch):
+    from crupier import extraction
+
+    path = tmp_path / "rows.csv"
+    path.write_text("first,second\n1,2\n", encoding="utf-8")
+    monkeypatch.setattr(
+        extraction.csv.Sniffer,
+        "sniff",
+        lambda *args, **kwargs: (_ for _ in ()).throw(extraction.csv.Error("unknown dialect")),
+    )
+    assert extract_spreadsheet(
+        path,
+        max_file_bytes=100,
+        max_rows=10,
+        max_columns=10,
+        max_cell_chars=10,
+    ).extractor == "csv:,"
+
+    class BrokenRows:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            raise extraction.csv.Error("malformed row")
+
+    monkeypatch.setattr(extraction.csv, "reader", lambda *args, **kwargs: BrokenRows())
+    with pytest.raises(CrupierModelUnsupportedError, match="Could not parse.*malformed row"):
+        extract_spreadsheet(
+            path,
+            max_file_bytes=100,
+            max_rows=10,
+            max_columns=10,
+            max_cell_chars=10,
+        )
+
+
+def test_xlsx_reports_missing_dependency_and_parse_failure(tmp_path, monkeypatch):
+    path = tmp_path / "sheet.xlsx"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+    real_import = __import__
+
+    def missing_openpyxl(name, *args, **kwargs):
+        if name == "openpyxl":
+            raise ImportError("optional dependency unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", missing_openpyxl)
+    with pytest.raises(CrupierModelUnsupportedError, match="optional dependency"):
+        extract_spreadsheet(
+            path,
+            max_file_bytes=10_000,
+            max_rows=10,
+            max_columns=10,
+            max_cell_chars=10,
+        )
+
+    monkeypatch.setattr("builtins.__import__", real_import)
+    import openpyxl
+
+    monkeypatch.setattr(openpyxl, "load_workbook", lambda **kwargs: (_ for _ in ()).throw(ValueError("bad workbook")))
+    with pytest.raises(CrupierModelUnsupportedError, match="Could not parse XLSX.*bad workbook"):
+        extract_spreadsheet(
+            path,
+            max_file_bytes=10_000,
+            max_rows=10,
+            max_columns=10,
+            max_cell_chars=10,
+        )
+
+
+def test_extraction_helpers_cover_empty_tables_headers_dates_and_file_limits(tmp_path):
+    from crupier import extraction
+
+    table = extraction._table_from_matrix(
+        name="empty",
+        matrix=[],
+        max_rows=10,
+        max_columns=10,
+        max_cell_chars=10,
+    )
+    assert table.total_rows == 0
+    assert extraction._looks_like_header([], []) is False
+    assert extraction._looks_like_header(["same", "same"], [[1, 2]]) is False
+    assert extraction._cell_text(date(2026, 8, 23)) == "2026-08-23"
+
+    missing = tmp_path / "missing.csv"
+    with pytest.raises(CrupierModelUnsupportedError, match="does not exist"):
+        extract_spreadsheet(
+            missing,
+            max_file_bytes=10,
+            max_rows=10,
+            max_columns=10,
+            max_cell_chars=10,
+        )
+    large = tmp_path / "large.csv"
+    large.write_bytes(b"1234")
+    with pytest.raises(CrupierModelUnsupportedError, match="above max 3 bytes"):
+        extract_spreadsheet(
+            large,
+            max_file_bytes=3,
+            max_rows=10,
+            max_columns=10,
+            max_cell_chars=10,
+        )
+
+
+def test_office_zip_rejects_excessive_entry_count(tmp_path, monkeypatch):
+    from crupier import extraction
+
+    class OversizedArchive:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def infolist(self):
+            return [SimpleNamespace(file_size=0)] * 10_001
+
+    monkeypatch.setattr(extraction.zipfile, "ZipFile", lambda path: OversizedArchive())
+    with pytest.raises(CrupierModelUnsupportedError, match="10001 entries"):
+        extraction._validate_office_zip(tmp_path / "large.docx", max_uncompressed_bytes=10)
 
 
 def test_tesseract_adapter_success_timeout_missing_and_error(tmp_path, monkeypatch):
