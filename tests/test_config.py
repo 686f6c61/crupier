@@ -1,7 +1,9 @@
 import os
+import subprocess
 
 from crupier import Crupier
 from crupier.config import (
+    DEFAULT_GITIGNORE_ENTRIES,
     OLLAMA_CLOUD_HOST,
     OPENROUTER_DEFAULT_HOST,
     CrupierConfig,
@@ -53,6 +55,37 @@ def test_write_default_project_preserves_existing_gitignore_entries(tmp_path):
     assert lines.count(".env") == 1
     assert "node_modules/" in lines
     assert "!.env.example" in lines
+
+
+def test_init_ignores_crupier_backlog(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    write_default_project(tmp_path)
+    backlog = tmp_path / ".crupier" / "backlog" / "READY.jsonl"
+    backlog.parent.mkdir(parents=True)
+    backlog.write_text("{}\n", encoding="utf-8")
+
+    ignored = subprocess.run(
+        ["git", "check-ignore", "--quiet", ".crupier/backlog/READY.jsonl"], cwd=tmp_path, check=False
+    )
+
+    assert ignored.returncode == 0
+
+
+def test_init_ignores_crupier_state_and_snapshots(tmp_path):
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    write_default_project(tmp_path)
+    state = tmp_path / ".crupier" / "state.sqlite3-wal"
+    snapshot = tmp_path / ".crupier" / "registry" / "snapshots" / "baseline.json"
+    state.write_bytes(b"")
+    snapshot.write_text("{}\n", encoding="utf-8")
+
+    for relative in (".crupier/state.sqlite3-wal", ".crupier/registry/snapshots/baseline.json"):
+        ignored = subprocess.run(["git", "check-ignore", "--quiet", relative], cwd=tmp_path, check=False)
+        assert ignored.returncode == 0
+
+
+def test_default_gitignore_covers_profiles_dir():
+    assert ".crupier/profiles/" in DEFAULT_GITIGNORE_ENTRIES
 
 
 def test_config_loads_profiles_and_models():

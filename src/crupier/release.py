@@ -43,6 +43,10 @@ _PINNED_GITHUB_ACTIONS = {
     "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
     "pypa/gh-action-pypi-publish": "dc37677b2e1c63e2034f94d8a5b11f265b73ba33",
 }
+_SHAREABLE_CRUPIER_PATTERNS = (
+    ".crupier/profiles/*.json",
+    ".crupier/profiles/*.toml",
+)
 _NON_FINAL_RELEASE_PATTERNS = [
     re.compile(r"\b\d+\.\d+\.\d+(?:a|b|alpha|beta|rc)\d*\b", re.IGNORECASE),
     re.compile(r"\b(?:alpha|beta|pre-release|prerelease|release candidate)\b", re.IGNORECASE),
@@ -737,21 +741,35 @@ def _repository_gitignore_check(root: Path) -> ReleaseCheck:
         "build/",
     ]
     missing = [entry for entry in required_entries if entry not in normalized]
-    ok = path.exists() and not missing
+    tracked_local_artifacts = [
+        relative.as_posix()
+        for relative in _git_tracked_files(root)
+        if relative.parts
+        and relative.parts[0] == ".crupier"
+        and not any(fnmatch.fnmatch(relative.as_posix(), pattern) for pattern in _SHAREABLE_CRUPIER_PATTERNS)
+    ]
+    ok = path.exists() and not missing and not tracked_local_artifacts
+    status = "pass" if ok else "fail" if tracked_local_artifacts else "warn"
     return ReleaseCheck(
         id="repository_gitignore",
-        status="pass" if ok else "warn",
-        severity="medium",
+        status=status,
+        severity="high" if tracked_local_artifacts else "medium",
         summary="Repository .gitignore protects local keys, caches, builds, and generated Crupier artifacts."
         if ok
+        else "Repository tracks local Crupier artifacts that must remain private."
+        if tracked_local_artifacts
         else "Repository .gitignore is missing entries for local keys, caches, builds, or generated Crupier artifacts.",
         evidence={
             "path": ".gitignore",
             "exists": path.exists(),
             "missing_entries": missing,
+            "tracked_local_artifacts": tracked_local_artifacts,
+            "shareable_crupier_patterns": list(_SHAREABLE_CRUPIER_PATTERNS),
         },
         actions=[
-            "Add .gitignore entries for local .env files, virtualenvs, caches, dist/build outputs, and generated .crupier artifacts before public release."
+            "Remove tracked local .crupier artifacts from Git; only deliberately shared profile TOML/JSON files are allowed."
+            if tracked_local_artifacts
+            else "Add .gitignore entries for local .env files, virtualenvs, caches, dist/build outputs, and generated .crupier artifacts before public release."
         ]
         if not ok
         else [],

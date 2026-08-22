@@ -19,6 +19,9 @@ docs/
 .crupier/state.sqlite3*
 .crupier/registry/models.json
 .crupier/registry/capability-cards/
+.crupier/registry/snapshots/
+.crupier/profiles/
+.crupier/backlog/
 .crupier/audits/
 .crupier/code-comments/
 .crupier/evals/history/

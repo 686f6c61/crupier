@@ -550,7 +550,7 @@ prefer = ["structured_output", "schema_validity"]
 strategy = "orchestrated"
 ```
 
-`strategy = "orchestrated"` lets the configured LLM choose the route strategy from the request and candidate evidence. Setting `single`, `cascade`, `fusion`, or another concrete strategy turns it into a project policy that the model orchestrator must obey. Profiles can also live in `.crupier/profiles/*.toml` or `.json`, which lets teams share routing presets without editing the main `crupier.toml`. Advanced profiles can declare `strategy_rules` so, for example, a short tool request stays `single` while a longer high-risk tool workflow uses `critique_repair` or `delegate`.
+`strategy = "orchestrated"` lets the configured LLM choose the route strategy from the request and candidate evidence. Setting `single`, `cascade`, `fusion`, or another concrete strategy turns it into a project policy that the model orchestrator must obey. Profiles can also live in `.crupier/profiles/*.toml` or `.json`; they remain local and ignored by default, although a team can force-add selected TOML/JSON profiles deliberately when it wants to share a reviewed routing preset. Advanced profiles can declare `strategy_rules` so, for example, a short tool request stays `single` while a longer high-risk tool workflow uses `critique_repair` or `delegate`.
 
 Use a profile from Python:
 
@@ -1158,6 +1158,11 @@ permission-restricted on POSIX systems. Approval persistence necessarily
 contains the frozen request required for later execution; experiment outputs
 remain off by default.
 
+Registry snapshots, local profiles, audit handoffs, and the Crupier backlog are
+also ignored by default. The release checker rejects tracked `.crupier`
+artifacts except selected TOML/JSON profiles that have been force-added
+deliberately for team sharing.
+
 ## Registry Snapshots
 
 Freeze the registry state used by a project:
@@ -1308,7 +1313,7 @@ Implemented now:
 - adoption audit, doctor, package, handoff, code comments, SARIF, and signoff workflows
 - opt-in metadata traces with redaction and replay only when prompt/input storage is explicitly enabled
 - OpenAI-like Python client, optional autopatch, and local HTTP server for chat, embeddings, reranking, images, speech, and transcription
-- declarative policy rules and shared `.crupier/profiles/` routing presets
+- declarative policy rules and local-by-default `.crupier/profiles/` routing presets
 - provider retries with jitter, circuit breakers, and route-time degraded-provider exclusion
 - typed errors and `py.typed`
 - release gate with build, artifact, install smoke, PyPI name, project URL, provider readiness, CI, security, and dependency checks

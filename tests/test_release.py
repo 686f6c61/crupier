@@ -121,8 +121,12 @@ def write_release_project(root):
         ".coverage\n"
         "coverage.xml\n"
         "htmlcov/\n"
+        ".crupier/state.sqlite3*\n"
         ".crupier/registry/models.json\n"
         ".crupier/registry/capability-cards/\n"
+        ".crupier/registry/snapshots/\n"
+        ".crupier/profiles/\n"
+        ".crupier/backlog/\n"
         ".crupier/traces/\n"
         ".crupier/audits/\n"
         ".crupier/code-comments/\n"
@@ -485,6 +489,24 @@ def test_release_check_warns_when_repository_gitignore_is_incomplete(tmp_path):
     assert ".env" in checks["repository_gitignore"].evidence["missing_entries"]
     assert ".crupier/traces/" in checks["repository_gitignore"].evidence["missing_entries"]
     assert "dist/" in checks["repository_gitignore"].evidence["missing_entries"]
+
+
+def test_release_check_fails_if_local_crupier_artifact_is_tracked(tmp_path):
+    write_release_project(tmp_path)
+    backlog = tmp_path / ".crupier" / "backlog" / "READY.jsonl"
+    backlog.parent.mkdir(parents=True)
+    backlog.write_text('{"id":"local"}\n', encoding="utf-8")
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "add", "-f", ".crupier/backlog/READY.jsonl"], cwd=tmp_path, check=True, capture_output=True
+    )
+
+    checks = {check.id: check for check in run_release_checks(tmp_path, build=False).checks}
+
+    assert checks["repository_gitignore"].status == "fail"
+    assert checks["repository_gitignore"].evidence["tracked_local_artifacts"] == [
+        ".crupier/backlog/READY.jsonl"
+    ]
 
 
 def test_release_check_fails_when_readme_uses_relative_pypi_links(tmp_path):
