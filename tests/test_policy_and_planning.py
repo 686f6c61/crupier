@@ -20,7 +20,7 @@ from crupier.models import (
 )
 from crupier.orchestrator import DeterministicOrchestrator, ModelOrchestrator
 from crupier.planner import RoutePlanner
-from crupier.policy import PolicyEngine
+from crupier.policy import PolicyEngine, PolicyResult
 from crupier.registry import ModelRegistry
 
 
@@ -282,6 +282,69 @@ def test_policy_filter_exclusions_parametrizado(tmp_path, case, expected_filter)
     assert [card.model_ref.key for card in result.allowed] == ["anthropic:allowed"]
     assert expected_filter in result.filters_applied
     assert result.excluded[0].model == excluded.model_ref.key
+
+
+def _fusion_plan_for_validation() -> RoutePlan:
+    return RoutePlan(
+        strategy="fusion",
+        steps=[
+            RouteStep(role="panel", models=["openai:a", "anthropic:b"]),
+            RouteStep(role="judge", model="openai:a"),
+            RouteStep(role="final_writer", model="anthropic:b"),
+        ],
+    )
+
+
+def _policy_result_for_validation() -> PolicyResult:
+    return PolicyResult(
+        allowed=[
+            CapabilityCard(model_ref=ModelRef.parse(model), last_updated="test")
+            for model in ("openai:a", "anthropic:b", "google:c")
+        ]
+    )
+
+
+def test_route_validation_rejects_fusion_when_disabled(tmp_path):
+    config = make_config(tmp_path, allow=[])
+    config.routing.allow_fusion = False
+
+    with pytest.raises(CrupierRouteValidationError, match="fusion is disabled"):
+        PolicyEngine(config).validate_route(
+            _fusion_plan_for_validation(),
+            _policy_result_for_validation(),
+            RequestEnvelope(task="x"),
+        )
+
+
+def test_route_validation_rejects_plan_above_max_calls(tmp_path):
+    config = make_config(tmp_path, allow=[])
+
+    with pytest.raises(CrupierRouteValidationError, match="above max_calls"):
+        PolicyEngine(config).validate_route(
+            _fusion_plan_for_validation(),
+            _policy_result_for_validation(),
+            RequestEnvelope(task="x", constraints={"max_calls": 3}),
+        )
+
+
+@pytest.mark.parametrize(
+    ("constraints", "message"),
+    [
+        ({"min_panel_size": "dos"}, "must be integers"),
+        ({"max_panel_size": 1}, "must be at least 2"),
+        ({"min_panel_size": 4, "max_panel_size": 2}, "cannot exceed"),
+        ({"min_panel_size": 3}, "below min_panel_size=3"),
+    ],
+)
+def test_route_validation_rejects_invalid_panel_sizes(tmp_path, constraints, message):
+    config = make_config(tmp_path, allow=[])
+
+    with pytest.raises(CrupierRouteValidationError, match=message):
+        PolicyEngine(config).validate_route(
+            _fusion_plan_for_validation(),
+            _policy_result_for_validation(),
+            RequestEnvelope(task="x", constraints=constraints),
+        )
 
 
 def test_private_mode_prefers_ollama_local_first(tmp_path):
