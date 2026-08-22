@@ -6,6 +6,7 @@ import asyncio
 import builtins
 import hashlib
 import os
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import RLock
@@ -241,8 +242,21 @@ class Crupier:
         return None
 
     @classmethod
-    def from_project(cls, path: str | Path = ".") -> Crupier:
-        return cls(CrupierConfig.from_toml(Path(path)))
+    def from_project(cls, path: str | Path | None = None) -> Crupier:
+        if path is not None:
+            return cls(CrupierConfig.from_toml(Path(path)))
+
+        current_project = Path.cwd()
+        if (current_project / "crupier.toml").exists():
+            return cls(CrupierConfig.from_toml(current_project))
+
+        environment_project = os.environ.get("CRUPIER_PROJECT")
+        if environment_project:
+            project_root = Path(environment_project).expanduser().resolve()
+            if (project_root / "crupier.toml").exists():
+                return cls(CrupierConfig.from_toml(project_root))
+            return cls(CrupierConfig(root=project_root))
+        return cls(CrupierConfig.from_toml(current_project))
 
     @classmethod
     def from_toml(cls, path: str | Path) -> Crupier:
@@ -254,7 +268,7 @@ class Crupier:
             return cls(config)
         return cls(CrupierConfig.from_dict(config))
 
-    def configure_orchestrator(
+    def update_orchestrator(
         self,
         *,
         mode: str | None = None,
@@ -323,6 +337,40 @@ class Crupier:
             self.executor.config = self.config
         self.planner = RoutePlanner(self.config, orchestrator=self._build_orchestrator())
         return self
+
+    def configure_orchestrator(
+        self,
+        *,
+        mode: str | None = None,
+        model: str | None = None,
+        fallback_model: str | None = None,
+        fallback: str | None = None,
+        temperature: float | None = None,
+        require_validated_plan: bool | None = None,
+        max_repairs: int | None = None,
+        candidate_limit: int | None = None,
+        allow_prompt_summary_only: bool | None = None,
+        persist: bool = False,
+    ) -> Crupier:
+        """Deprecated alias for :meth:`update_orchestrator`."""
+
+        warnings.warn(
+            "configure_orchestrator() is deprecated; use update_orchestrator() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.update_orchestrator(
+            mode=mode,
+            model=model,
+            fallback_model=fallback_model,
+            fallback=fallback,
+            temperature=temperature,
+            require_validated_plan=require_validated_plan,
+            max_repairs=max_repairs,
+            candidate_limit=candidate_limit,
+            allow_prompt_summary_only=allow_prompt_summary_only,
+            persist=persist,
+        )
 
     def deal(
         self,

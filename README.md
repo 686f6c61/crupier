@@ -327,6 +327,10 @@ crupier experiments rollback support-rollout --actor ana --reason "Latency regre
 
 Crupier uses your provider keys from environment variables or a local `.env` file. Existing exported variables win over `.env` values.
 
+`Crupier.from_project()` uses `crupier.toml` from the current directory when present. Otherwise,
+set `CRUPIER_PROJECT` to a project directory; if that directory has no `crupier.toml`, Crupier
+starts from defaults with that directory as its root. An explicit `from_project(path)` always wins.
+
 ```bash
 OPENAI_API_KEY=
 ANTHROPIC_API_KEY=
@@ -484,13 +488,15 @@ crupier orchestrator set --model openai:gpt-5.4-mini
 from crupier import Crupier
 
 crupier = Crupier.from_project()
-crupier.configure_orchestrator(
+crupier.update_orchestrator(
     mode="model",
     model="ollama:glm-5.2",
     fallback_model="anthropic:claude-opus-4-8",
     persist=True,
 )
 ```
+
+`configure_orchestrator(...)` remains as a deprecated compatibility alias.
 
 `ollama:glm-5.2` is a strong preset when Ollama Cloud is enabled for the project, not a lock-in. Any model visible to your enabled provider accounts can be used as the orchestrator model by setting `provider:model`.
 

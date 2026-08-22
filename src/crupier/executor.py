@@ -1173,7 +1173,9 @@ class RouteExecutor:
                     )
                 raise
             return response
-        raise CrupierProviderUnavailableError(f"Provider call failed after retries. Last error: {last_error}") from last_error
+        raise CrupierProviderUnavailableError(  # pragma: no cover - every loop exit raises or returns
+            f"Provider call failed after retries. Last error: {last_error}"
+        ) from last_error
 
     def _budget_cards(self) -> list[CapabilityCard]:
         try:

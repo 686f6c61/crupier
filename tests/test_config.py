@@ -1,6 +1,8 @@
 import os
 import subprocess
 
+import pytest
+
 from crupier import Crupier
 from crupier.config import (
     DEFAULT_GITIGNORE_ENTRIES,
@@ -174,7 +176,7 @@ def test_write_orchestrator_settings_and_sdk_configuration(tmp_path):
     assert config.orchestrator.allow_prompt_summary_only is False
 
     client = Crupier.from_project(tmp_path)
-    client.configure_orchestrator(
+    client.update_orchestrator(
         mode="hybrid",
         model="anthropic:claude-opus-4-8",
         max_repairs=2,
@@ -187,6 +189,66 @@ def test_write_orchestrator_settings_and_sdk_configuration(tmp_path):
     assert client.config.orchestrator.candidate_limit == 7
     assert client.config.orchestrator.allow_prompt_summary_only is True
     assert client.planner.config.orchestrator.model == "anthropic:claude-opus-4-8"
+
+
+def test_update_orchestrator_persists_and_rebuilds_components(tmp_path):
+    write_default_project(tmp_path)
+    client = Crupier.from_project(tmp_path)
+    previous_planner = client.planner
+
+    returned = client.update_orchestrator(
+        mode="model",
+        model="openai:gpt-5.5",
+        persist=True,
+    )
+
+    persisted = CrupierConfig.from_toml(tmp_path)
+    assert returned is client
+    assert persisted.orchestrator.mode == "model"
+    assert persisted.orchestrator.model == "openai:gpt-5.5"
+    assert client.config.orchestrator.mode == "model"
+    assert client.config.orchestrator.model == "openai:gpt-5.5"
+    assert client.planner is not previous_planner
+    assert client.planner.config is client.config
+    assert client.registry.config is client.config
+    assert client.models._config is client.config
+    assert client.policy.config is client.config
+    assert client.executor.config is client.config
+
+
+def test_from_project_uses_environment_when_no_file(tmp_path, monkeypatch):
+    project = tmp_path / "environment-project"
+    project.mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CRUPIER_PROJECT", str(project))
+
+    client = Crupier.from_project()
+
+    assert client.config == CrupierConfig(root=project.resolve())
+    assert client.config.root == project.resolve()
+
+
+def test_from_project_explicit_path_wins_over_environment(tmp_path, monkeypatch):
+    explicit = tmp_path / "explicit"
+    environment = tmp_path / "environment"
+    write_default_project(explicit)
+    environment.mkdir()
+    monkeypatch.setenv("CRUPIER_PROJECT", str(environment))
+
+    client = Crupier.from_project(explicit)
+
+    assert client.config.root == explicit.resolve()
+
+
+def test_configure_orchestrator_delegates_with_deprecation_warning(tmp_path):
+    write_default_project(tmp_path)
+    client = Crupier.from_project(tmp_path)
+
+    with pytest.warns(DeprecationWarning, match="update_orchestrator"):
+        returned = client.configure_orchestrator(mode="deterministic")
+
+    assert returned is client
+    assert client.config.orchestrator.mode == "deterministic"
 
 
 def test_orchestrator_candidate_limit_is_validated_before_mutation_or_write(tmp_path):
@@ -204,7 +266,7 @@ def test_orchestrator_candidate_limit_is_validated_before_mutation_or_write(tmp_
     client = Crupier.from_project(tmp_path)
     previous = client.config.orchestrator.candidate_limit
     try:
-        client.configure_orchestrator(candidate_limit=33)
+        client.update_orchestrator(candidate_limit=33)
     except CrupierConfigError as exc:
         assert "candidate_limit" in str(exc)
     else:

@@ -14,7 +14,7 @@ from crupier.errors import (
     CrupierRouteValidationError,
     CrupierStructuredOutputError,
 )
-from crupier.executor import RouteExecutor
+from crupier.executor import RouteExecutor, _previous_tool_executions
 from crupier.models import (
     CapabilityCard,
     DecisionTrace,
@@ -751,3 +751,193 @@ def test_request_can_force_sequential_panel_execution(tmp_path, monkeypatch):
 
     assert result == []
     assert calls == [(False, ["openai:a", "openai:b"])]
+
+
+def test_structured_repair_parses_the_repaired_provider_response(tmp_path):
+    adapter = ScriptedAdapter(outputs=['{"answer":"repaired"}'])
+    executor = RouteExecutor(_config(tmp_path), adapters={"openai": adapter})
+    request = RequestEnvelope(task="x")
+    raw_outputs = []
+
+    parsed = executor._parse_or_repair_structured(
+        "not-json",
+        request,
+        _trace(),
+        raw_outputs,
+        {"type": "object", "required": ["answer"]},
+        model="openai:a",
+        budget=_budget(executor, request),
+    )
+
+    assert parsed == {"answer": "repaired"}
+    assert adapter.calls[0]["request"].response_schema == {
+        "type": "object",
+        "required": ["answer"],
+    }
+
+
+def test_cascade_and_sequential_panel_preserve_budget_errors(tmp_path, monkeypatch):
+    executor = RouteExecutor(_config(tmp_path), adapters={"openai": ScriptedAdapter()})
+    request = RequestEnvelope(task="x")
+    budget = _budget(executor, request)
+    monkeypatch.setattr(
+        executor,
+        "_call_model",
+        lambda *args, **kwargs: (_ for _ in ()).throw(CrupierBudgetExceededError("budget")),
+    )
+
+    with pytest.raises(CrupierBudgetExceededError, match="budget"):
+        executor._execute_cascade(request, _plan(strategy="cascade"), _trace(), [], budget)
+    with pytest.raises(CrupierBudgetExceededError, match="budget"):
+        executor._run_panel_models_sequential(request, ["openai:a"], _trace(), [], budget)
+
+
+def test_empty_cascade_response_and_missing_or_failed_role_models(tmp_path, monkeypatch):
+    executor = RouteExecutor(_config(tmp_path))
+    assert executor._heuristic_validate_cascade_response(
+        RequestEnvelope(task="x"), AdapterResponse(text="")
+    ) == (False, "empty response")
+
+    with pytest.raises(CrupierProviderUnavailableError, match="no executable model"):
+        executor._call_plan_role(
+            RoutePlan(strategy="critique_repair", steps=[]),
+            "critic",
+            "prompt",
+            RequestEnvelope(task="x"),
+            _trace(),
+            [],
+            trace_role="critic",
+            budget=_budget(executor, RequestEnvelope(task="x")),
+        )
+
+    monkeypatch.setattr(
+        executor,
+        "_call_model",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("adapter failed")),
+    )
+    plan = RoutePlan(
+        strategy="critique_repair",
+        steps=[RouteStep(role="critic", model="openai:a")],
+    )
+    trace = _trace()
+    with pytest.raises(CrupierProviderUnavailableError, match="All models for role"):
+        executor._call_plan_role(
+            plan,
+            "critic",
+            "prompt",
+            RequestEnvelope(task="x"),
+            trace,
+            [],
+            trace_role="critic",
+            budget=_budget(executor, RequestEnvelope(task="x")),
+        )
+    assert trace.fallbacks[0]["error"] == "adapter failed"
+
+
+def test_delegate_bounds_nested_cost_depth_and_constraints(tmp_path, monkeypatch):
+    import crupier.client as client_module
+
+    captured = {}
+
+    class NestedClient:
+        def __init__(self, config, *, adapters):
+            captured["config"] = config
+            captured["adapters"] = adapters
+
+        def deal(self, **kwargs):
+            captured["deal"] = kwargs
+            return executor_module.CrupierResult(output_text="delegated")
+
+    monkeypatch.setattr(client_module, "Crupier", NestedClient)
+    executor = RouteExecutor(_config(tmp_path))
+    request = RequestEnvelope(
+        task="outer",
+        constraints={"max_depth": 3, "max_calls": 5, "max_cost_usd": 2.0, "dry_run": True},
+    )
+    budget = _budget(executor, request)
+    plan = RoutePlan(
+        strategy="delegate",
+        steps=[
+            RouteStep(
+                role="delegate",
+                params={"constraints": {"max_depth": 99, "tenant": "nested"}},
+            )
+        ],
+    )
+
+    output = executor._execute_delegate(request, plan, _trace(), budget)
+
+    assert output == "delegated"
+    nested = captured["deal"]["constraints"]
+    assert nested["max_depth"] == 2
+    assert nested["max_cost_usd"] == 2.0
+    assert nested["tenant"] == "nested"
+    assert "dry_run" not in nested
+
+
+def test_success_after_deadline_is_discarded_and_audited(tmp_path, monkeypatch):
+    adapter = ScriptedAdapter(outputs=["too late"])
+    executor = RouteExecutor(_config(tmp_path), adapters={"openai": adapter})
+    request = RequestEnvelope(task="x")
+    budget = _budget(executor, request)
+    monkeypatch.setattr(
+        budget,
+        "ensure_deadline",
+        lambda: (_ for _ in ()).throw(CrupierExecutionLimitError("deadline")),
+    )
+    trace = _trace()
+    raw_outputs = []
+
+    with pytest.raises(CrupierExecutionLimitError, match="deadline"):
+        executor._call_model(
+            "openai:a",
+            "prompt",
+            request,
+            trace,
+            raw_outputs,
+            role="primary",
+            budget=budget,
+        )
+
+    assert raw_outputs[0].text == "too late"
+    assert trace.provider_calls[0]["discarded_after_deadline"] is True
+    assert trace.errors[-1]["phase"] == "execution_budget"
+    assert trace.errors[-1]["retryable"] is False
+
+
+def test_cascade_model_lists_and_previous_tool_execution_validation():
+    plan = RoutePlan(
+        strategy="cascade",
+        steps=[
+            RouteStep(role="primary", model="openai:a", models=["openai:a", "openai:b"]),
+            RouteStep(role="fallback", models=["openai:b", "openai:c"]),
+        ],
+    )
+    assert RouteExecutor._cascade_models(plan) == ["openai:a", "openai:b", "openai:c"]
+
+    request = RequestEnvelope(
+        task="x",
+        metadata={
+            "_crupier_previous_tool_executions": [
+                "invalid",
+                {"idempotency_key": "", "name": "lookup", "status": "completed"},
+                {
+                    "idempotency_key": "key",
+                    "name": "lookup",
+                    "status": "completed",
+                    "arguments": "invalid",
+                },
+                {
+                    "idempotency_key": "key",
+                    "name": "lookup",
+                    "status": "completed",
+                    "arguments": {"id": 1},
+                    "result": "ok",
+                },
+            ]
+        },
+    )
+
+    executions = _previous_tool_executions(request)
+    assert len(executions) == 1
+    assert executions[0].arguments == {"id": 1}
