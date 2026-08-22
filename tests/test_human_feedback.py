@@ -254,6 +254,30 @@ def test_cli_feedback_record_can_derive_from_compare_report(tmp_path, capsys):
     assert "output_preview" not in json.dumps(record_payload)
 
 
+def test_compare_report_write_warns_path_and_sensitivity(tmp_path, capsys):
+    write_default_project(tmp_path)
+
+    status = main(
+        [
+            "--project",
+            str(tmp_path),
+            "eval",
+            "compare",
+            "Answer briefly",
+            "--mode",
+            "fast",
+            "--write-report",
+            "--json",
+        ]
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert status == 0
+    assert payload["written_path"] in captured.err
+    assert "sensitive" in captured.err.lower()
+
+
 def test_cli_feedback_review_creates_actionable_packet(tmp_path, capsys):
     write_default_project(tmp_path)
 

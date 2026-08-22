@@ -319,6 +319,11 @@ def build_parser() -> argparse.ArgumentParser:
     eval_compare.add_argument("--expect-contains", action="append", help="Deterministic output substring check")
     eval_compare.add_argument("--no-dry-run", action="store_true", help="Attempt real provider execution")
     eval_compare.add_argument("--write-report", action="store_true", help="Write JSON report under .crupier/evals/runs")
+    eval_compare.add_argument(
+        "--store-content",
+        action="store_true",
+        help="Store redacted task, input, and output previews in the report (sensitive)",
+    )
     eval_compare.add_argument("--json", action="store_true", help="Print JSON")
     eval_compare.set_defaults(func=cmd_eval_compare)
     eval_compare_dataset = eval_subparsers.add_parser(
@@ -1453,7 +1458,14 @@ def cmd_eval_compare(args: argparse.Namespace) -> int:
         expect_contains=args.expect_contains,
         dry_run=not args.no_dry_run,
         write_report=args.write_report,
+        store_content=args.store_content,
     )
+    if report.written_path:
+        print(
+            f"warning: compare report written to {report.written_path}; "
+            "treat this file as sensitive, especially when --store-content is enabled.",
+            file=sys.stderr,
+        )
     if args.json:
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
         return 0 if report.winner else 1

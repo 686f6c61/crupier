@@ -1,3 +1,4 @@
+import hashlib
 import json
 
 from crupier import Crupier
@@ -155,6 +156,70 @@ def test_eval_compare_recommends_lower_cost_passing_variant(tmp_path):
     assert report.winner == "mini"
     assert report.variants[0].human_questions
     assert all(item.estimated_cost_usd is not None for item in report.variants)
+
+
+def test_compare_report_default_omits_task_and_output_preview_content(tmp_path):
+    client = Crupier(make_config(tmp_path))
+    task = "Summarize the account for alice@example.test"
+    input_value = {"customer": "Alice Example", "notes": "private renewal"}
+
+    report = client.evals.compare(
+        task=task,
+        input=input_value,
+        mode="fast",
+        write_report=True,
+    )
+
+    assert report.written_path is not None
+    payload = json.loads((tmp_path / report.written_path).read_text(encoding="utf-8"))
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "alice@example.test" not in serialized
+    assert "Alice Example" not in serialized
+    assert "private renewal" not in serialized
+    assert "output_preview" not in payload["variants"][0]
+    assert payload["task_hash"] == hashlib.sha256(task.encode()).hexdigest()
+    assert payload["task_length"] == len(task)
+    assert payload["input_hash"] == hashlib.sha256(
+        json.dumps(input_value, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    assert payload["input_length"] > 0
+    assert payload["variants"][0]["output_preview_hash"]
+    assert payload["variants"][0]["output_preview_length"] > 0
+
+
+def test_compare_report_store_content_is_explicit_and_redacted(tmp_path, capsys):
+    from crupier.config import write_default_project
+
+    write_default_project(tmp_path)
+    secret = "s" + "k-testsecret0000000000"
+    task = f"Summarize the harmless project brief; API key: {secret}"
+
+    status = main(
+        [
+            "--project",
+            str(tmp_path),
+            "eval",
+            "compare",
+            task,
+            "--input",
+            json.dumps({"context": f"public product description; token={secret}"}),
+            "--mode",
+            "fast",
+            "--write-report",
+            "--store-content",
+            "--json",
+        ]
+    )
+    command_payload = json.loads(capsys.readouterr().out)
+
+    assert status == 0
+    payload = json.loads((tmp_path / command_payload["written_path"]).read_text(encoding="utf-8"))
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "harmless project brief" in payload["task"]
+    assert "public product description" in payload["input"]["context"]
+    assert "output_preview" in payload["variants"][0]
+    assert secret not in serialized
+    assert "[redacted]" in serialized
 
 
 def test_eval_compare_dataset_can_apply_scores_to_registry(tmp_path):

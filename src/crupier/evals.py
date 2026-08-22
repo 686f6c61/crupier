@@ -7,6 +7,7 @@ code executes.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -155,8 +156,13 @@ class CompareVariantResult:
     human_questions: list[str] = field(default_factory=list)
     error: str | None = None
 
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+    def to_dict(self, *, store_content: bool = False) -> dict[str, Any]:
+        data = asdict(self)
+        preview = data.pop("output_preview")
+        data.update(_content_metadata("output_preview", preview))
+        if store_content:
+            data["output_preview"] = preview
+        return redact_value(data)
 
 
 @dataclass(slots=True)
@@ -167,20 +173,38 @@ class CompareRunReport:
     passed: int
     failed: int
     variants: list[CompareVariantResult]
+    input: Any = None
     winner: str | None = None
     recommendation: str = ""
     warnings: list[str] = field(default_factory=list)
     written_path: str | None = None
+    store_content: bool = field(default=False, repr=False)
 
     @property
     def ok(self) -> bool:
         return self.failed == 0
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["ok"] = self.ok
-        data["variants"] = [item.to_dict() for item in self.variants]
-        return data
+        data: dict[str, Any] = {
+            "dry_run": self.dry_run,
+            "total": self.total,
+            "passed": self.passed,
+            "failed": self.failed,
+            "winner": self.winner,
+            "recommendation": self.recommendation,
+            "warnings": self.warnings,
+            "written_path": self.written_path,
+            "content_stored": self.store_content,
+            "content_redaction": "[redacted]",
+            "ok": self.ok,
+            "variants": [item.to_dict(store_content=self.store_content) for item in self.variants],
+        }
+        data.update(_content_metadata("task", self.task))
+        data.update(_content_metadata("input", self.input))
+        if self.store_content:
+            data["task"] = self.task
+            data["input"] = self.input
+        return redact_value(data)
 
 
 @dataclass(slots=True)
@@ -314,6 +338,7 @@ class RoutingEvalRunner:
         expect_contains: list[str] | None = None,
         dry_run: bool = True,
         write_report: bool = False,
+        store_content: bool = False,
     ) -> CompareRunReport:
         self.purge()
         base_constraints = dict(constraints or {})
@@ -344,9 +369,11 @@ class RoutingEvalRunner:
             passed=passed,
             failed=failed,
             variants=results,
+            input=input,
             winner=winner,
             recommendation=recommendation,
             warnings=[],
+            store_content=store_content,
         )
         if write_report:
             report.written_path = str(write_compare_report(self.client.config.evals_dir, report))
@@ -918,6 +945,17 @@ def _human_compare_questions(*, dry_run: bool) -> list[str]:
 def _preview(text: str, limit: int = 320) -> str:
     compact = " ".join((text or "").split())
     return compact if len(compact) <= limit else compact[: limit - 3] + "..."
+
+
+def _content_metadata(prefix: str, value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        serialized = value
+    else:
+        serialized = json.dumps(value, ensure_ascii=False, separators=(",", ":"), sort_keys=True, default=repr)
+    return {
+        f"{prefix}_hash": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+        f"{prefix}_length": len(serialized),
+    }
 
 
 def _append_number(values: list[float], value: Any) -> None:
