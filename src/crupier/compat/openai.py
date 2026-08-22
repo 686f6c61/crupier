@@ -73,6 +73,7 @@ class OpenAI:
         allow_local_file_uris: bool = True,
         file_root: str | Path | None = None,
         max_data_url_bytes: int | None = None,
+        allow_request_controls: bool = True,
         **_: Any,
     ):
         if crupier is not None:
@@ -86,6 +87,7 @@ class OpenAI:
         self._allow_local_file_uris = allow_local_file_uris
         self._file_root = Path(file_root).expanduser() if file_root else None
         self._max_data_url_bytes = max_data_url_bytes
+        self._allow_request_controls = allow_request_controls
         self.responses = _Responses(self)
         self.chat = _Chat(self)
         self.embeddings = _Embeddings(self)
@@ -108,6 +110,17 @@ class OpenAI:
         trace: bool | str = False,
         **kwargs: Any,
     ) -> CrupierResult:
+        if not self._allow_request_controls:
+            forbidden = sorted({"constraints", "crupier", "metadata"}.intersection(kwargs))
+            if dry_run is not None:
+                forbidden.append("dry_run")
+            if mode is not None:
+                forbidden.append("mode")
+            if trace not in {False, None}:
+                forbidden.append("trace")
+            if forbidden:
+                joined = ", ".join(repr(key) for key in forbidden)
+                raise TypeError(f"Request controls are disabled: {joined}.")
         crupier_options = kwargs.pop("crupier", {}) or {}
         if not isinstance(crupier_options, dict):
             raise TypeError("crupier options must be a dictionary.")

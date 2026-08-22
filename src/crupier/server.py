@@ -36,6 +36,88 @@ from .errors import (
 )
 
 
+_OPENAI_HTTP_ALLOWED_FIELDS = {
+    "/v1/responses": frozenset(
+        {
+            "background",
+            "frequency_penalty",
+            "include",
+            "include_obfuscation",
+            "input",
+            "instructions",
+            "logit_bias",
+            "max_output_tokens",
+            "max_tokens",
+            "model",
+            "parallel_tool_calls",
+            "presence_penalty",
+            "previous_response_id",
+            "reasoning",
+            "response_format",
+            "seed",
+            "service_tier",
+            "stop",
+            "stream",
+            "stream_options",
+            "temperature",
+            "text",
+            "tool_choice",
+            "tools",
+            "top_logprobs",
+            "top_p",
+            "truncation",
+            "user",
+        }
+    ),
+    "/v1/chat/completions": frozenset(
+        {
+            "audio",
+            "frequency_penalty",
+            "functions",
+            "function_call",
+            "logit_bias",
+            "logprobs",
+            "max_completion_tokens",
+            "max_tokens",
+            "messages",
+            "modalities",
+            "model",
+            "n",
+            "parallel_tool_calls",
+            "prediction",
+            "presence_penalty",
+            "reasoning_effort",
+            "response_format",
+            "seed",
+            "service_tier",
+            "stop",
+            "store",
+            "stream",
+            "stream_options",
+            "temperature",
+            "tool_choice",
+            "tools",
+            "top_logprobs",
+            "top_p",
+            "user",
+        }
+    ),
+    "/v1/embeddings": frozenset({"dimensions", "encoding_format", "input", "model", "user"}),
+    "/v1/rerank": frozenset({"documents", "model", "query", "return_documents", "top_n"}),
+    "/v2/rerank": frozenset({"documents", "model", "query", "return_documents", "top_n"}),
+    "/v1/images/generations": frozenset(
+        {"guidance", "model", "n", "prompt", "quality", "response_format", "seed", "size", "style", "user"}
+    ),
+    "/v1/images/edits": frozenset(
+        {"image", "mask", "model", "n", "prompt", "response_format", "size", "user"}
+    ),
+    "/v1/audio/speech": frozenset({"input", "model", "response_format", "speed", "voice"}),
+    "/v1/audio/transcriptions": frozenset(
+        {"file", "language", "model", "prompt", "response_format", "temperature", "timestamp_granularities"}
+    ),
+}
+
+
 def build_openai_compatible_server(
     *,
     crupier: Crupier,
@@ -70,6 +152,7 @@ def build_openai_compatible_server(
         compat_mode=compat_mode,
         allow_local_file_uris=False,
         file_root=file_root,
+        allow_request_controls=False,
     )
 
     class Handler(_OpenAICompatibleHandler):
@@ -159,6 +242,7 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
                 payload = self._read_multipart()
             else:
                 payload = self._read_json()
+            _validate_openai_http_payload(path, payload)
             if path in {"/v1/responses", "/v1/chat/completions"}:
                 self._apply_control_headers(payload)
             if path == "/v1/responses":
@@ -549,6 +633,18 @@ def _plain(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _plain(item) for key, item in value.items()}
     return value
+
+
+def _validate_openai_http_payload(path: str, payload: dict[str, Any]) -> None:
+    """Rechaza cualquier parámetro de red que no pertenezca al contrato OpenAI."""
+
+    allowed = _OPENAI_HTTP_ALLOWED_FIELDS.get(path)
+    if allowed is None:
+        return
+    unexpected = sorted(set(payload) - allowed)
+    if unexpected:
+        joined = ", ".join(repr(key) for key in unexpected)
+        raise ValueError(f"Unsupported HTTP parameter(s): {joined}.")
 
 
 def _coerce_form_value(name: str, value: str) -> Any:

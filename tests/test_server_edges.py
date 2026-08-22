@@ -411,6 +411,158 @@ def test_control_headers_reach_chat_and_response_compat_calls(tmp_path):
     ]
 
 
+def test_http_body_cannot_escalate_dry_run_to_live_execution(tmp_path):
+    crupier = make_crupier(tmp_path)
+    calls = []
+    original_deal = crupier.deal
+
+    def recording_deal(*args, **kwargs):
+        calls.append(kwargs)
+        return original_deal(*args, **kwargs)
+
+    crupier.deal = recording_deal
+    server = build_openai_compatible_server(
+        crupier=crupier,
+        host="127.0.0.1",
+        port=0,
+        dry_run=True,
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        address = server.server_address
+        status, _, raw = request(
+            address,
+            "POST",
+            "/v1/responses",
+            body=json.dumps({"input": "no ejecutar", "dry_run": False}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        assert status == HTTPStatus.BAD_REQUEST
+        assert json.loads(raw)["error"]["code"] == "invalid_request"
+        assert calls == []
+
+        status, _, raw = request(
+            address,
+            "POST",
+            "/v1/responses",
+            body=json.dumps({"input": "simular"}).encode(),
+            headers={"content-type": "application/json"},
+        )
+        assert status == HTTPStatus.OK, raw
+        assert calls[-1]["dry_run"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_http_body_cannot_set_storage_constraints(tmp_path):
+    def callback(server, address):
+        status, _, data = json_request(
+            address,
+            "POST",
+            "/v1/responses",
+            {
+                "input": "dato privado",
+                "constraints": {
+                    "store_trace": True,
+                    "store_prompt": True,
+                    "store_response": True,
+                },
+            },
+        )
+        assert status == HTTPStatus.BAD_REQUEST
+        assert data["error"]["code"] == "invalid_request"
+        traces_dir = server.RequestHandlerClass.crupier_client.config.traces_dir
+        assert not traces_dir.exists() or list(traces_dir.iterdir()) == []
+
+    run_server(tmp_path, callback)
+
+
+def test_http_body_cannot_raise_cost_ceiling_or_extra_body(tmp_path):
+    crupier = make_crupier(tmp_path)
+    crupier.config.routing.max_cost_per_request_usd = 0.01
+    crupier.config.providers["openai"].options["extra_body"] = {"operator": "fixed"}
+    server = build_openai_compatible_server(
+        crupier=crupier,
+        host="127.0.0.1",
+        port=0,
+        bearer_token="test-server-token",
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        status, _, data = json_request(
+            server.server_address,
+            "POST",
+            "/v1/responses",
+            {
+                "input": "intento",
+                "constraints": {
+                    "max_cost_usd": 1000,
+                    "extra_body": {"operator": "attacker"},
+                },
+            },
+        )
+        assert status == HTTPStatus.BAD_REQUEST
+        assert data["error"]["code"] == "invalid_request"
+        assert crupier.config.routing.max_cost_per_request_usd == 0.01
+        assert crupier.config.providers["openai"].options["extra_body"] == {"operator": "fixed"}
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_http_allowlisted_openai_parameters_still_work(tmp_path):
+    captured = []
+
+    def callback(server, address):
+        server.RequestHandlerClass.client.responses.create = lambda **kwargs: (
+            captured.append(("responses", kwargs)) or {"ok": True}
+        )
+        server.RequestHandlerClass.client.chat.completions.create = lambda **kwargs: (
+            captured.append(("chat", kwargs)) or {"ok": True}
+        )
+        response_format = {"type": "json_object"}
+        status, _, _ = json_request(
+            address,
+            "POST",
+            "/v1/responses",
+            {
+                "model": "gpt-5.4-mini",
+                "input": "hola",
+                "stream": False,
+                "response_format": response_format,
+                "temperature": 0.2,
+            },
+        )
+        assert status == HTTPStatus.OK
+        status, _, _ = json_request(
+            address,
+            "POST",
+            "/v1/chat/completions",
+            {
+                "model": "gpt-5.4-mini",
+                "messages": [{"role": "user", "content": "hola"}],
+                "stream": False,
+                "response_format": response_format,
+                "temperature": 0.2,
+            },
+        )
+        assert status == HTTPStatus.OK
+
+    run_server(tmp_path, callback)
+
+    assert captured[0][1]["input"] == "hola"
+    assert captured[0][1]["response_format"] == {"type": "json_object"}
+    assert captured[0][1]["temperature"] == 0.2
+    assert captured[1][1]["messages"] == [{"role": "user", "content": "hola"}]
+    assert captured[1][1]["response_format"] == {"type": "json_object"}
+    assert captured[1][1]["temperature"] == 0.2
+
+
 def test_request_id_is_stable_per_handler_instance():
     handler = object.__new__(_OpenAICompatibleHandler)
 

@@ -1028,6 +1028,11 @@ export OPENAI_BASE_URL="http://127.0.0.1:8787/v1"
 
 `crupier serve` binds to `127.0.0.1` and uses dry-run mode by default. Live execution (`--no-dry-run`) requires a bearer token from `CRUPIER_SERVER_TOKEN` (or the variable selected with `--auth-token-env`), and clients must send it as `Authorization: Bearer ...`. Non-loopback binds such as `0.0.0.0` require both `--allow-remote` and configured authentication. Browser requests are rejected unless their exact origin was opted in with `--cors-origin http://localhost:3000`; JSON endpoints also require `application/json` and upload endpoints require `multipart/form-data`.
 
+El servidor solo acepta en el cuerpo parámetros pertenecientes al contrato
+OpenAI de cada endpoint. Los controles internos `dry_run`, `trace`,
+`constraints`, `crupier`, `metadata` y `mode` se rechazan con `400`; el modo,
+los límites de coste y la persistencia siguen siendo decisiones del operador.
+
 Implemented endpoints:
 
 - `GET /health`
