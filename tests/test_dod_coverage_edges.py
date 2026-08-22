@@ -277,6 +277,37 @@ def test_probe_runner_reports_missing_adapters_and_unsupported_model_kinds():
     assert _applicable_probes(image) == ()
 
 
+def test_probe_runner_preserves_declared_fallbacks_and_failed_readiness():
+    card = _card("openai:test", supports_embeddings=True)
+    fallback_runner = CapabilityProbeRunner(_Registry(card), {"openai": object()})
+    assert fallback_runner._run_probe(card, "embeddings").status == "inferred"
+    operation = _card("openai:test", model_kind="tts")
+    assert fallback_runner._run_probe(operation, "tts").status == "inferred"
+
+    class BrokenNative:
+        def probe_capability(self, **kwargs):
+            raise RuntimeError("native probe failed")
+
+    failed_native = CapabilityProbeRunner(_Registry(card), {"openai": BrokenNative()})
+    assert failed_native._run_probe(card, "tool_call").error_type == "RuntimeError"
+
+    card.capability_status = {
+        "text_generation": {"status": "verified"},
+        "json_instruction": {"status": "verified"},
+        "max_output_control": {"status": "verified"},
+        "structured_output": {"status": "verified"},
+        "tool_call": {"status": "verified"},
+        "streaming": {"status": "verified"},
+        "embeddings": {"status": "failed"},
+    }
+    readiness = CapabilityProbeRunner(_Registry(card), {}).readiness(["openai:test"], strict=True)
+    assert readiness.items[0].status == "failed"
+    assert readiness.items[0].failed_probes == ["embeddings"]
+    assert readiness.items[0].notes == [
+        "strict mode requires every applicable probe for this model kind to be verified."
+    ]
+
+
 def test_trace_store_reports_every_corrupt_artifact_shape(tmp_path):
     root = tmp_path / "traces"
     root.mkdir()
