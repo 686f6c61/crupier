@@ -1,11 +1,15 @@
+import io
+import urllib.error
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
 
 from crupier.adapters import ProviderModel
+from crupier.adapters.anthropic import AnthropicAdapter
 from crupier.adapters.common import (
     build_prompt,
+    classify_http_error,
     env_value,
     extract_anthropic_text,
     extract_openai_text,
@@ -14,9 +18,108 @@ from crupier.adapters.common import (
     request_timeout_seconds,
     require_api_key,
 )
+from crupier.adapters.google import GoogleAdapter
+from crupier.adapters.nan import NaNAdapter
+from crupier.adapters.ollama import OllamaAdapter
+from crupier.adapters.openai import OpenAIAdapter
+from crupier.adapters.openai_compatible import OpenAICompatibleAdapter
+from crupier.adapters.openrouter import OpenRouterAdapter
 from crupier.config import ProviderSettings
-from crupier.errors import CrupierProviderAuthError
+from crupier.errors import (
+    CrupierProviderAuthError,
+    CrupierProviderRateLimitError,
+    CrupierProviderUnavailableError,
+)
 from crupier.models import RequestEnvelope
+
+
+def _adapters():
+    settings = ProviderSettings(enabled=True)
+    return [
+        OpenAIAdapter(settings),
+        AnthropicAdapter(settings),
+        GoogleAdapter(settings),
+        NaNAdapter(settings),
+        OpenRouterAdapter(settings),
+        OpenAICompatibleAdapter(settings),
+        OllamaAdapter(settings),
+    ]
+
+
+def _raise_status(adapter, status):
+    if isinstance(adapter, OllamaAdapter):
+        error = urllib.error.HTTPError(
+            "https://example.test",
+            status,
+            "failure",
+            {},
+            io.BytesIO(b"provider body"),
+        )
+        adapter._raise_http_error(error)
+    error = type("ProviderStatusError", (Exception,), {"status_code": status})("provider body")
+    adapter._raise_mapped_error(error)
+
+
+@pytest.mark.parametrize("adapter", _adapters(), ids=lambda adapter: adapter.provider)
+@pytest.mark.parametrize("status", [400, 404, 422])
+def test_all_adapters_map_permanent_4xx_as_non_retryable(adapter, status):
+    with pytest.raises(CrupierProviderUnavailableError) as exc_info:
+        _raise_status(adapter, status)
+
+    assert exc_info.value.retryable is False
+
+
+@pytest.mark.parametrize("adapter", _adapters(), ids=lambda adapter: adapter.provider)
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 503])
+def test_all_adapters_map_transient_statuses_consistently(adapter, status):
+    with pytest.raises((CrupierProviderRateLimitError, CrupierProviderUnavailableError)) as exc_info:
+        _raise_status(adapter, status)
+
+    if isinstance(exc_info.value, CrupierProviderUnavailableError):
+        assert exc_info.value.retryable is True
+
+
+@pytest.mark.parametrize("adapter", _adapters(), ids=lambda adapter: adapter.provider)
+@pytest.mark.parametrize("status", [401, 403])
+def test_all_adapters_map_auth_statuses_as_auth_errors(adapter, status):
+    with pytest.raises(CrupierProviderAuthError):
+        _raise_status(adapter, status)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (type("AuthenticationError", (Exception,), {})("bad key"), "auth"),
+        (type("RateLimitError", (Exception,), {})("slow down"), "rate_limit"),
+        (RuntimeError("offline"), "transient"),
+    ],
+)
+def test_shared_classifier_recognizes_known_sdk_error_classes(error, expected):
+    assert classify_http_error(error) == expected
+
+
+def test_shared_classifier_ignores_invalid_or_boolean_status_codes():
+    error = RuntimeError("offline")
+
+    assert classify_http_error(error, status_code=object()) == "transient"
+    assert classify_http_error(error, status_code=True) == "transient"
+
+
+def test_shared_classifier_prioritizes_deterministic_status_over_message_tokens():
+    error = RuntimeError("permission field is invalid and not a rate limit")
+
+    assert classify_http_error(error, status_code=400) == "permanent"
+
+
+def test_shared_classifier_does_not_treat_proxy_auth_message_as_provider_auth():
+    error = type("ProxyError", (Exception,), {})("407 Proxy Authentication Required")
+
+    assert classify_http_error(error) == "transient"
+
+
+@pytest.mark.parametrize("status", [501, 505])
+def test_shared_classifier_treats_deterministic_5xx_as_permanent(status):
+    assert classify_http_error(RuntimeError("unsupported gateway capability"), status_code=status) == "permanent"
 
 
 def test_provider_environment_helpers_use_custom_key_and_structured_error(monkeypatch):

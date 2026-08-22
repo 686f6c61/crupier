@@ -1097,7 +1097,8 @@ class RouteExecutor:
                     )
             except (CrupierProviderAuthError, CrupierProviderRateLimitError, CrupierProviderUnavailableError) as exc:
                 duration_ms = int((perf_counter() - call_started) * 1000)
-                retryable = attempt <= max_retries and self._provider_error_retryable(exc)
+                error_retryable = self._provider_error_retryable(exc)
+                retryable = attempt <= max_retries and error_retryable
                 last_error = exc
                 with self._state_lock:
                     if response is not None:
@@ -1129,7 +1130,8 @@ class RouteExecutor:
                             "error": str(exc),
                         }
                     )
-                self._record_provider_failure(provider)
+                if not isinstance(exc, CrupierProviderUnavailableError) or error_retryable:
+                    self._record_provider_failure(provider)
                 if not retryable:
                     raise
                 if backoff_seconds > 0:

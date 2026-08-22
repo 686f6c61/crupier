@@ -15,8 +15,6 @@ from crupier.config import (
 )
 from crupier.errors import (
     CrupierModelUnsupportedError,
-    CrupierProviderAuthError,
-    CrupierProviderRateLimitError,
     CrupierProviderUnavailableError,
 )
 from crupier.models import RequestEnvelope
@@ -27,6 +25,7 @@ from .base import AdapterResponse, EmbeddingResponse, OperationResponse, Provide
 from .common import (
     object_to_dict,
     provider_timeout_seconds,
+    raise_mapped_provider_error,
     request_timeout_seconds,
     require_api_key,
 )
@@ -516,13 +515,12 @@ class NaNAdapter:
         return OpenAI(**kwargs)
 
     def _raise_mapped_error(self, exc: Exception) -> NoReturn:
-        name = exc.__class__.__name__.lower()
-        status = getattr(exc, "status_code", None)
-        if status in {401, 403} or "auth" in name or "permission" in name:
-            raise CrupierProviderAuthError(str(exc), provider=self.provider, env_key=self.settings.env_key) from exc
-        if status == 429 or "ratelimit" in name or "rate_limit" in name:
-            raise CrupierProviderRateLimitError(str(exc)) from exc
-        raise CrupierProviderUnavailableError(f"NaN request failed: {exc}") from exc
+        raise_mapped_provider_error(
+            exc,
+            provider=self.provider,
+            env_key=self.settings.env_key,
+            message_prefix="NaN request failed",
+        )
 
 
 def _messages(*, model: str, prompt: str, request: RequestEnvelope) -> tuple[list[dict[str, Any]], dict[str, int]]:

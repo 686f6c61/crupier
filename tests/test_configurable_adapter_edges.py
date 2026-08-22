@@ -575,6 +575,40 @@ def test_configurable_upload_tuple_bounds_reads_and_restores_position(monkeypatc
     assert configurable_module._upload_tuple(SeekFails(), default_name="x.bin")[1] == b"x"
 
 
+def test_configurable_upload_tuple_maps_path_stat_and_read_errors(monkeypatch):
+    class StatFailsPath:
+        def __init__(self, value):
+            self.value = value
+            self.name = "upload.bin"
+
+        def __str__(self):
+            return self.value
+
+        def expanduser(self):
+            return self
+
+        def is_file(self):
+            return True
+
+        def stat(self):
+            raise OSError("stat denied")
+
+    monkeypatch.setattr(configurable_module, "Path", StatFailsPath)
+    with pytest.raises(CrupierModelUnsupportedError, match="cannot be inspected"):
+        configurable_module._upload_tuple("upload.bin", default_name="fallback.bin")
+
+    class OpenFailsPath(StatFailsPath):
+        def stat(self):
+            return SimpleNamespace(st_size=4)
+
+        def open(self, *args, **kwargs):
+            raise OSError("read denied")
+
+    monkeypatch.setattr(configurable_module, "Path", OpenFailsPath)
+    with pytest.raises(CrupierModelUnsupportedError, match="cannot be read"):
+        configurable_module._upload_tuple("upload.bin", default_name="fallback.bin")
+
+
 def test_configurable_response_bytes_rejects_nonbinary_reads():
     assert configurable_module._response_bytes(SimpleNamespace()) == b""
     assert configurable_module._response_bytes(SimpleNamespace(read=lambda: "text")) == b""

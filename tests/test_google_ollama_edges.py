@@ -439,6 +439,50 @@ def test_ollama_chat_helpers_parse_json_lines_and_map_network_errors(monkeypatch
         list(adapter._chat_stream({"model": "x"}, timeout=1))
 
 
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (b"[]\n", "invalid response shape"),
+        (b"not-json\n", "invalid JSON response"),
+    ],
+)
+def test_ollama_stream_maps_invalid_payloads(monkeypatch, body, message):
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def __iter__(self):
+            return iter([body])
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda *args, **kwargs: Response())
+    adapter = OllamaAdapter(ProviderSettings(enabled=True, host="http://localhost:11434"))
+
+    with pytest.raises(CrupierProviderUnavailableError, match=message) as exc_info:
+        list(adapter._chat_stream({"model": "x"}, timeout=1))
+
+    assert exc_info.value.retryable is True
+
+
+@pytest.mark.parametrize("surface", ["json", "stream"])
+def test_ollama_chat_helpers_map_timeouts(monkeypatch, surface):
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(TimeoutError("slow")),
+    )
+    adapter = OllamaAdapter(ProviderSettings(enabled=True, host="http://localhost:11434"))
+
+    with pytest.raises(CrupierProviderUnavailableError, match="timed out") as exc_info:
+        if surface == "json":
+            adapter._chat_json({"model": "x"}, timeout=1)
+        else:
+            list(adapter._chat_stream({"model": "x"}, timeout=1))
+
+    assert exc_info.value.retryable is True
+
+
 @pytest.mark.parametrize("surface", ["list", "embed", "probe"])
 def test_ollama_list_embed_and_probe_share_error_mapping(monkeypatch, surface):
     class InvalidJsonResponse:
@@ -520,6 +564,7 @@ def test_ollama_http_errors_are_mapped_at_each_transport_boundary(monkeypatch, o
         (429, CrupierProviderRateLimitError, None),
         (503, CrupierProviderUnavailableError, True),
         (400, CrupierProviderUnavailableError, False),
+        (501, CrupierProviderUnavailableError, False),
     ],
 )
 def test_ollama_http_error_mapping(code, error_type, retryable):
@@ -535,6 +580,13 @@ def test_ollama_probe_and_embedding_helpers_cover_invalid_shapes():
     assert ollama_module._json_probe_ok("no object") is False
     assert ollama_module._json_probe_ok("prefix {invalid} suffix") is False
     assert ollama_module._ollama_has_tool_call({"message": {"tool_calls": [None]}}, "target") is False
+    assert (
+        ollama_module._ollama_has_tool_call(
+            {"message": {"tool_calls": [{"function": {"name": "target"}}]}},
+            "target",
+        )
+        is True
+    )
     assert ollama_module._ollama_has_tool_call({}, "target") is False
     assert ollama_module._ollama_usage({}) == {}
     assert ollama_module._ollama_embeddings({"embeddings": [None, [1, 2]]}) == [[1.0, 2.0]]

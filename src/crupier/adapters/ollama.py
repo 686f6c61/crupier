@@ -16,7 +16,6 @@ from crupier.config import (
 from crupier.errors import (
     CrupierModelUnsupportedError,
     CrupierProviderAuthError,
-    CrupierProviderRateLimitError,
     CrupierProviderUnavailableError,
 )
 from crupier.models import RequestEnvelope
@@ -28,6 +27,7 @@ from .common import (
     build_prompt,
     env_value,
     provider_timeout_seconds,
+    raise_mapped_provider_error,
     request_timeout_seconds,
 )
 
@@ -424,12 +424,14 @@ class OllamaAdapter:
         finally:
             exc.close()
         message = body or str(exc)
-        if exc.code in {401, 403}:
-            raise CrupierProviderAuthError(message, provider=self.provider, env_key=self.settings.env_key) from exc
-        if exc.code == 429:
-            raise CrupierProviderRateLimitError(message) from exc
-        retryable = exc.code in {408, 409, 425, 500, 502, 503, 504}
-        raise CrupierProviderUnavailableError(f"Ollama HTTP {exc.code}: {message}", retryable=retryable) from exc
+        raise_mapped_provider_error(
+            exc,
+            provider=self.provider,
+            env_key=self.settings.env_key,
+            message_prefix=f"Ollama HTTP {exc.code}",
+            status_code=exc.code,
+            detail=message,
+        )
 
 
 def _probe_schema() -> dict[str, Any]:

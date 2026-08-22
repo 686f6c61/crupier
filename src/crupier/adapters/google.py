@@ -9,7 +9,6 @@ from typing import Any, NoReturn
 from crupier.config import ProviderSettings
 from crupier.errors import (
     CrupierProviderAuthError,
-    CrupierProviderRateLimitError,
     CrupierProviderUnavailableError,
 )
 from crupier.models import RequestEnvelope
@@ -20,6 +19,7 @@ from .common import (
     build_prompt,
     object_to_dict,
     provider_timeout_seconds,
+    raise_mapped_provider_error,
     request_timeout_seconds,
 )
 
@@ -275,14 +275,12 @@ class GoogleAdapter:
         return genai.Client(**kwargs)
 
     def _raise_mapped_error(self, exc: Exception) -> NoReturn:
-        name = exc.__class__.__name__.lower()
-        status = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-        text = str(exc).lower()
-        if status in {401, 403} or any(token in name or token in text for token in ["auth", "permission", "forbidden"]):
-            raise CrupierProviderAuthError(str(exc), provider=self.provider, env_key=_google_env_label(self.settings)) from exc
-        if status == 429 or any(token in name or token in text for token in ["ratelimit", "rate_limit", "resourceexhausted"]):
-            raise CrupierProviderRateLimitError(str(exc)) from exc
-        raise CrupierProviderUnavailableError(f"Google request failed: {exc}") from exc
+        raise_mapped_provider_error(
+            exc,
+            provider=self.provider,
+            env_key=_google_env_label(self.settings),
+            message_prefix="Google request failed",
+        )
 
 
 def google_api_key(settings: ProviderSettings) -> str:

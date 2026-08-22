@@ -6,11 +6,13 @@ import pytest
 from crupier import Crupier
 from crupier.adapters import AdapterResponse
 from crupier.adapters.ollama import OllamaAdapter
-from crupier.config import CrupierConfig
+from crupier.adapters.openai import OpenAIAdapter
+from crupier.config import CrupierConfig, ProviderSettings
 from crupier.errors import (
     CrupierApprovalRequired,
     CrupierBudgetExceededError,
     CrupierExecutionLimitError,
+    CrupierProviderAuthError,
     CrupierProviderRateLimitError,
     CrupierProviderUnavailableError,
 )
@@ -324,6 +326,66 @@ def test_provider_retry_skips_nonretryable_setup_errors(tmp_path):
         raise AssertionError("nonretryable provider errors should stop immediately")
 
     assert len(adapter.calls) == 1
+
+
+def test_permanent_adapter_error_does_not_consume_retry_budget_or_open_circuit(tmp_path):
+    class PermanentHttpFailureAdapter:
+        provider = "openai"
+
+        def __init__(self):
+            self.calls = 0
+            self.mapper = OpenAIAdapter(ProviderSettings(enabled=True))
+
+        def generate(self, *, model, prompt, request):
+            del model, prompt, request
+            self.calls += 1
+            error = type("BadRequestError", (Exception,), {"status_code": 400})("invalid request")
+            self.mapper._raise_mapped_error(error)
+
+    adapter = PermanentHttpFailureAdapter()
+    config = make_config(tmp_path, allow=["openai:gpt-5.4-mini"])
+    config.routing.circuit_breaker_failure_threshold = 1
+    config.routing.circuit_breaker_cooldown_seconds = 30
+    client = Crupier(config, adapters={"openai": adapter})
+
+    with pytest.raises(CrupierProviderUnavailableError) as exc_info:
+        client.deal("Invalid request", dry_run=False, trace="debug")
+
+    assert exc_info.value.retryable is False
+    assert adapter.calls == 1
+    assert client.executor.provider_circuit_open_reason("openai") is None
+    assert "openai" not in client.executor._provider_failure_counts
+
+
+def test_repeated_auth_adapter_errors_open_circuit(tmp_path):
+    class AuthHttpFailureAdapter:
+        provider = "openai"
+
+        def __init__(self):
+            self.calls = 0
+            self.mapper = OpenAIAdapter(ProviderSettings(enabled=True))
+
+        def generate(self, *, model, prompt, request):
+            del model, prompt, request
+            self.calls += 1
+            error = type("ProviderStatusError", (Exception,), {"status_code": 401})("rejected key")
+            self.mapper._raise_mapped_error(error)
+
+    adapter = AuthHttpFailureAdapter()
+    config = make_config(tmp_path, allow=["openai:gpt-5.4-mini"])
+    config.routing.max_provider_retries = 0
+    config.routing.circuit_breaker_failure_threshold = 2
+    config.routing.circuit_breaker_cooldown_seconds = 30
+    client = Crupier(config, adapters={"openai": adapter})
+
+    for _ in range(2):
+        with pytest.raises(CrupierProviderAuthError):
+            client.deal("Rejected credential", dry_run=False, trace="debug")
+
+    with pytest.raises(CrupierProviderUnavailableError, match="circuit breaker is open"):
+        client.deal("Rejected credential", dry_run=False, trace="debug")
+
+    assert adapter.calls == 2
 
 
 def test_provider_circuit_breaker_blocks_after_repeated_failures(tmp_path):

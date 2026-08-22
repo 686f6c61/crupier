@@ -9,13 +9,13 @@ from crupier.config import (
     ProviderSettings,
     validate_provider_endpoint,
 )
-from crupier.errors import (
-    CrupierProviderAuthError,
-    CrupierProviderRateLimitError,
-    CrupierProviderUnavailableError,
-)
+from crupier.errors import CrupierProviderUnavailableError
 
-from .common import provider_timeout_seconds, require_api_key
+from .common import (
+    provider_timeout_seconds,
+    raise_mapped_provider_error,
+    require_api_key,
+)
 from .openai import OpenAIAdapter
 
 
@@ -46,12 +46,12 @@ class OpenRouterAdapter(OpenAIAdapter):
         return OpenAI(**kwargs)
 
     def _raise_mapped_error(self, exc: Exception) -> NoReturn:
-        name = exc.__class__.__name__.lower()
-        if "auth" in name or "permission" in name:
-            raise CrupierProviderAuthError(str(exc), provider=self.provider, env_key=self.settings.env_key) from exc
-        if "ratelimit" in name or "rate_limit" in name:
-            raise CrupierProviderRateLimitError(str(exc)) from exc
-        raise CrupierProviderUnavailableError(f"OpenRouter request failed: {exc}") from exc
+        raise_mapped_provider_error(
+            exc,
+            provider=self.provider,
+            env_key=self.settings.env_key,
+            message_prefix="OpenRouter request failed",
+        )
 
 
 def _openrouter_headers(settings: ProviderSettings) -> dict[str, str]:

@@ -5,11 +5,7 @@ from __future__ import annotations
 from typing import Any, NoReturn
 
 from crupier.config import ProviderSettings, validate_provider_endpoint
-from crupier.errors import (
-    CrupierProviderAuthError,
-    CrupierProviderRateLimitError,
-    CrupierProviderUnavailableError,
-)
+from crupier.errors import CrupierProviderUnavailableError
 from crupier.models import RequestEnvelope
 from crupier.multimodal import native_image_payloads
 
@@ -19,6 +15,7 @@ from .common import (
     extract_anthropic_text,
     object_to_dict,
     provider_timeout_seconds,
+    raise_mapped_provider_error,
     request_timeout_seconds,
     require_api_key,
 )
@@ -229,12 +226,12 @@ class AnthropicAdapter:
             self._raise_mapped_error(exc)
 
     def _raise_mapped_error(self, exc: Exception) -> NoReturn:
-        name = exc.__class__.__name__.lower()
-        if "auth" in name or "permission" in name:
-            raise CrupierProviderAuthError(str(exc), provider=self.provider, env_key=self.settings.env_key) from exc
-        if "ratelimit" in name or "rate_limit" in name:
-            raise CrupierProviderRateLimitError(str(exc)) from exc
-        raise CrupierProviderUnavailableError(f"Anthropic request failed: {exc}") from exc
+        raise_mapped_provider_error(
+            exc,
+            provider=self.provider,
+            env_key=self.settings.env_key,
+            message_prefix="Anthropic request failed",
+        )
 
 
 def _is_temperature_deprecated(exc: Exception) -> bool:

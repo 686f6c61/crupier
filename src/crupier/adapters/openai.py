@@ -8,11 +8,7 @@ import warnings
 from typing import Any, NoReturn
 
 from crupier.config import ProviderSettings, validate_provider_endpoint
-from crupier.errors import (
-    CrupierProviderAuthError,
-    CrupierProviderRateLimitError,
-    CrupierProviderUnavailableError,
-)
+from crupier.errors import CrupierProviderUnavailableError
 from crupier.models import RequestEnvelope
 from crupier.multimodal import native_file_payloads
 from crupier.structured import schema_from_request
@@ -23,6 +19,7 @@ from .common import (
     extract_openai_text,
     object_to_dict,
     provider_timeout_seconds,
+    raise_mapped_provider_error,
     request_timeout_seconds,
     require_api_key,
 )
@@ -333,12 +330,12 @@ class OpenAIAdapter:
             self._raise_mapped_error(exc)
 
     def _raise_mapped_error(self, exc: Exception) -> NoReturn:
-        name = exc.__class__.__name__.lower()
-        if "auth" in name or "permission" in name:
-            raise CrupierProviderAuthError(str(exc), provider=self.provider, env_key=self.settings.env_key) from exc
-        if "ratelimit" in name or "rate_limit" in name:
-            raise CrupierProviderRateLimitError(str(exc)) from exc
-        raise CrupierProviderUnavailableError(f"OpenAI request failed: {exc}") from exc
+        raise_mapped_provider_error(
+            exc,
+            provider=self.provider,
+            env_key=self.settings.env_key,
+            message_prefix="OpenAI request failed",
+        )
 
 
 def _unsupported_parameter(exc: Exception) -> str | None:

@@ -13,8 +13,6 @@ from crupier.config import (
     validate_provider_endpoint,
 )
 from crupier.errors import (
-    CrupierProviderAuthError,
-    CrupierProviderRateLimitError,
     CrupierProviderUnavailableError,
 )
 from crupier.models import RequestEnvelope
@@ -25,6 +23,7 @@ from .base import AdapterResponse, EmbeddingResponse, ProviderModel
 from .common import (
     object_to_dict,
     provider_timeout_seconds,
+    raise_mapped_provider_error,
     request_timeout_seconds,
     require_api_key,
 )
@@ -315,14 +314,12 @@ class OpenAICompatibleAdapter:
         return OpenAI(**kwargs)
 
     def _raise_mapped_error(self, exc: Exception) -> NoReturn:
-        name = exc.__class__.__name__.lower()
-        if "auth" in name or "permission" in name:
-            raise CrupierProviderAuthError(str(exc), provider=self.provider, env_key=self.settings.env_key) from exc
-        if "ratelimit" in name or "rate_limit" in name:
-            raise CrupierProviderRateLimitError(str(exc)) from exc
-        raise CrupierProviderUnavailableError(
-            f"OpenAI-compatible inference request failed for {self.provider}: {exc}",
-        ) from exc
+        raise_mapped_provider_error(
+            exc,
+            provider=self.provider,
+            env_key=self.settings.env_key,
+            message_prefix=f"OpenAI-compatible inference request failed for {self.provider}",
+        )
 
 
 def _is_loopback_host(host: str) -> bool:

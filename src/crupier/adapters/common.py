@@ -3,11 +3,80 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal, NoReturn
 
 from crupier.config import ProviderSettings
-from crupier.errors import CrupierProviderAuthError
+from crupier.errors import (
+    CrupierProviderAuthError,
+    CrupierProviderRateLimitError,
+    CrupierProviderUnavailableError,
+)
 from crupier.models import RequestEnvelope
+
+HttpErrorClass = Literal["auth", "rate_limit", "permanent", "transient"]
+
+_AUTH_STATUS_CODES = frozenset({401, 403})
+_TRANSIENT_STATUS_CODES = frozenset({408, 409, 425, 429, 500, 502, 503, 504, 529})
+_AUTH_ERROR_TOKENS = ("auth", "permission", "forbidden")
+_RATE_LIMIT_ERROR_TOKENS = ("ratelimit", "rate_limit", "resourceexhausted")
+
+
+def classify_http_error(exc: BaseException, *, status_code: object | None = None) -> HttpErrorClass:
+    """Classify a provider failure, preferring HTTP status over known SDK class names.
+
+    Auth and rate-limit statuses keep their dedicated types. Known transient
+    statuses are retryable; every other HTTP 4xx/5xx is deterministic. When no
+    HTTP status exists, conservative SDK class-name matching provides the
+    fallback and unknown transport failures remain transient.
+    """
+    status = _status_code(status_code) or _status_code(getattr(exc, "status_code", None))
+    status = status or _status_code(getattr(exc, "code", None))
+    name = exc.__class__.__name__.lower()
+    if status in _AUTH_STATUS_CODES:
+        return "auth"
+    if status == 429:
+        return "rate_limit"
+    if status in _TRANSIENT_STATUS_CODES:
+        return "transient"
+    if status is not None and 400 <= status <= 599:
+        return "permanent"
+    if any(token in name for token in _AUTH_ERROR_TOKENS):
+        return "auth"
+    if any(token in name for token in _RATE_LIMIT_ERROR_TOKENS):
+        return "rate_limit"
+    return "transient"
+
+
+def raise_mapped_provider_error(
+    exc: Exception,
+    *,
+    provider: str,
+    env_key: str | None,
+    message_prefix: str,
+    status_code: object | None = None,
+    detail: str | None = None,
+) -> NoReturn:
+    """Raise the shared Crupier error type for an HTTP or provider SDK failure."""
+    classification = classify_http_error(exc, status_code=status_code)
+    message = detail if detail is not None else str(exc)
+    if classification == "auth":
+        raise CrupierProviderAuthError(message, provider=provider, env_key=env_key) from exc
+    if classification == "rate_limit":
+        raise CrupierProviderRateLimitError(message) from exc
+    raise CrupierProviderUnavailableError(
+        f"{message_prefix}: {message}",
+        retryable=classification == "transient",
+    ) from exc
+
+
+def _status_code(value: object | None) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        status = int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return None
+    return status if 100 <= status <= 599 else None
 
 
 def env_value(settings: ProviderSettings, default_env_key: str, *, provider: str) -> str | None:
