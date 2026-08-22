@@ -198,7 +198,8 @@ class PolicyEngine:
             self._validate_panel_size_constraints(plan, request)
 
         planned_calls = planned_call_count(plan)
-        if planned_calls > max_calls:
+        # Defense in depth: shape validation above already rejects this exact condition.
+        if planned_calls > max_calls:  # pragma: no cover - unreachable after shape validation
             raise CrupierRouteValidationError(f"Route plans {planned_calls} calls, above max_calls={max_calls}.")
 
     @staticmethod
