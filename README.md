@@ -1125,6 +1125,13 @@ crupier trace show trc_...
 crupier trace delete trc_...
 ```
 
+`logging.ttl_days` limita la retención local de trazas, feedback e historial de
+evaluaciones. Crupier elimina los artefactos caducados al abrir el proyecto y
+antes de escribir; `crupier purge` permite ejecutar el mismo barrido de forma
+explícita. La redacción de secretos está siempre activa y
+`logging.redact_secrets = false` se rechaza para evitar una falsa expectativa
+de configuración.
+
 Metadata-only traces are inspectable but not replayable. They keep route
 metrics (model, strategy, cost, latency) and a non-content fingerprint of
 the task (length and a salted hash). They never persist task text, prompts,

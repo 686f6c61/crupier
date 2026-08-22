@@ -161,12 +161,12 @@ class Crupier:
         self.capabilities = CapabilityManager(self.registry, self.adapters)
         self.evals = RoutingEvalRunner(self)
         self.audit = ProjectAuditRunner(self)
-        self.traces = TraceStore(config.traces_dir)
+        self.traces = TraceStore(config.traces_dir, ttl_days=config.logging.ttl_days)
         self.approvals = ApprovalManager(
             config.state_db_path,
             reviewer_verifier=approval_reviewer_verifier,
         )
-        self.feedback = HumanFeedbackStore(config.feedback_dir)
+        self.feedback = HumanFeedbackStore(config.feedback_dir, ttl_days=config.logging.ttl_days)
         self.responses = ResponsesFacade(self)
         self.operations = OperationRouter(self)
         self.sessions = SessionManager(self, str(config.state_db_path))

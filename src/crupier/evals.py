@@ -15,6 +15,7 @@ from typing import Any
 
 from .models import RoutePlan
 from .redaction import redact_value
+from .retention import is_expired, prune_jsonl
 from .state import ensure_private_directory, private_append_text, private_write_text
 
 BUILTIN_ROUTING_EVALS: list[dict[str, Any]] = [
@@ -270,6 +271,11 @@ class CompareHistoryReport:
 class RoutingEvalRunner:
     def __init__(self, client: Any):
         self.client = client
+        self.ttl_days = client.config.logging.ttl_days
+        self.last_pruned = self.purge()
+
+    def purge(self) -> int:
+        return purge_eval_artifacts(self.client.config.evals_dir, self.ttl_days)
 
     def run(
         self,
@@ -277,6 +283,7 @@ class RoutingEvalRunner:
         dataset: str | Path | None = None,
         write_report: bool = False,
     ) -> EvalRunReport:
+        self.purge()
         name, cases = load_eval_cases(dataset)
         results = [self._run_case(case) for case in cases]
         passed = sum(1 for item in results if item.ok)
@@ -308,6 +315,7 @@ class RoutingEvalRunner:
         dry_run: bool = True,
         write_report: bool = False,
     ) -> CompareRunReport:
+        self.purge()
         base_constraints = dict(constraints or {})
         base_constraints.setdefault("store_prompt", False)
         base_constraints.setdefault("store_response", False)
@@ -358,6 +366,7 @@ class RoutingEvalRunner:
         record_history: bool = False,
         write_report: bool = False,
     ) -> CompareDatasetReport:
+        self.purge()
         name, cases = load_eval_cases(dataset)
         case_results: list[CompareDatasetCaseResult] = []
         for case in cases:
@@ -420,6 +429,7 @@ class RoutingEvalRunner:
         min_confidence: str = "medium",
         dry_run: bool = True,
     ) -> CompareHistoryReport:
+        self.purge()
         report = summarize_compare_history(self.client.config.evals_dir, model=model, mode=mode)
         if apply:
             report.apply_report = apply_compare_scores_to_registry(
@@ -762,6 +772,26 @@ def write_eval_report(root: Path, report: EvalRunReport) -> Path:
     path = runs_dir / f"routing_{timestamp}.json"
     private_write_text(path, json.dumps(redact_value(report.to_dict()), indent=2, sort_keys=True) + "\n")
     return path
+
+
+def purge_eval_artifacts(root: Path, ttl_days: int | None) -> int:
+    if ttl_days is None or not root.exists():
+        return 0
+    removed = prune_jsonl(root / "history" / "compare_runs.jsonl", ttl_days)
+    for path in root.rglob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        created_at = data.get("created_at") if isinstance(data, dict) else None
+        if not is_expired(created_at, ttl_days, fallback_path=path):
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        removed += 1
+    return removed
 
 
 def write_compare_report(root: Path, report: CompareRunReport) -> Path:

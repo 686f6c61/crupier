@@ -19,6 +19,7 @@ from uuid import uuid4
 from .errors import CrupierError
 from .models import ModelRef
 from .redaction import redact_text
+from .retention import prune_jsonl
 from .state import (
     ArtifactDiagnostic,
     ensure_private_directory,
@@ -148,9 +149,14 @@ class HumanDecisionImportResult:
 
 
 class HumanFeedbackStore:
-    def __init__(self, root: str | Path):
+    def __init__(self, root: str | Path, *, ttl_days: int | None = None):
         self.root = Path(root)
         self.path = self.root / "feedback.jsonl"
+        self.ttl_days = ttl_days
+        self.last_pruned = self.purge()
+
+    def purge(self) -> int:
+        return prune_jsonl(self.path, self.ttl_days)
 
     def record(
         self,
@@ -167,6 +173,7 @@ class HumanFeedbackStore:
         reviewer_hash: str | None = None,
         trace_store: Any | None = None,
     ) -> HumanFeedbackRecord:
+        self.purge()
         rating = _validate_rating(rating)
         verdict = _validate_verdict(verdict)
         derived = self._derive_from_trace(trace_id, trace_store) if trace_id and trace_store else {}

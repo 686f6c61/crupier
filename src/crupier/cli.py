@@ -19,8 +19,9 @@ from .config import (
     write_orchestrator_settings,
 )
 from .errors import CrupierConfigError, CrupierError
-from .evals import CompareVariant
+from .evals import CompareVariant, purge_eval_artifacts
 from .feedback import (
+    HumanFeedbackStore,
     build_human_review_packet,
     import_human_decisions,
     write_human_decision_template,
@@ -59,6 +60,7 @@ from .release import (
     run_release_checks,
 )
 from .server import build_openai_compatible_server
+from .trace_store import TraceStore
 from .version import __version__
 
 REAL_PROVIDER_CHOICES = ("openai", "anthropic", "google", "ollama", "openrouter", "inference", "nan")
@@ -110,6 +112,10 @@ def build_parser() -> argparse.ArgumentParser:
     update.add_argument("--provider", choices=REAL_PROVIDER_CHOICES, help="Only update one provider")
     update.add_argument("--json", action="store_true", help="Print JSON")
     update.set_defaults(func=cmd_update)
+
+    purge = subparsers.add_parser("purge", help="Purge expired traces, feedback, and eval artifacts")
+    purge.add_argument("--json", action="store_true", help="Print JSON")
+    purge.set_defaults(func=cmd_purge)
 
     models = subparsers.add_parser("models", help="Model registry commands")
     model_subparsers = models.add_subparsers(dest="models_command", required=True)
@@ -918,6 +924,26 @@ def cmd_update(args: argparse.Namespace) -> int:
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
     else:
         _print_update_report(report)
+    return 0
+
+
+def cmd_purge(args: argparse.Namespace) -> int:
+    config = CrupierConfig.from_toml(args.project)
+    counts = {
+        "traces": TraceStore(config.traces_dir, ttl_days=config.logging.ttl_days).last_pruned,
+        "feedback": HumanFeedbackStore(
+            config.feedback_dir, ttl_days=config.logging.ttl_days
+        ).last_pruned,
+        "evals": purge_eval_artifacts(config.evals_dir, config.logging.ttl_days),
+    }
+    counts["total"] = sum(counts.values())
+    if args.json:
+        print(json.dumps(counts, indent=2, sort_keys=True))
+    else:
+        print(
+            f"purged: total={counts['total']} traces={counts['traces']} "
+            f"feedback={counts['feedback']} evals={counts['evals']}"
+        )
     return 0
 
 

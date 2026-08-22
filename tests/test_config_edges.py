@@ -31,6 +31,11 @@ def test_from_dict_rejects_invalid_top_level_shapes(data, message: str) -> None:
         CrupierConfig.from_dict(data)
 
 
+def test_redact_secrets_false_is_rejected_instead_of_ignored() -> None:
+    with pytest.raises(CrupierConfigError, match="logging.redact_secrets"):
+        CrupierConfig.from_dict({"logging": {"redact_secrets": False}})
+
+
 def _invalid_config() -> CrupierConfig:
     return CrupierConfig.from_dict({})
 

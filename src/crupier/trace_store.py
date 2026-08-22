@@ -17,6 +17,7 @@ from typing import Any
 from .errors import CrupierError
 from .models import CrupierResult, OperationResult, RequestEnvelope
 from .redaction import redact_text, redact_value
+from .retention import is_expired
 from .state import ArtifactDiagnostic, private_write_text
 
 
@@ -53,8 +54,10 @@ class TraceListResult(list[StoredTraceRef]):
 
 
 class TraceStore:
-    def __init__(self, root: str | Path):
+    def __init__(self, root: str | Path, *, ttl_days: int | None = None):
         self.root = Path(root)
+        self.ttl_days = ttl_days
+        self.last_pruned = self.purge()
 
     def should_store(self, storage_decision: dict[str, Any]) -> bool:
         return bool(storage_decision.get("store_trace", False))
@@ -68,6 +71,7 @@ class TraceStore:
         dry_run: bool,
         trace_level: bool | str,
     ) -> Path | None:
+        self.purge()
         if result.trace is None:
             return None
         decision = result.trace.storage_decision
@@ -78,6 +82,26 @@ class TraceStore:
         record = self._record(project=project, request=request, result=result, dry_run=dry_run, trace_level=trace_level)
         private_write_text(path, json.dumps(record, indent=2, sort_keys=True) + "\n")
         return path
+
+    def purge(self) -> int:
+        if self.ttl_days is None or not self.root.exists():
+            return 0
+        removed = 0
+        for path in self.root.glob("*.json"):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if not isinstance(data, dict) or not is_expired(
+                data.get("created_at"), self.ttl_days, fallback_path=path
+            ):
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            removed += 1
+        return removed
 
     def list(self) -> TraceListResult:
         refs: list[StoredTraceRef] = []

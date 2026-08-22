@@ -306,6 +306,12 @@ class CrupierConfig:
         return config
 
     def validate(self) -> None:
+        if self.logging.redact_secrets is not True:
+            raise CrupierConfigError(
+                "logging.redact_secrets=false is unsupported; secret redaction is always active."
+            )
+        if self.logging.ttl_days is not None:
+            _require_int_at_least("logging.ttl_days", self.logging.ttl_days, 1)
         if not isinstance(self.models.allow, list) or not isinstance(self.models.deny, list):
             raise CrupierConfigError("[models].allow and [models].deny must be arrays of provider:model strings.")
         for model in [*self.models.allow, *self.models.deny]:
@@ -915,7 +921,9 @@ mode = "metadata"
 persist_traces = false
 store_prompts = false
 store_responses = false
+# La redacción de secretos está siempre activa y no puede deshabilitarse.
 redact_secrets = true
+ttl_days = 30
 
 [profiles.agentic]
 prefer = ["tool_use", "coding", "long_horizon", "reliability"]

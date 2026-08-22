@@ -1,6 +1,7 @@
 import json
 import os
 import stat
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,97 @@ def make_config(tmp_path):
     )
     config.root = tmp_path
     return config
+
+
+def _timestamp(days_ago: int) -> str:
+    return (datetime.now(UTC) - timedelta(days=days_ago)).replace(microsecond=0).isoformat()
+
+
+def _trace_record(trace_id: str, *, days_ago: int) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "trace_id": trace_id,
+        "created_at": _timestamp(days_ago),
+        "replayable": False,
+        "request": {"summary": trace_id},
+        "result": {"route": {"strategy": "single", "steps": []}},
+    }
+
+
+def test_trace_store_prunes_entries_older_than_ttl_days(tmp_path):
+    config = make_config(tmp_path)
+    config.logging.ttl_days = 7
+    config.traces_dir.mkdir(parents=True)
+    (config.traces_dir / "old.json").write_text(
+        json.dumps(_trace_record("old", days_ago=8)), encoding="utf-8"
+    )
+    (config.traces_dir / "recent.json").write_text(
+        json.dumps(_trace_record("recent", days_ago=6)), encoding="utf-8"
+    )
+
+    client = Crupier(config)
+
+    assert [item.trace_id for item in client.traces.list()] == ["recent"]
+    assert not (config.traces_dir / "old.json").exists()
+
+
+def test_feedback_and_evals_respect_ttl_days(tmp_path):
+    config = make_config(tmp_path)
+    config.logging.ttl_days = 7
+    config.feedback_dir.mkdir(parents=True)
+    config.evals_dir.joinpath("history").mkdir(parents=True)
+    feedback_rows = [
+        {
+            "schema_version": 1,
+            "feedback_id": "old",
+            "created_at": _timestamp(8),
+            "project": "trace-test",
+            "rating": 1,
+            "models": ["openai:gpt-5.4-mini"],
+        },
+        {
+            "schema_version": 1,
+            "feedback_id": "recent",
+            "created_at": _timestamp(6),
+            "project": "trace-test",
+            "rating": 5,
+            "models": ["openai:gpt-5.4-mini"],
+        },
+    ]
+    history_rows = [
+        {"schema_version": 1, "run_id": "old", "created_at": _timestamp(8), "model_scores": []},
+        {"schema_version": 1, "run_id": "recent", "created_at": _timestamp(6), "model_scores": []},
+    ]
+    config.feedback_dir.joinpath("feedback.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in feedback_rows), encoding="utf-8"
+    )
+    config.evals_dir.joinpath("history", "compare_runs.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in history_rows), encoding="utf-8"
+    )
+
+    client = Crupier(config)
+
+    assert [item.feedback_id for item in client.feedback.list()] == ["recent"]
+    assert client.evals.history().total_runs == 1
+
+
+def test_purge_command_reports_removed_artifacts(tmp_path, capsys):
+    write_default_project(tmp_path)
+    config_path = tmp_path / "crupier.toml"
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace("ttl_days = 30", "ttl_days = 7"),
+        encoding="utf-8",
+    )
+    traces_dir = tmp_path / ".crupier" / "traces"
+    traces_dir.mkdir(parents=True, exist_ok=True)
+    traces_dir.joinpath("old.json").write_text(
+        json.dumps(_trace_record("old", days_ago=8)), encoding="utf-8"
+    )
+
+    assert main(["--project", str(tmp_path), "purge", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"evals": 0, "feedback": 0, "total": 1, "traces": 1}
 
 
 def test_trace_store_is_opt_in(tmp_path):
