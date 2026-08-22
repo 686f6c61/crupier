@@ -716,7 +716,7 @@ def _public_secret_scan_fallback_files(root: Path) -> list[Path]:
             continue
         try:
             relative = path.relative_to(root)
-        except ValueError:
+        except ValueError:  # pragma: no cover - rglob(root) cannot yield a path outside root
             continue
         files.append(relative)
     return files
@@ -917,7 +917,9 @@ def _public_yaml_check(root: Path) -> ReleaseCheck:
             severity="medium",
             summary="PyYAML is not installed, so public GitHub YAML syntax was not checked.",
             evidence={"parser_available": False, "checked": [], "failures": []},
-            actions=["Install the development extra with `pip install -e '.[dev]'` before strict public release checks."],
+            actions=[
+                "Install the CI-equivalent development environment with `python -m pip install -e '.[dev]'`."
+            ],
         )
 
     github_root = root / ".github"
@@ -1224,7 +1226,12 @@ def _ci_check(root: Path) -> ReleaseCheck:
             marker for marker in required_commands if _find_enabled_step(steps, run_marker=marker) is None
         )
         ci_text = ci_path.read_text(encoding="utf-8", errors="replace")
-        missing_markers.extend(_workflow_action_pin_issues(ci_text, {"actions/checkout", "actions/setup-python"}))
+        missing_markers.extend(
+            _workflow_action_pin_issues(
+                ci_text,
+                {"actions/checkout", "actions/setup-python", "actions/upload-artifact"},
+            )
+        )
     ok = bool(workflows) and not missing_markers
     return ReleaseCheck(
         id="ci",
@@ -1245,17 +1252,85 @@ def _ci_check(root: Path) -> ReleaseCheck:
 
 
 def _dependency_updates_check(root: Path) -> ReleaseCheck:
-    path = root / ".github" / "dependabot.yml"
-    exists = path.exists()
+    dependabot_path = root / ".github" / "dependabot.yml"
+    renovate_paths = [root / "renovate.json", root / ".github" / "renovate.json", root / "renovate.json5"]
+    dependabot_exists = dependabot_path.exists()
+    renovate_path = next((path for path in renovate_paths if path.exists()), None)
+    ci_path = root / ".github" / "workflows" / "ci.yml"
+    document = _load_workflow_document(ci_path)
+    triggers = _workflow_triggers(document) if document is not None else {}
+    schedules = triggers.get("schedule")
+    jobs = document.get("jobs") if document is not None else None
+    dependency_job = jobs.get("dependency-audit") if isinstance(jobs, dict) else None
+    steps = _workflow_steps(dependency_job)
+    commands = "\n".join(str(step.get("run", "")) for step in steps)
+    uses = {str(step.get("uses", "")) for step in steps}
+    matrix = dependency_job.get("strategy", {}).get("matrix", {}) if isinstance(dependency_job, dict) else {}
+    resolutions = matrix.get("resolution") if isinstance(matrix, dict) else None
+    contributing_path = root / "CONTRIBUTING.md"
+    contributing = contributing_path.read_text(encoding="utf-8", errors="replace") if contributing_path.exists() else ""
+    required_documentation = [
+        "## Dependency Update Process",
+        "weekly",
+        "dependency-audit",
+        "minimum",
+        "latest",
+        "dependency-versions-minimum.json",
+        "dependency-versions-latest.json",
+    ]
+    missing_equivalent = []
+    if not isinstance(schedules, list) or not schedules:
+        missing_equivalent.append("weekly schedule")
+    if resolutions != ["minimum", "latest"]:
+        missing_equivalent.append("minimum/latest resolution matrix")
+    for marker in (
+        "python -m pytest -q",
+        "python -m pip_audit --skip-editable --progress-spinner off",
+        "python -m pip list --format=json",
+    ):
+        if marker not in commands:
+            missing_equivalent.append(marker)
+    upload = f"actions/upload-artifact@{_PINNED_GITHUB_ACTIONS['actions/upload-artifact']}"
+    if upload not in uses:
+        missing_equivalent.append(upload)
+    missing_equivalent.extend(marker for marker in required_documentation if marker not in contributing)
+
+    if dependabot_exists:
+        status = "warn"
+        channel = "dependabot"
+        summary = "Dependabot configuration is not allowed by repository policy."
+        actions = ["Remove .github/dependabot.yml before publishing."]
+    elif renovate_path is not None:
+        status = "pass"
+        channel = "renovate"
+        summary = "Renovate provides an automated dependency-update channel."
+        actions = []
+    elif not missing_equivalent:
+        status = "pass"
+        channel = "scheduled-ci"
+        summary = "Scheduled CI audits minimum and latest dependency resolutions every week."
+        actions = []
+    else:
+        status = "warn"
+        channel = None
+        summary = "No dependency-update channel or documented periodic equivalent is configured."
+        actions = [
+            "Configure Dependabot or Renovate, or document a weekly CI gate that audits minimum/latest resolutions and records component versions."
+        ]
     return ReleaseCheck(
         id="dependency_updates",
-        status="warn" if exists else "pass",
+        status=status,
         severity="medium",
-        summary="Dependabot configuration is not allowed by repository policy."
-        if exists
-        else "Dependabot configuration is intentionally absent.",
-        evidence={"path": ".github/dependabot.yml", "exists": exists},
-        actions=["Remove .github/dependabot.yml before publishing."] if exists else [],
+        summary=summary,
+        evidence={
+            "path": ".github/dependabot.yml",
+            "exists": dependabot_exists,
+            "channel": channel,
+            "renovate_path": str(renovate_path.relative_to(root)) if renovate_path is not None else None,
+            "ci_path": ".github/workflows/ci.yml",
+            "missing_equivalent_markers": missing_equivalent,
+        },
+        actions=actions,
     )
 
 

@@ -77,6 +77,7 @@ def test_tsv_without_header_uses_generated_column_names(tmp_path):
 
 
 def test_xlsx_extraction_is_data_only_bounded_and_reports_hidden_sheets(tmp_path):
+    pytest.importorskip("openpyxl")
     from openpyxl import Workbook
 
     path = tmp_path / "budget.xlsx"
@@ -128,6 +129,7 @@ def test_xlsx_extraction_is_data_only_bounded_and_reports_hidden_sheets(tmp_path
 
 
 def test_docx_extraction_reads_paragraphs_and_tables_with_limits(tmp_path):
+    pytest.importorskip("docx")
     from docx import Document
 
     path = tmp_path / "contract.docx"
@@ -158,6 +160,7 @@ def test_docx_extraction_reads_paragraphs_and_tables_with_limits(tmp_path):
 
 
 def test_docx_extraction_bounds_table_count(tmp_path):
+    pytest.importorskip("docx")
     from docx import Document
 
     path = tmp_path / "tables.docx"

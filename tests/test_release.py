@@ -9,9 +9,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
 
+import pytest
 import yaml
 from _synthetic_secrets import SYNTHETIC_GOOGLE_API_KEY
 
+import crupier.release as release_module
 from crupier.cli import main
 from crupier.release import (
     ReleaseCheck,
@@ -153,6 +155,7 @@ def write_release_project(root):
         encoding="utf-8",
     )
     (root / "CHANGELOG.md").write_text("# Changelog\n\n## 0.1.0\n", encoding="utf-8")
+    (root / "renovate.json").write_text('{"extends": ["config:recommended"]}\n', encoding="utf-8")
     (root / ".github" / "workflows").mkdir(parents=True)
     (root / ".github" / "ISSUE_TEMPLATE").mkdir(parents=True)
     (root / ".github" / "PULL_REQUEST_TEMPLATE.md").write_text(
@@ -894,6 +897,240 @@ def test_release_check_requires_absent_dependabot_and_warns_on_minimal_ci_permis
     assert "--cov-fail-under=95" in checks["ci"].evidence["missing_markers"]
     assert "python -m pip_audit --skip-editable --progress-spinner off" in checks["ci"].evidence["missing_markers"]
     assert checks["dependency_updates"].evidence["exists"] is False
+
+
+def test_release_check_warns_without_any_dependency_update_channel(tmp_path):
+    write_release_project(tmp_path)
+    (tmp_path / "renovate.json").unlink()
+
+    report = run_release_checks(tmp_path, build=False)
+    checks = {check.id: check for check in report.checks}
+
+    assert checks["dependency_updates"].status == "warn"
+    assert checks["dependency_updates"].evidence["channel"] is None
+    assert "weekly" in checks["dependency_updates"].actions[0].lower()
+
+
+def test_dev_extra_installs_files_and_yaml():
+    root = Path(__file__).parents[1]
+    data = __import__("tomllib").loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    dev = data["project"]["optional-dependencies"]["dev"]
+
+    assert any(requirement.startswith("python-docx") for requirement in dev)
+    assert any(requirement.startswith("openpyxl") for requirement in dev)
+    assert any(requirement.startswith("PyYAML") for requirement in dev)
+
+
+def test_clean_dev_extra_runs_full_suite():
+    root = Path(__file__).parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["test"]["steps"]
+    commands = "\n".join(str(step.get("run", "")) for step in steps)
+
+    assert "python -m pip install -e '.[dev]'" in commands
+    assert "python -m pytest -q" in commands
+
+
+def test_release_check_names_ci_equivalent_environment(tmp_path, monkeypatch):
+    write_release_project(tmp_path)
+
+    real_import = __import__("builtins").__import__
+
+    def without_yaml(name, *args, **kwargs):
+        if name == "yaml":
+            raise ModuleNotFoundError(name="yaml")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", without_yaml)
+    report = run_release_checks(tmp_path, build=False)
+    checks = {check.id: check for check in report.checks}
+
+    assert checks["public_yaml"].actions == [
+        "Install the CI-equivalent development environment with `python -m pip install -e '.[dev]'`."
+    ]
+
+
+def test_dependency_matrix_resolves_minimum_and_latest_extras():
+    root = Path(__file__).parents[1]
+    workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["dependency-audit"]
+    commands = "\n".join(str(step.get("run", "")) for step in job["steps"])
+
+    assert job["strategy"]["matrix"]["resolution"] == ["minimum", "latest"]
+    assert "minimum-requirements.txt" in commands
+    assert "--upgrade-strategy eager" in commands
+    assert "python -m pip_audit --skip-editable --progress-spinner off" in commands
+    assert "python -m pip list --format=json" in commands
+
+    checks = {check.id: check for check in run_release_checks(root, build=False).checks}
+    assert checks["dependency_updates"].status == "pass"
+    assert checks["dependency_updates"].evidence["channel"] == "scheduled-ci"
+
+
+def test_release_helpers_cover_defensive_workflow_and_artifact_paths(tmp_path, monkeypatch):
+    assert release_module._workflow_action_pin_issues(
+        "uses: vendor/action@deadbeef\n",
+        {"actions/checkout"},
+    ) == ["unexpected action: vendor/action"]
+    assert release_module._workflow_action_pin_issues(
+        "uses: actions/checkout@main\n",
+        {"actions/checkout"},
+    ) == ["action is not pinned to a full SHA: actions/checkout@main"]
+    assert release_module._workflow_action_pin_issues(
+        "uses: actions/checkout@" + "0" * 40 + "\n",
+        {"actions/checkout"},
+    ) == ["action is not pinned to the reviewed SHA: actions/checkout@" + "0" * 40]
+    assert release_module._load_workflow_document(tmp_path / "missing.yml") is None
+    assert release_module._publish_workflow_semantic_issues({"jobs": []})[-1] == "jobs.publish"
+    assert release_module._publish_workflow_semantic_issues({"jobs": {}})[-1] == "jobs.publish"
+
+    publish = yaml.safe_load(
+        (Path(__file__).parents[1] / ".github/workflows/publish.yml").read_text(encoding="utf-8")
+    )
+    publish["jobs"]["publish"]["steps"][0], publish["jobs"]["publish"]["steps"][1] = (
+        publish["jobs"]["publish"]["steps"][1],
+        publish["jobs"]["publish"]["steps"][0],
+    )
+    assert "publish validation and action step order" in release_module._publish_workflow_semantic_issues(publish)
+
+    assert release_module._release_source_path_ignored(Path("build/generated.txt")) is True
+    assert release_module._artifact_relative_name("") == ""
+
+    broken_wheel = tmp_path / "broken.whl"
+    broken_wheel.write_bytes(b"not a zip")
+    check, evidence = _artifact_content_check([broken_wheel])
+    assert check.status == "fail"
+    assert evidence["forbidden_count"] == 1
+
+
+def test_release_build_branch_and_secret_scan_io_failures(tmp_path, monkeypatch):
+    write_release_project(tmp_path)
+    monkeypatch.setattr(
+        release_module,
+        "_build_distribution_checks",
+        lambda root: ([ReleaseCheck(id="build", status="pass", severity="low", summary="ok")], {"ok": True}),
+    )
+
+    report = run_release_checks(tmp_path, build=True)
+
+    assert report.build == {"ok": True}
+    assert report.checks[-1].id == "build"
+
+    stat_path = tmp_path / "stat-error.txt"
+    read_path = tmp_path / "read-error.txt"
+    stat_path.write_text("safe", encoding="utf-8")
+    read_path.write_text("safe", encoding="utf-8")
+    monkeypatch.setattr(
+        release_module,
+        "_git_tracked_files",
+        lambda *_args, **_kwargs: [Path("stat-error.txt"), Path("read-error.txt")],
+    )
+    real_stat = Path.stat
+    def flaky_stat(path, *args, **kwargs):
+        if path.name == "stat-error.txt":
+            raise OSError("stat race")
+        return real_stat(path, *args, **kwargs)
+
+    real_read_text = Path.read_text
+
+    def flaky_read(path, *args, **kwargs):
+        if path.name == "read-error.txt":
+            raise OSError("read race")
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        Path,
+        "is_file",
+        lambda path: True if path.name in {"stat-error.txt", "read-error.txt"} else path.exists(),
+    )
+    monkeypatch.setattr(Path, "is_symlink", lambda _path: False)
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+    monkeypatch.setattr(Path, "read_text", flaky_read)
+    check = release_module._public_secret_scan_check(tmp_path)
+
+    assert check.status == "pass"
+    assert check.evidence["checked_count"] <= 1
+
+
+def test_release_archive_metadata_and_legacy_extraction_edges(tmp_path, monkeypatch):
+    metadata_sdist = tmp_path / "metadata.tar.gz"
+    payload = tmp_path / "PKG-INFO"
+    payload.write_text("Metadata-Version: 2.4\n", encoding="utf-8")
+    with tarfile.open(metadata_sdist, "w:gz") as archive:
+        archive.add(payload, arcname="demo/ignored.txt")
+        archive.add(payload, arcname="demo/PKG-INFO")
+
+    real_extractfile = tarfile.TarFile.extractfile
+    monkeypatch.setattr(tarfile.TarFile, "extractfile", lambda *_args, **_kwargs: None)
+    with pytest.raises(KeyError, match="could not be read"):
+        release_module._read_artifact_metadata(metadata_sdist)
+    monkeypatch.setattr(tarfile.TarFile, "extractfile", real_extractfile)
+
+    empty_sdist = tmp_path / "empty.tar.gz"
+    with tarfile.open(empty_sdist, "w:gz"):
+        pass
+    (tmp_path / "empty-run" / "sdist-examples").mkdir(parents=True)
+    check, evidence = _sdist_examples_smoke(empty_sdist, tmp_path / "empty-run")
+    assert check.status == "fail"
+    assert evidence["steps"] == []
+
+    class LegacyArchive:
+        def __init__(self):
+            self.calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extractall(self, destination, **kwargs):
+            self.calls += 1
+            if kwargs:
+                raise TypeError("filter unsupported")
+            Path(destination).mkdir(parents=True, exist_ok=True)
+
+    archives = [LegacyArchive(), LegacyArchive()]
+    monkeypatch.setattr(tarfile, "open", lambda *_args, **_kwargs: archives.pop(0))
+    check, evidence = _sdist_examples_smoke(tmp_path / "legacy.tar.gz", tmp_path / "legacy-run")
+    assert check.status == "fail"
+    assert evidence["steps"] == []
+
+
+def test_optional_extraction_deps_skip_cleanly(tmp_path):
+    root = Path(__file__).parents[1]
+    blocker = tmp_path / "import_blocker.py"
+    blocker.write_text(
+        "import builtins\n"
+        "real_import = builtins.__import__\n"
+        "def blocked(name, *args, **kwargs):\n"
+        "    if name.split('.')[0] in {'docx', 'openpyxl'}:\n"
+        "        raise ModuleNotFoundError(name=name)\n"
+        "    return real_import(name, *args, **kwargs)\n"
+        "builtins.__import__ = blocked\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            blocker.stem,
+            "tests/test_extraction.py::test_xlsx_extraction_is_data_only_bounded_and_reports_hidden_sheets",
+            "tests/test_extraction.py::test_docx_extraction_reads_paragraphs_and_tables_with_limits",
+            "tests/test_multimodal_routing.py::test_real_execution_extracts_docx_text_and_tables",
+        ],
+        cwd=root,
+        env={**os.environ, "PYTHONPATH": f"{tmp_path}{os.pathsep}{root / 'src'}"},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "3 skipped" in result.stdout
 
 
 def test_release_check_warns_when_dependabot_config_is_present(tmp_path):

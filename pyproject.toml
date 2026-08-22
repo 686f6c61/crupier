@@ -67,6 +67,8 @@ dev = [
   "ruff>=0.16.1",
   "trove-classifiers>=2026.6.1.19",
   "PyYAML>=6",
+  "openpyxl>=3.1.5",
+  "python-docx>=1.2.0",
 ]
 
 [project.scripts]

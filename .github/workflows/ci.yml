@@ -5,6 +5,8 @@ on:
     branches: ["main"]
   pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
@@ -26,7 +28,7 @@ jobs:
       - name: Install package for tests
         run: |
           python -m pip install --upgrade pip "setuptools>=83" wheel
-          python -m pip install -e ".[all,dev]"
+          python -m pip install -e '.[dev]'
       - name: Run tests
         run: python -m pytest -q
       - name: Enforce coverage
@@ -41,3 +43,63 @@ jobs:
         run: python -m pip_audit --skip-editable --progress-spinner off
       - name: Release readiness check
         run: crupier release check
+
+  dependency-audit:
+    name: Dependency ${{ matrix.resolution }} bounds
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        resolution: [minimum, latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install CI-equivalent development environment
+        run: |
+          python -m pip install --upgrade pip "setuptools>=83" wheel
+          python -m pip install -e '.[dev]'
+      - name: Resolve declared direct minimums
+        if: matrix.resolution == 'minimum'
+        run: |
+          python - <<'PY'
+          import pathlib
+          import tomllib
+
+          from packaging.requirements import Requirement
+
+          data = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
+          requirements = data["project"]["optional-dependencies"]["dev"]
+          minimums = []
+          for value in requirements:
+              requirement = Requirement(value)
+              lower = next(
+                  (item.version for item in requirement.specifier if item.operator in {">=", "=="}),
+                  None,
+              )
+              if lower is None:
+                  raise SystemExit(f"Missing direct lower bound: {value}")
+              extras = f"[{','.join(sorted(requirement.extras))}]" if requirement.extras else ""
+              minimums.append(f"{requirement.name}{extras}=={lower}")
+          pathlib.Path("minimum-requirements.txt").write_text("\n".join(minimums) + "\n", encoding="utf-8")
+          PY
+          python -m pip install --upgrade --force-reinstall -r minimum-requirements.txt
+          python -m pip install --no-deps -e .
+      - name: Resolve latest compatible dependencies
+        if: matrix.resolution == 'latest'
+        run: python -m pip install --upgrade --upgrade-strategy eager -e '.[dev]'
+      - name: Run full suite
+        run: python -m pytest -q
+      - name: Audit resolved dependencies
+        run: python -m pip_audit --skip-editable --progress-spinner off
+      - name: Record resolved component versions
+        run: python -m pip list --format=json > dependency-versions-${{ matrix.resolution }}.json
+      - name: Upload resolved component evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dependency-versions-${{ matrix.resolution }}
+          path: dependency-versions-${{ matrix.resolution }}.json
+          if-no-files-found: error

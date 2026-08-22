@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from crupier import Crupier, FileAsset
 from crupier.adapters import AdapterResponse
 from crupier.config import CrupierConfig
@@ -265,6 +267,7 @@ def test_real_execution_extracts_csv_rows(tmp_path):
 
 
 def test_real_execution_extracts_docx_text_and_tables(tmp_path):
+    pytest.importorskip("docx")
     from docx import Document
 
     document = tmp_path / "brief.docx"

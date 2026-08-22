@@ -129,3 +129,15 @@ the first upload has established ownership.
 Crupier public releases use final numeric versions such as `0.5.0`. Do not
 publish non-final, development, or local build versions unless the release
 policy is intentionally changed.
+
+## Dependency Update Process
+
+Dependabot and Renovate pull requests remain disabled by repository policy. The
+scheduled `dependency-audit` job in `.github/workflows/ci.yml` is the equivalent
+weekly update channel: every Monday it resolves both the declared direct minimum
+versions and the latest compatible versions from the CI-equivalent `.[dev]`
+environment, runs the full suite and `pip-audit`, and uploads
+`dependency-versions-minimum.json` and `dependency-versions-latest.json` as the
+resolved component evidence. Maintainers review failures and available upgrades
+from that run, update bounds in a focused pull request, and can reproduce the
+gate at any time with `workflow_dispatch`.
