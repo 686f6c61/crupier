@@ -8,6 +8,18 @@ from crupier import Crupier
 from crupier.cli import main
 from crupier.config import CrupierConfig, write_default_project
 from crupier.errors import CrupierError
+from crupier.feedback import (
+    HumanReviewItem,
+    HumanReviewPacket,
+    _resolve_report_path,
+    _review_items_from_comparison,
+    _review_items_from_report,
+    _score_status,
+    _validate_rating,
+    build_human_decision_template,
+    build_human_review_packet,
+    format_human_review_markdown,
+)
 from crupier.models import CapabilityCard, ModelRef
 
 
@@ -548,3 +560,114 @@ def test_cli_feedback_review_filters_compare_dataset_case_and_variant(tmp_path, 
     assert item["case_id"] == "structured"
     assert item["variant"] == "openai:gpt-5.4-mini"
     assert "--case-id structured" in item["feedback_commands"]["needs_work"]
+
+
+def test_feedback_review_reports_empty_selection_and_case_tag(tmp_path):
+    report = tmp_path / "compare.json"
+    report.write_text(json.dumps({"dry_run": False, "variants": []}), encoding="utf-8")
+    packet = build_human_review_packet(tmp_path, report_path=str(report))
+    assert packet.ok is False
+    assert packet.warnings == ["No review items matched the selected case/variant."]
+
+    item = HumanReviewItem(
+        id="case-1:variant-a",
+        case_id="case-1",
+        variant="variant-a",
+        models=["openai:gpt-5.5"],
+        recommended=True,
+    )
+    template = build_human_decision_template(
+        HumanReviewPacket("report.json", "compare_dataset", False, 1, 1, [item])
+    )
+    assert "compare_case:case-1" in template["decisions"][0]["tags"]
+
+
+def test_feedback_markdown_renders_optional_review_context() -> None:
+    item = HumanReviewItem(
+        id="case-1:variant-a",
+        case_id="case-1",
+        variant="variant-a",
+        models=["openai:gpt-5.5"],
+        task="Review this result",
+        failed_checks=["latency too high"],
+        output_preview="preview text",
+    )
+    markdown = format_human_review_markdown(
+        HumanReviewPacket("report.json", "compare_dataset", False, 1, 0, [item])
+    )
+    assert "- case: `case-1`" in markdown
+    assert "- task: Review this result" in markdown
+    assert "- failed_check: latency too high" in markdown
+    assert "preview text" in markdown
+
+
+def test_feedback_validation_and_report_paths_fail_closed(tmp_path, monkeypatch):
+    with pytest.raises(CrupierError, match="integer from 1 to 5"):
+        _validate_rating("invalid")
+    with pytest.raises(CrupierError, match="integer from 1 to 5"):
+        _validate_rating(6)
+
+    nested = tmp_path / "reports" / "report.json"
+    nested.parent.mkdir()
+    nested.write_text("{}", encoding="utf-8")
+    monkeypatch.chdir(tmp_path.parent)
+    assert _resolve_report_path(tmp_path, "reports/report.json") == nested.resolve()
+    with pytest.raises(CrupierError, match="not found"):
+        _resolve_report_path(tmp_path, "reports/missing.json")
+
+
+def test_feedback_dataset_skips_invalid_cases_and_variants() -> None:
+    data = {
+        "dry_run": False,
+        "cases": [
+            "invalid",
+            {"id": "missing-comparison"},
+            {
+                "id": "valid",
+                "comparison": {"variants": ["invalid", {"name": "kept", "models": []}]},
+            },
+        ],
+    }
+    items, dry_run = _review_items_from_report(
+        data,
+        report_path="report.json",
+        case_id=None,
+        variant=None,
+        include_output_preview=False,
+    )
+    assert dry_run is False
+    assert [item.id for item in items] == ["valid:kept"]
+
+    class InconsistentCases(dict):
+        reads = 0
+
+        def get(self, key, default=None):
+            if key == "cases":
+                self.reads += 1
+                return [] if self.reads == 1 else "invalid"
+            return super().get(key, default)
+
+    with pytest.raises(CrupierError, match="invalid cases"):
+        _review_items_from_report(
+            InconsistentCases(),
+            report_path="report.json",
+            case_id=None,
+            variant=None,
+            include_output_preview=False,
+        )
+
+    with pytest.raises(CrupierError, match="invalid variants"):
+        _review_items_from_comparison(
+            {"variants": "invalid"},
+            report_path="report.json",
+            case_id=None,
+            task="",
+            winner=None,
+            dry_run=False,
+            variant=None,
+            include_output_preview=False,
+        )
+
+
+def test_feedback_score_status_neutral_boundary() -> None:
+    assert _score_status(0.5) == "neutral"

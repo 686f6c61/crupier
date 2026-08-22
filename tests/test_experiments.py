@@ -9,13 +9,20 @@ from crupier.adapters import AdapterResponse
 from crupier.config import CrupierConfig
 from crupier.errors import CrupierError, CrupierProviderUnavailableError
 from crupier.experiments import (
+    ExperimentReport,
+    PromotionReport,
+    _aggregate_metrics,
+    _ExperimentStateUnavailable,
     _percentile,
+    _promotion_report,
     _ratio_gate,
     _result_metrics,
     _sample,
+    _sticky_value,
     _validated_checks,
     _wilson_upper,
 )
+from crupier.models import ExperimentObservation
 
 
 class ExperimentAdapter:
@@ -692,3 +699,188 @@ def test_experiment_manager_supports_non_blocking_shutdown(tmp_path):
 def test_experiment_configuration_fails_closed(experiment, message):
     with pytest.raises(CrupierError, match=message):
         CrupierConfig.from_dict({"experiments": {"rollout": experiment}})
+
+
+def test_experiment_run_recovers_when_observation_state_initialization_fails(tmp_path, monkeypatch):
+    client = make_client(tmp_path)
+    client.experiments._runtime_status("shadow-sync")
+
+    def fail_run(*args, **kwargs):
+        raise _ExperimentStateUnavailable("state unavailable")
+
+    monkeypatch.setattr(client.experiments, "_run_shadow", fail_run)
+    result = client.deal(
+        "Fallback after state failure",
+        constraints=base_constraints(),
+        dry_run=False,
+        experiment="shadow-sync",
+    )
+    assert result.output_text == "gpt-5.5-answer"
+    assert result.experiment.status == "control_plane_unavailable"
+
+
+def test_experiment_lifecycle_rejects_ineligible_and_missing_actors(tmp_path):
+    client = make_client(tmp_path)
+    with pytest.raises(CrupierError, match="not eligible"):
+        client.experiments.promote("shadow-sync", actor="ana")
+    with pytest.raises(CrupierError, match="Rollback actor"):
+        client.experiments.rollback("shadow-sync", actor="", reason="rollback")
+    with pytest.raises(CrupierError, match="Resume actor"):
+        client.experiments.resume("shadow-sync", actor="")
+
+
+@pytest.mark.parametrize("name", ["shadow-sync", "half"])
+def test_unsampled_baseline_failures_are_recorded_for_both_traffic_modes(tmp_path, name):
+    client = make_client(
+        tmp_path / name,
+        adapter=ExperimentAdapter(fail_models={"gpt-5.5"}),
+    )
+    client.config.experiments[name].sample_rate = 0.0
+    with pytest.raises(CrupierProviderUnavailableError, match="gpt-5.5 failed"):
+        client.deal(
+            "Fail control cohort",
+            constraints=base_constraints(),
+            dry_run=False,
+            experiment=name,
+        )
+    assert client.experiments.report(name).failed == 1
+
+
+def test_canary_auto_promotion_failure_is_attached_to_candidate(tmp_path, monkeypatch):
+    client = make_client(tmp_path)
+    client.config.experiments["canary"].promotion.action = "auto"
+    monkeypatch.setattr(
+        client.experiments,
+        "report",
+        lambda *args, **kwargs: (_ for _ in ()).throw(OSError("report unavailable")),
+    )
+    result = client.deal(
+        "Canary warning",
+        constraints=base_constraints(),
+        dry_run=False,
+        experiment="canary",
+    )
+    assert any("Automatic promotion failed closed" in warning for warning in result.warnings)
+    assert result.experiment.warnings == result.warnings
+
+
+def test_promoted_candidate_and_baseline_failure_is_propagated(tmp_path):
+    client = make_client(
+        tmp_path,
+        adapter=ExperimentAdapter(fail_models={"gpt-5.5", "gpt-5.4-mini"}),
+    )
+    client.experiments.promote("shadow-sync", actor="ana", force=True)
+    with pytest.raises(CrupierProviderUnavailableError, match="gpt-5.5 failed"):
+        client.deal(
+            "Both promoted routes fail",
+            constraints=base_constraints(),
+            dry_run=False,
+            experiment="shadow-sync",
+        )
+    assert client.experiments.report("shadow-sync").failed == 1
+
+
+def test_candidate_kwargs_cover_strategy_approval_and_valid_structured_output(tmp_path):
+    client = make_client(tmp_path)
+    settings = client.config.experiments["shadow-sync"]
+    settings.candidate_strategy = "single"
+    candidate, warnings = client.experiments._candidate_kwargs(
+        settings,
+        {
+            "task": "approval",
+            "constraints": {"requires_human_approval": True},
+        },
+        shadow=True,
+    )
+    assert candidate["strategy"] == "single"
+    assert candidate["dry_run"] is True
+    assert any("requires human approval" in warning for warning in warnings)
+
+    result = client.deal("Structured", constraints=base_constraints(), dry_run=False)
+    result.output_json = {"answer": 42}
+    assert _result_metrics(result, store_output=True)["output_json"] == {"answer": 42}
+
+
+def test_canary_evaluator_failure_is_contained(tmp_path):
+    client = make_client(
+        tmp_path,
+        evaluator=lambda primary, candidate: (_ for _ in ()).throw(RuntimeError("bad evaluator")),
+    )
+    result = client.deal(
+        "Candidate evaluator",
+        constraints=base_constraints(),
+        dry_run=False,
+        experiment="canary",
+    )
+    assert any("Experiment evaluator failed" in warning for warning in result.experiment.warnings)
+
+
+def test_runtime_record_handles_concurrent_activation(tmp_path, monkeypatch):
+    client = make_client(tmp_path)
+    original_get = client.experiments.store.get
+    client.experiments._runtime_status("shadow-sync")
+    calls = 0
+
+    def race_get(kind, record_id):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise CrupierError("missing in stale snapshot")
+        return original_get(kind, record_id)
+
+    monkeypatch.setattr(client.experiments.store, "get", race_get)
+    monkeypatch.setattr(
+        client.experiments.store,
+        "create",
+        lambda **kwargs: (_ for _ in ()).throw(CrupierError("already created")),
+    )
+    assert client.experiments._runtime_record("shadow-sync").status == "active"
+
+
+def test_auto_promotion_executes_once_and_sticky_metadata_uses_fallback(tmp_path, monkeypatch):
+    client = make_client(tmp_path)
+    settings = client.config.experiments["shadow-sync"]
+    settings.promotion.action = "auto"
+    report = ExperimentReport(
+        experiment=settings.name,
+        status="active",
+        observations=2,
+        sampled=2,
+        completed=2,
+        failed=0,
+        cohorts={"shadow": 2},
+        metrics={},
+        promotion=PromotionReport(settings.name, True, 2, {}, {}),
+    )
+    promoted = []
+    monkeypatch.setattr(client.experiments, "report", lambda name: report)
+    monkeypatch.setattr(client.experiments, "promote", lambda name, actor: promoted.append((name, actor)))
+    assert client.experiments._maybe_auto_promote(settings) is None
+    assert promoted == [("shadow-sync", "automatic-policy")]
+    assert _sticky_value(settings, {"metadata": {"tenant_id": "tenant-1"}}) == '"tenant-1"'
+
+
+def test_promotion_uses_cohort_quality_and_reports_cost_failure(tmp_path):
+    client = make_client(tmp_path)
+    settings = client.config.experiments["shadow-sync"]
+    settings.promotion.require_quality_evaluator = False
+    settings.promotion.min_samples = 1
+    settings.promotion.max_cost_ratio = 1.0
+    settings.promotion.max_p95_latency_ratio = 1.0
+    observation = ExperimentObservation(
+        observation_id="obs_quality",
+        experiment=settings.name,
+        traffic="shadow",
+        cohort="shadow",
+        sampled=True,
+        status="completed",
+        primary={"quality_score": 0.5, "actual_cost_usd": 1.0, "latency_ms": 100},
+        candidate={"quality_score": 0.8, "actual_cost_usd": 2.0, "latency_ms": 200},
+    )
+    metrics = _aggregate_metrics([observation])
+    promotion = _promotion_report(settings, [observation], metrics)
+    assert promotion.gates["quality"] is True
+    assert promotion.gates["cost"] is False
+    assert promotion.gates["latency"] is False
+    assert "candidate cost ratio exceeds policy" in promotion.reasons
+    assert "candidate p95 latency ratio exceeds policy" in promotion.reasons

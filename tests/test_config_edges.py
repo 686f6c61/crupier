@@ -9,6 +9,7 @@ import pytest
 import crupier.config as config_module
 from crupier.config import (
     CrupierConfig,
+    ExperimentSettings,
     PolicyRule,
     ProfileSettings,
     ProviderSettings,
@@ -378,3 +379,47 @@ def test_custom_host_requires_explicit_opt_in_and_https() -> None:
         }
     )
     assert loopback_http.providers["openai"].host == "http://127.0.0.1:8080/v1"
+
+
+@pytest.mark.parametrize(
+    ("experiment", "message"),
+    [
+        ({"execution": "later"}, "execution"),
+        ({"sample_rate": 1.1}, "sample_rate"),
+        ({"candidate_models": ["missing-provider"]}, "provider:model"),
+        ({"candidate_strategy": "magic"}, "candidate_strategy"),
+        ({"promotion": {"action": "deploy"}}, "promotion.action"),
+        ({"promotion": {"confidence": 1.1}}, "promotion.confidence"),
+    ],
+)
+def test_experiment_config_rejects_residual_invalid_values(experiment, message: str) -> None:
+    with pytest.raises(CrupierConfigError, match=message):
+        CrupierConfig.from_dict({"experiments": {"edge": experiment}})
+
+
+def test_experiment_config_parser_handles_absent_string_and_invalid_candidates() -> None:
+    assert config_module._experiment_settings_from_dict(None) == {}
+    with pytest.raises(CrupierConfigError, match="must be a table"):
+        config_module._experiment_settings_from_dict({"edge": []})
+
+    parsed = config_module._experiment_settings_from_dict(
+        {"edge": {"candidate_models": "openai:gpt-5.5"}}
+    )
+    assert parsed["edge"].candidate_models == ["openai:gpt-5.5"]
+
+    with pytest.raises(CrupierConfigError, match="must be an array"):
+        config_module._experiment_settings_from_dict({"edge": {"candidate_models": 42}})
+
+    config = CrupierConfig(experiments={"edge": ExperimentSettings("edge", candidate_models=["invalid"])})
+    with pytest.raises(CrupierConfigError, match="provider:model"):
+        config.validate()
+
+
+def test_config_helpers_cover_absent_values_and_malformed_hosts() -> None:
+    with pytest.raises(CrupierConfigError, match="policy must be a table"):
+        config_module._policy_settings_from_dict(None)
+    assert config_module._string_list(None) == []
+    assert config_module.host_is_loopback("not a URL") is False
+    assert config_module.is_official_provider_host("openai", "not a URL") is False
+    with pytest.raises(CrupierConfigError, match="must use http or https"):
+        config_module._require_https_unless_loopback("ftp://127.0.0.1")

@@ -25,6 +25,8 @@ from crupier.trace_store import (
     _jsonable,
     _request_record,
     _result_record,
+)
+from crupier.trace_store import (
     _trace_record as serialize_trace_record,
 )
 
