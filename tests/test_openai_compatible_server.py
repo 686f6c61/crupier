@@ -1,6 +1,7 @@
 import http.client
 import json
 import threading
+from pathlib import Path
 from uuid import uuid4
 
 from crupier import Crupier
@@ -13,7 +14,11 @@ from crupier.server import build_openai_compatible_server
 class FakeAdapter:
     provider = "openai"
 
+    def __init__(self):
+        self.calls = []
+
     def generate(self, *, model, prompt, request):
+        self.calls.append({"model": model, "prompt": prompt, "files": list(request.files)})
         return AdapterResponse(
             text=f"server {model}",
             usage={"input_tokens": 5, "output_tokens": 6},
@@ -118,7 +123,11 @@ def with_server(
     operation_adapter=None,
     cors_origin=None,
     max_request_bytes=10_000_000,
+    file_root=None,
 ):
+    kwargs = {}
+    if file_root is not None:
+        kwargs["file_root"] = file_root
     server = build_openai_compatible_server(
         crupier=make_crupier(tmp_path, adapter=adapter, operation_adapter=operation_adapter),
         host="127.0.0.1",
@@ -126,6 +135,7 @@ def with_server(
         dry_run=dry_run,
         cors_origin=cors_origin,
         max_request_bytes=max_request_bytes,
+        **kwargs,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -498,3 +508,128 @@ def test_multipart_endpoint_rejects_body_above_server_limit(tmp_path):
         assert data["error"]["code"] == "request_too_large"
 
     with_server(tmp_path, run, max_request_bytes=128)
+
+
+def _track_secret_reads(monkeypatch, secret: Path) -> list[str]:
+    reads: list[str] = []
+    target = secret.resolve()
+    original_read_text = Path.read_text
+    original_read_bytes = Path.read_bytes
+
+    def read_text(self, *args, **kwargs):
+        if self.expanduser().resolve() == target:
+            reads.append("text")
+        return original_read_text(self, *args, **kwargs)
+
+    def read_bytes(self, *args, **kwargs):
+        if self.expanduser().resolve() == target:
+            reads.append("bytes")
+        return original_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    return reads
+
+
+def test_http_responses_rejects_absolute_input_file_path(tmp_path, monkeypatch):
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(b"\x89PNG\r\n\x1a\nPII-TOKEN-SHOULD-NOT-LEAK")
+    adapter = FakeAdapter()
+    reads = _track_secret_reads(monkeypatch, secret)
+
+    def run(address):
+        status, _, data = request_json(
+            address,
+            "POST",
+            "/v1/responses",
+            {
+                "model": "gpt-5.4-mini",
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": "Summarize the file"},
+                            {"type": "input_file", "filename": str(secret)},
+                        ],
+                    }
+                ],
+            },
+        )
+        assert status == 400
+        assert data["error"]["type"] == "invalid_request_error"
+        assert "local" in data["error"]["message"].lower()
+        assert adapter.calls == []
+        assert reads == []
+
+    with_server(tmp_path, run, adapter=adapter)
+
+
+def test_http_chat_rejects_parent_traversal_and_symlink_escape(tmp_path):
+    allowed = tmp_path / "root"
+    allowed.mkdir()
+    (allowed / "inside.png").write_bytes(b"\x89PNG\r\n\x1a\ninside")
+    secret = tmp_path / "outside.png"
+    secret.write_bytes(b"\x89PNG\r\n\x1a\nOUTSIDE-SECRET")
+    (allowed / "escape.png").symlink_to(secret)
+    adapter = FakeAdapter()
+
+    def run(address):
+        for filename in ("../outside.png", str(allowed / "escape.png")):
+            status, _, data = request_json(
+                address,
+                "POST",
+                "/v1/chat/completions",
+                {
+                    "model": "gpt-5.4-mini",
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Read this"},
+                                {"type": "file", "filename": filename},
+                            ],
+                        }
+                    ],
+                },
+            )
+            assert status == 400, filename
+            assert data["error"]["type"] == "invalid_request_error"
+            assert "local" in data["error"]["message"].lower()
+        assert adapter.calls == []
+
+    with_server(tmp_path, run, adapter=adapter, file_root=allowed)
+
+
+def test_http_multipart_bytes_still_reach_transcription_and_image_edit(tmp_path):
+    operation_adapter = FakeOperationAdapter()
+
+    def run(address):
+        transcribe_status, _, transcribe_raw = request_multipart(
+            address,
+            "/v1/audio/transcriptions",
+            fields=[("model", "whisper"), ("language", "es")],
+            files=[("file", "sample.wav", "audio/wav", b"RIFF-audio")],
+        )
+        transcribe = json.loads(transcribe_raw)
+        assert transcribe_status == 200
+        assert transcribe["text"] == "server transcript"
+
+        edit_status, _, edit_raw = request_multipart(
+            address,
+            "/v1/images/edits",
+            fields=[("model", "flux-2-klein"), ("prompt", "Merge references")],
+            files=[
+                ("image[]", "one.png", "image/png", b"one"),
+                ("image[]", "two.png", "image/png", b"two"),
+            ],
+        )
+        edit = json.loads(edit_raw)
+        assert edit_status == 200
+        images = operation_adapter.calls[1]["payload"]["images"]
+        assert images == [
+            ("one.png", b"one", "image/png"),
+            ("two.png", b"two", "image/png"),
+        ]
+        assert edit["data"][0]["url"].endswith("generated.png")
+
+    with_server(tmp_path, run, operation_adapter=operation_adapter)

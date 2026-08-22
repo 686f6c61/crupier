@@ -49,6 +49,7 @@ from .models import (
     UpdateReport,
 )
 from .multimodal import (
+    enforce_file_access_policy,
     normalize_files,
     plan_file_representations,
     prepare_extracted_file_context,
@@ -410,6 +411,11 @@ class Crupier:
                 "use a granted approval token bound to the frozen route."
             )
         file_assets = normalize_files(files)
+        enforce_file_access_policy(
+            file_assets,
+            allow_host_paths=constraints.get("allow_local_file_uris", True) is not False,
+            allowed_root=constraints.get("file_root"),
+        )
         file_plan = plan_file_representations(file_assets, task=task, constraints=constraints)
         metadata.setdefault("_crupier_orchestrator_calls", [])
         execution_files = list(file_assets)

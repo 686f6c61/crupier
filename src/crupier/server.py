@@ -10,6 +10,7 @@ from email.parser import BytesParser
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -44,6 +45,7 @@ def build_openai_compatible_server(
     allow_remote: bool = False,
     cors_origin: str | None = None,
     max_request_bytes: int = 10_000_000,
+    file_root: str | Path | None = None,
 ) -> ThreadingHTTPServer:
     """Create a stdlib HTTP server exposing a small OpenAI-compatible API."""
 
@@ -52,7 +54,13 @@ def build_openai_compatible_server(
             "crupier serve binds to loopback by default. Pass allow_remote=True or CLI --allow-remote "
             "only when this compatibility server is protected by your own network/auth boundary."
         )
-    compat_client = OpenAI(crupier=crupier, dry_run=dry_run, compat_mode=compat_mode)
+    compat_client = OpenAI(
+        crupier=crupier,
+        dry_run=dry_run,
+        compat_mode=compat_mode,
+        allow_local_file_uris=False,
+        file_root=file_root,
+    )
 
     class Handler(_OpenAICompatibleHandler):
         client = compat_client
@@ -73,6 +81,7 @@ def serve_openai_compatible(
     allow_remote: bool = False,
     cors_origin: str | None = None,
     max_request_bytes: int = 10_000_000,
+    file_root: str | Path | None = None,
 ) -> None:
     server = build_openai_compatible_server(
         crupier=crupier,
@@ -83,6 +92,7 @@ def serve_openai_compatible(
         allow_remote=allow_remote,
         cors_origin=cors_origin,
         max_request_bytes=max_request_bytes,
+        file_root=file_root,
     )
     try:
         server.serve_forever()

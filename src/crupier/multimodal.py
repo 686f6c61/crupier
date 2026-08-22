@@ -10,9 +10,9 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote_to_bytes, urlparse
+from urllib.parse import unquote, unquote_to_bytes, urlparse
 
-from .errors import CrupierModelUnsupportedError
+from .errors import CrupierConfigError, CrupierModelUnsupportedError
 from .extraction import (
     ExtractedDocument,
     OCRAdapter,
@@ -52,6 +52,9 @@ CODE_EXTENSIONS = {
 }
 
 MODEL_CAPABILITIES = {"vision_input", "audio_input", "video_input", "file_input", "pdf_native_input"}
+
+
+DEFAULT_MAX_DATA_URL_BYTES = 2_000_000
 
 
 def normalize_files(files: list[Any] | tuple[Any, ...] | None) -> list[FileAsset]:
@@ -177,6 +180,9 @@ def native_file_payloads(
                 f"File {asset.name or '<unnamed>'!r} must be a local file path or data URL for real execution."
             )
         path = Path(asset.uri).expanduser()
+        root = asset.metadata.get("file_root")
+        if root:
+            path = resolve_path_inside_root(str(path), Path(str(root)))
         if not path.exists() or not path.is_file():
             raise CrupierModelUnsupportedError(f"File {asset.name or str(path)!r} does not exist.")
         size = path.stat().st_size
@@ -587,6 +593,115 @@ def _looks_local(reference: str) -> bool:
     return not urlparse(reference).scheme
 
 
+def is_data_url(uri: str | None) -> bool:
+    """Indica si la referencia es un data URL."""
+
+    return isinstance(uri, str) and uri.startswith("data:")
+
+
+def is_host_filesystem_uri(uri: str | None) -> bool:
+    """Indica si la referencia apunta a una ruta del sistema de ficheros local."""
+
+    if not isinstance(uri, str) or not uri or is_data_url(uri):
+        return False
+    parsed = urlparse(uri)
+    if parsed.scheme == "file":
+        return True
+    return _looks_local(uri)
+
+
+def enforce_file_access_policy(
+    files: list[Any],
+    *,
+    allow_host_paths: bool = True,
+    allowed_root: str | Path | None = None,
+    max_data_url_bytes: int = DEFAULT_MAX_DATA_URL_BYTES,
+) -> None:
+    """Rechaza rutas locales no autorizadas y recorta data URLs demasiado grandes.
+
+    Sin raíz, un transport HTTP no debe resolver rutas del host. Si se ofrece
+    una raíz, las rutas se resuelven siguiendo enlaces y tienen que quedar
+    estrictamente dentro de ella.
+    """
+
+    root = Path(allowed_root).expanduser().resolve() if allowed_root else None
+    for item in files:
+        uri = _file_uri(item)
+        if not uri:
+            continue
+        if is_data_url(uri):
+            _require_bounded_data_url(uri, max_data_url_bytes)
+            continue
+        if not is_host_filesystem_uri(uri):
+            continue
+        if root is not None:
+            resolved = resolve_path_inside_root(uri, root)
+            _set_file_uri(item, str(resolved))
+            if isinstance(item, FileAsset):
+                item.metadata["file_root"] = str(root)
+            continue
+        if allow_host_paths:
+            continue
+        raise CrupierConfigError(
+            "JSON file parts cannot reference local paths on the host. "
+            "Upload bytes via multipart or use a bounded data URL."
+        )
+
+
+def resolve_path_inside_root(uri: str, root: Path) -> Path:
+    """Resuelve *uri* y exige que el fichero quede dentro de *root*."""
+
+    root_resolved = root.expanduser().resolve()
+    candidate = _path_from_filesystem_uri(uri)
+    if not candidate.is_absolute():
+        candidate = root_resolved / candidate
+    resolved = candidate.resolve()
+    if resolved == root_resolved or not resolved.is_relative_to(root_resolved):
+        raise CrupierConfigError("Local file reference escapes the configured file root.")
+    if not resolved.is_file():
+        raise CrupierConfigError(f"File {resolved} does not exist inside the configured file root.")
+    return resolved
+
+
+def _file_uri(item: Any) -> str | None:
+    if isinstance(item, dict):
+        value = item.get("uri") or item.get("path") or item.get("url")
+    else:
+        value = getattr(item, "uri", None)
+    return str(value) if value else None
+
+
+def _set_file_uri(item: Any, uri: str) -> None:
+    if isinstance(item, dict):
+        item["uri"] = uri
+        return
+    if isinstance(item, FileAsset):
+        item.uri = uri
+
+
+def _path_from_filesystem_uri(uri: str) -> Path:
+    parsed = urlparse(uri)
+    if parsed.scheme == "file":
+        path = unquote(parsed.path)
+        if parsed.netloc and parsed.netloc.lower() not in {"localhost", "127.0.0.1"}:
+            path = f"/{parsed.netloc}{path}"
+        return Path(path)
+    return Path(uri).expanduser()
+
+
+def _require_bounded_data_url(uri: str, max_bytes: int) -> None:
+    header, separator, payload = uri.partition(",")
+    if not separator or not header.startswith("data:"):
+        raise CrupierConfigError("Invalid data URL in a file part.")
+    media_parts = header[5:].split(";")
+    try:
+        raw = base64.b64decode(payload, validate=True) if "base64" in media_parts[1:] else unquote_to_bytes(payload)
+    except (ValueError, binascii.Error) as exc:
+        raise CrupierConfigError("Invalid data URL encoding in a file part.") from exc
+    if len(raw) > max_bytes:
+        raise CrupierConfigError(f"Data URL is {len(raw)} bytes, above max {max_bytes} bytes.")
+
+
 def _sorted_unique(values: Any) -> list[str]:
     return sorted({str(value) for value in values if value})
 
@@ -671,6 +786,9 @@ def _local_path(asset: FileAsset) -> Path:
     if not asset.uri or not _looks_local(asset.uri):
         raise CrupierModelUnsupportedError(f"File {asset.name or '<unnamed>'!r} must be a local path for extraction.")
     path = Path(asset.uri).expanduser()
+    root = asset.metadata.get("file_root")
+    if root:
+        path = resolve_path_inside_root(str(path), Path(str(root)))
     if not path.exists() or not path.is_file():
         raise CrupierModelUnsupportedError(f"File {asset.name or str(path)!r} does not exist.")
     return path

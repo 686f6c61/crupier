@@ -12,6 +12,7 @@ from crupier.client import Crupier
 from crupier.config import CrupierConfig
 from crupier.errors import CrupierProviderUnavailableError
 from crupier.models import CrupierResult, OperationResult
+from crupier.multimodal import DEFAULT_MAX_DATA_URL_BYTES, enforce_file_access_policy
 
 
 class CompatObject(dict):
@@ -69,6 +70,9 @@ class OpenAI:
         project: str = ".",
         dry_run: bool | None = None,
         compat_mode: str = "balanced",
+        allow_local_file_uris: bool = True,
+        file_root: str | Path | None = None,
+        max_data_url_bytes: int | None = None,
         **_: Any,
     ):
         if crupier is not None:
@@ -79,6 +83,9 @@ class OpenAI:
             self._crupier = Crupier.from_project(project)
         self._dry_run = dry_run
         self._compat_mode = compat_mode
+        self._allow_local_file_uris = allow_local_file_uris
+        self._file_root = Path(file_root).expanduser() if file_root else None
+        self._max_data_url_bytes = max_data_url_bytes
         self.responses = _Responses(self)
         self.chat = _Chat(self)
         self.embeddings = _Embeddings(self)
@@ -127,6 +134,18 @@ class OpenAI:
         if metadata is not None and not isinstance(metadata, dict):
             raise TypeError("metadata must be a dictionary.")
         files, normalized_input, normalized_messages = _extract_file_inputs(input=input, messages=messages)
+        enforce_file_access_policy(
+            files,
+            allow_host_paths=self._allow_local_file_uris,
+            allowed_root=self._file_root,
+            max_data_url_bytes=(
+                self._max_data_url_bytes if self._max_data_url_bytes is not None else DEFAULT_MAX_DATA_URL_BYTES
+            ),
+        )
+        if self._file_root is not None:
+            constraints["file_root"] = str(self._file_root)
+        if not self._allow_local_file_uris:
+            constraints["allow_local_file_uris"] = False
         response_schema = _response_schema_from_format(response_format)
         if dry_run is None:
             dry_run = self._dry_run
