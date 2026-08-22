@@ -439,16 +439,20 @@ def _redact_value(value: Any) -> Any:
 
 
 def _jsonable(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [_jsonable(item) for item in value]
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        try:
+            return _jsonable(to_dict())
+        except Exception:  # noqa: BLE001 - serialization must retain a safe repr fallback
+            return repr(value)
     try:
         json.dumps(value)
         return value
     except TypeError:
-        if isinstance(value, dict):
-            return {str(key): _jsonable(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [_jsonable(item) for item in value]
-        if isinstance(value, tuple):
-            return [_jsonable(item) for item in value]
         return repr(value)
 
 

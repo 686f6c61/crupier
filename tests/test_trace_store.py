@@ -14,6 +14,7 @@ from crupier.models import PlanningContext, RequestEnvelope
 from crupier.orchestrator import ModelOrchestrator
 from crupier.project_audit import _canary_error
 from crupier.redaction import redact_text, redact_value
+from crupier.trace_store import _jsonable
 
 
 def make_config(tmp_path):
@@ -362,6 +363,58 @@ def test_trace_store_replay_requires_prompt_storage(tmp_path):
     assert record["request"]["task"] == "Replay this exact route"
     assert record["result"]["output_text"].startswith("Crupier dry-run planned")
     assert replay.route.strategy == original.route.strategy
+
+
+def test_trace_store_tool_calls_redaction_respects_store_flags(tmp_path):
+    client = Crupier(make_config(tmp_path))
+    records = {}
+    for store_content in (False, True):
+        constraints = {
+            "store_trace": True,
+            "store_prompt": store_content,
+            "store_response": store_content,
+        }
+        request = RequestEnvelope(task=f"tool trace {store_content}", constraints=constraints)
+        result = client.deal(request.task, constraints=constraints, dry_run=True, trace="summary")
+        result.provider_metadata["tool_calls"] = [
+            {
+                "name": "run_sql",
+                "arguments": {"query": "SELECT row FROM cases", "api_key": "do-not-store"},
+                "result": {"row": 1},
+            }
+        ]
+        client.traces.write(
+            project=client.config.project.name,
+            request=request,
+            result=result,
+            dry_run=True,
+            trace_level="summary",
+        )
+        records[store_content] = client.traces.read(result.trace.trace_id)
+
+    omitted_call = records[False]["result"]["provider_metadata"]["tool_calls"][0]
+    stored_call = records[True]["result"]["provider_metadata"]["tool_calls"][0]
+    assert "SELECT" not in json.dumps(records[False])
+    assert "row" not in json.dumps(records[False])
+    assert "arguments" not in omitted_call
+    assert "result" not in omitted_call
+    assert stored_call["arguments"] == {"api_key": "[redacted]", "query": "SELECT row FROM cases"}
+    assert stored_call["result"] == {"row": 1}
+
+
+def test_trace_store_jsonable_handles_exotic_types():
+    class CustomPayload:
+        def to_dict(self):
+            return {"items": ("one", {"two"})}
+
+    converted = _jsonable({"set": {"value"}, "tuple": (1, 2), "custom": CustomPayload()})
+
+    assert converted == {
+        "set": "{'value'}",
+        "tuple": [1, 2],
+        "custom": {"items": ["one", "{'two'}"]},
+    }
+    json.dumps(converted)
 
 
 def test_cli_trace_commands(tmp_path, capsys):

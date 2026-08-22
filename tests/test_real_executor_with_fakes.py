@@ -1,4 +1,3 @@
-import socket
 from datetime import UTC, datetime
 from time import sleep
 
@@ -468,7 +467,7 @@ def test_ollama_socket_timeout_is_retryable_provider_error(tmp_path, monkeypatch
     def time_out(*args, **kwargs):
         nonlocal calls
         calls += 1
-        raise socket.timeout("timed out")
+        raise TimeoutError("timed out")
 
     monkeypatch.setattr("urllib.request.urlopen", time_out)
     config = make_config(tmp_path, allow=["ollama:gpt-oss:120b"])
