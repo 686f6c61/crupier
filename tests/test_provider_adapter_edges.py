@@ -1,4 +1,5 @@
 import sys
+import urllib.request
 from types import SimpleNamespace
 
 import pytest
@@ -6,9 +7,14 @@ import pytest
 import crupier.adapters.anthropic as anthropic_module
 import crupier.adapters.openai as openai_module
 from crupier.adapters.anthropic import AnthropicAdapter
+from crupier.adapters.nan import NaNAdapter
+from crupier.adapters.ollama import OllamaAdapter
 from crupier.adapters.openai import OpenAIAdapter
+from crupier.adapters.openai_compatible import OpenAICompatibleAdapter
+from crupier.adapters.openrouter import OpenRouterAdapter
 from crupier.config import ProviderSettings
 from crupier.errors import (
+    CrupierConfigError,
     CrupierProviderAuthError,
     CrupierProviderRateLimitError,
     CrupierProviderUnavailableError,
@@ -189,7 +195,13 @@ def test_openai_build_client_supports_host_and_reports_missing_dependency(monkey
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=FakeOpenAI))
-    adapter = OpenAIAdapter(ProviderSettings(enabled=True, host="https://api.example.test/v1"))
+    adapter = OpenAIAdapter(
+        ProviderSettings(
+            enabled=True,
+            host="https://api.example.test/v1",
+            options={"allow_custom_host": True},
+        )
+    )
     adapter._build_client()
     assert calls["base_url"] == "https://api.example.test/v1"
 
@@ -350,7 +362,11 @@ def test_anthropic_build_client_supports_host_timeout_and_missing_dependency(mon
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
     monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=FakeAnthropic))
     adapter = AnthropicAdapter(
-        ProviderSettings(enabled=True, host="https://api.example.test", options={"timeout": 5})
+        ProviderSettings(
+            enabled=True,
+            host="https://api.example.test",
+            options={"timeout": 5, "allow_custom_host": True},
+        )
     )
     adapter._build_client()
     assert calls == {"api_key": "test-key", "base_url": "https://api.example.test", "timeout": 5.0}
@@ -370,3 +386,82 @@ def test_anthropic_probe_helpers_support_objects_and_empty_content():
     assert anthropic_module._event_has_text({}) is False
     assert anthropic_module._event_has_text(SimpleNamespace(content_block="x")) is True
     assert anthropic_module._event_has_text(SimpleNamespace()) is False
+
+
+def _recording_sdk(monkeypatch, module_name: str, class_name: str) -> list[dict]:
+    constructed: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            constructed.append(kwargs)
+
+    monkeypatch.setitem(sys.modules, module_name, SimpleNamespace(**{class_name: FakeClient}))
+    return constructed
+
+
+@pytest.mark.parametrize(
+    ("adapter_cls", "env_key", "sdk_module", "sdk_attr"),
+    [
+        (OpenAIAdapter, "OPENAI_API_KEY", "openai", "OpenAI"),
+        (AnthropicAdapter, "ANTHROPIC_API_KEY", "anthropic", "Anthropic"),
+        (OpenRouterAdapter, "OPENROUTER_API_KEY", "openai", "OpenAI"),
+        (NaNAdapter, "NAN_API_KEY", "openai", "OpenAI"),
+        (OllamaAdapter, "OLLAMA_API_KEY", None, None),
+    ],
+)
+def test_canonical_provider_rejects_custom_host_with_default_credential(
+    monkeypatch, adapter_cls, env_key, sdk_module, sdk_attr
+):
+    monkeypatch.setenv(env_key, "canonical-secret")
+    settings = ProviderSettings(enabled=True, host="https://attacker.example/v1")
+    adapter = adapter_cls(settings)
+    outbound = []
+    if sdk_module:
+        constructed = _recording_sdk(monkeypatch, sdk_module, sdk_attr)
+    else:
+
+        def _blocked_urlopen(*args, **kwargs):
+            outbound.append((args, kwargs))
+            raise AssertionError("custom host must not receive the canonical credential")
+
+        monkeypatch.setattr(urllib.request, "urlopen", _blocked_urlopen)
+        constructed = outbound
+
+    with pytest.raises(CrupierConfigError, match="allow_custom_host"):
+        if adapter_cls is OllamaAdapter:
+            adapter.generate(model="llama", prompt="ping", request=RequestEnvelope(task="ping"))
+        else:
+            adapter._build_client()
+
+    assert constructed == []
+
+
+def test_generic_inference_host_uses_only_its_configured_env_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "canonical-openai-secret")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "canonical-anthropic-secret")
+    monkeypatch.setenv("NAN_API_KEY", "canonical-nan-secret")
+    monkeypatch.setenv("INFERENCE_API_KEY", "inference-only-secret")
+    captured = _recording_sdk(monkeypatch, "openai", "OpenAI")
+
+    adapter = OpenAICompatibleAdapter(
+        ProviderSettings(enabled=True, host="https://inference.example/v1"),
+        provider="inference",
+    )
+    adapter._build_client()
+
+    assert captured[0]["api_key"] == "inference-only-secret"
+    assert captured[0]["api_key"] not in {
+        "canonical-openai-secret",
+        "canonical-anthropic-secret",
+        "canonical-nan-secret",
+    }
+
+    with pytest.raises(CrupierConfigError, match="canonical"):
+        OpenAICompatibleAdapter(
+            ProviderSettings(
+                enabled=True,
+                host="https://inference.example/v1",
+                env_key="OPENAI_API_KEY",
+            ),
+            provider="inference",
+        )._build_client()

@@ -203,10 +203,10 @@ OLLAMA_HOST=https://ollama.com/api
     )
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setenv("OLLAMA_HOST", "http://already-set:11434")
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 
     config = CrupierConfig.from_toml(tmp_path)
 
-    assert config.providers["ollama"].host == "http://already-set:11434"
+    assert config.providers["ollama"].host == "http://127.0.0.1:11434"
     assert os.environ["OPENAI_API_KEY"] == "from-dotenv"
     assert os.environ["ANTHROPIC_API_KEY"] == "quoted-value"

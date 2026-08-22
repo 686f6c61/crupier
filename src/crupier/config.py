@@ -19,6 +19,24 @@ OLLAMA_CLOUD_HOST = "https://ollama.com/api"
 OPENROUTER_DEFAULT_HOST = "https://openrouter.ai/api/v1"
 INFERENCE_DEFAULT_HOST = "http://127.0.0.1:8000/v1"
 NAN_DEFAULT_HOST = "https://api.nan.builders/v1"
+CANONICAL_PROVIDER_HOSTNAMES = {
+    "openai": frozenset({"api.openai.com"}),
+    "anthropic": frozenset({"api.anthropic.com"}),
+    "openrouter": frozenset({"openrouter.ai"}),
+    "ollama": frozenset({"ollama.com"}),
+    "nan": frozenset({"api.nan.builders"}),
+}
+CANONICAL_ENV_KEYS = frozenset(
+    {
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GOOGLE_API_KEY",
+        "GEMINI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "OLLAMA_API_KEY",
+        "NAN_API_KEY",
+    }
+)
 _ROUTE_STRATEGIES = {
     "single",
     "fallback",
@@ -395,6 +413,9 @@ class CrupierConfig:
             if rule.effect not in {"deny", "require_capability", "require_verified_capability"}:
                 raise CrupierConfigError(f"Policy rule {rule.name!r} has unsupported effect {rule.effect!r}.")
         _validate_scoring(self.scoring)
+        for name, settings in self.providers.items():
+            if settings.enabled:
+                validate_provider_endpoint(name, settings)
 
     @property
     def crupier_dir(self) -> Path:
@@ -639,6 +660,86 @@ def _validate_scoring(scoring: ScoringSettings) -> None:
                 raise CrupierConfigError(f"scoring.{field_name} must contain finite numbers.")
 
 
+def host_is_loopback(host: str) -> bool:
+    """Indica si *host* apunta a loopback (localhost, 127.0.0.1 o ::1)."""
+
+    hostname = (urlparse(host).hostname or "").lower()
+    if not hostname:
+        return False
+    if hostname in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    try:
+        return ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def is_generic_inference_provider(provider: str, settings: ProviderSettings) -> bool:
+    """Indica si el proveedor es un endpoint genérico compatible con OpenAI."""
+
+    if provider == "inference":
+        return True
+    return settings.mode == "openai_compatible" and provider not in CANONICAL_PROVIDER_HOSTNAMES
+
+
+def is_official_provider_host(provider: str, host: str | None) -> bool:
+    """Indica si *host* es el API oficial o, en Ollama, un demonio local."""
+
+    if not host:
+        return True
+    hostname = (urlparse(host).hostname or "").lower()
+    if not hostname:
+        return False
+    official = CANONICAL_PROVIDER_HOSTNAMES.get(provider, frozenset())
+    if hostname in official:
+        return True
+    return provider == "ollama" and host_is_loopback(host)
+
+
+def validate_provider_endpoint(provider: str, settings: ProviderSettings) -> None:
+    """Impide enviar credenciales canónicas a un host no oficial sin opt-in.
+
+    Los endpoints genéricos de inferencia pueden usar un host propio, pero no
+    reutilizar la clave de un proveedor canónico. Fuera de loopback el host
+    tiene que ser HTTPS.
+    """
+
+    host = settings.host
+    if is_generic_inference_provider(provider, settings):
+        env_key = settings.env_key
+        if env_key and env_key in CANONICAL_ENV_KEYS:
+            raise CrupierConfigError(
+                f"Provider {provider!r} cannot reuse the canonical credential {env_key!r}. "
+                "Configure a dedicated env_key for this generic inference endpoint."
+            )
+        if host:
+            _require_https_unless_loopback(host)
+        return
+
+    if host:
+        _require_https_unless_loopback(host)
+    if provider not in CANONICAL_PROVIDER_HOSTNAMES:
+        return
+    if is_official_provider_host(provider, host):
+        return
+    if settings.options.get("allow_custom_host") is True:
+        return
+    raise CrupierConfigError(
+        f"Provider {provider!r} host {host!r} is not an official endpoint. "
+        "Set allow_custom_host = true to send credentials to a custom host."
+    )
+
+
+def _require_https_unless_loopback(host: str) -> None:
+    scheme = (urlparse(host).scheme or "").lower()
+    if host_is_loopback(host):
+        if scheme not in {"http", "https"}:
+            raise CrupierConfigError(f"Provider host {host!r} must use http or https.")
+        return
+    if scheme != "https":
+        raise CrupierConfigError(f"Provider host {host!r} must use HTTPS outside loopback.")
+
+
 def ollama_is_local(config: CrupierConfig) -> bool:
     settings = config.providers.get("ollama")
     if settings is None:
@@ -646,13 +747,7 @@ def ollama_is_local(config: CrupierConfig) -> bool:
     if settings.mode == "local":
         return True
     host = settings.host or os.environ.get("OLLAMA_HOST") or OLLAMA_CLOUD_HOST
-    hostname = (urlparse(host).hostname or "").lower()
-    if hostname == "localhost":
-        return True
-    try:
-        return ip_address(hostname).is_loopback
-    except ValueError:
-        return False
+    return host_is_loopback(host)
 
 
 def load_profile_files(config: CrupierConfig) -> None:

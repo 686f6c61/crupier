@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, NoReturn
 
-from crupier.config import ProviderSettings
+from crupier.config import ProviderSettings, validate_provider_endpoint
 from crupier.errors import (
     CrupierProviderAuthError,
     CrupierProviderRateLimitError,
@@ -198,6 +198,7 @@ class AnthropicAdapter:
         )
 
     def _build_client(self) -> Any:
+        validate_provider_endpoint(self.provider, self.settings)
         api_key = require_api_key(self.settings, "ANTHROPIC_API_KEY", provider=self.provider)
         try:
             from anthropic import Anthropic

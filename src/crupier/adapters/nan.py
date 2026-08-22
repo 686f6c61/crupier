@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from typing import Any, NoReturn
 
-from crupier.config import NAN_DEFAULT_HOST, ProviderSettings
+from crupier.config import NAN_DEFAULT_HOST, ProviderSettings, validate_provider_endpoint
 from crupier.errors import (
     CrupierModelUnsupportedError,
     CrupierProviderAuthError,
@@ -493,6 +493,7 @@ class NaNAdapter:
         )
 
     def _build_client(self) -> Any:
+        validate_provider_endpoint(self.provider, self.settings)
         api_key = require_api_key(self.settings, "NAN_API_KEY", provider=self.provider)
         try:
             from openai import OpenAI

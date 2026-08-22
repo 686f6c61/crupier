@@ -7,7 +7,7 @@ import urllib.error
 import urllib.request
 from typing import Any, NoReturn
 
-from crupier.config import OLLAMA_CLOUD_HOST, ProviderSettings
+from crupier.config import OLLAMA_CLOUD_HOST, ProviderSettings, validate_provider_endpoint
 from crupier.errors import (
     CrupierModelUnsupportedError,
     CrupierProviderAuthError,
@@ -43,6 +43,7 @@ class OllamaAdapter:
         return kind == "image"
 
     def generate(self, *, model: str, prompt: str, request: RequestEnvelope) -> AdapterResponse:
+        validate_provider_endpoint(self.provider, self.settings)
         url = self._chat_url()
         message: dict[str, Any] = {"role": "user", "content": prompt or build_prompt(request)}
         image_payloads = []
@@ -104,6 +105,7 @@ class OllamaAdapter:
         )
 
     def list_models(self) -> list[ProviderModel]:
+        validate_provider_endpoint(self.provider, self.settings)
         url = self._tags_url()
         headers = {}
         api_key = env_value(self.settings, "OLLAMA_API_KEY", provider=self.provider)
@@ -326,6 +328,7 @@ class OllamaAdapter:
             raise CrupierProviderUnavailableError(f"Ollama request failed: {exc.reason}") from exc
 
     def _headers(self) -> dict[str, str]:
+        validate_provider_endpoint(self.provider, self.settings)
         headers = {"Content-Type": "application/json"}
         api_key = env_value(self.settings, "OLLAMA_API_KEY", provider=self.provider)
         if self._requires_cloud_auth() and not api_key:

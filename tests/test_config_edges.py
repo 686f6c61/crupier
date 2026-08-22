@@ -228,3 +228,59 @@ def test_scoring_writer_handles_missing_file_appended_section_and_toml_values(tm
     assert "skill_fit_cap = 10" in text
     assert config_module._toml_value(None) == '""'
     assert config_module._toml_value(["one", 2]) == '["one", 2]'
+
+
+def test_custom_host_requires_explicit_opt_in_and_https() -> None:
+    remote_http = {
+        "providers": {
+            "openai": {
+                "enabled": True,
+                "host": "http://proxy.example/v1",
+                "env_key": "OPENAI_API_KEY",
+                "allow_custom_host": True,
+            }
+        }
+    }
+    with pytest.raises(CrupierConfigError, match="HTTPS"):
+        CrupierConfig.from_dict(remote_http)
+
+    remote_https_without_opt_in = {
+        "providers": {
+            "openai": {
+                "enabled": True,
+                "host": "https://proxy.example/v1",
+                "env_key": "OPENAI_API_KEY",
+            }
+        }
+    }
+    with pytest.raises(CrupierConfigError, match="allow_custom_host"):
+        CrupierConfig.from_dict(remote_https_without_opt_in)
+
+    remote_https = CrupierConfig.from_dict(
+        {
+            "providers": {
+                "openai": {
+                    "enabled": True,
+                    "host": "https://proxy.example/v1",
+                    "env_key": "OPENAI_API_KEY",
+                    "allow_custom_host": True,
+                }
+            }
+        }
+    )
+    assert remote_https.providers["openai"].host == "https://proxy.example/v1"
+    assert remote_https.providers["openai"].options.get("allow_custom_host") is True
+
+    loopback_http = CrupierConfig.from_dict(
+        {
+            "providers": {
+                "openai": {
+                    "enabled": True,
+                    "host": "http://127.0.0.1:8080/v1",
+                    "env_key": "OPENAI_API_KEY",
+                    "allow_custom_host": True,
+                }
+            }
+        }
+    )
+    assert loopback_http.providers["openai"].host == "http://127.0.0.1:8080/v1"

@@ -7,7 +7,7 @@ from dataclasses import replace
 from typing import Any, NoReturn
 from urllib.parse import urlparse
 
-from crupier.config import INFERENCE_DEFAULT_HOST, ProviderSettings
+from crupier.config import INFERENCE_DEFAULT_HOST, ProviderSettings, validate_provider_endpoint
 from crupier.errors import (
     CrupierProviderAuthError,
     CrupierProviderRateLimitError,
@@ -289,6 +289,7 @@ class OpenAICompatibleAdapter:
             payload["extra_body"] = extra_body
 
     def _build_client(self) -> Any:
+        validate_provider_endpoint(self.provider, self.settings)
         host = self.settings.host or INFERENCE_DEFAULT_HOST
         if self.settings.env_key:
             api_key = require_api_key(self.settings, self.settings.env_key, provider=self.provider)

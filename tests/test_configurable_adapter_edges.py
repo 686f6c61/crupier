@@ -415,7 +415,13 @@ def test_configurable_build_client_custom_host_and_missing_dependency(monkeypatc
 
     monkeypatch.setenv("NAN_API_KEY", "test-key")
     monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(OpenAI=OpenAI))
-    adapter = NaNAdapter(ProviderSettings(enabled=True, host="https://inference.example/v1"))
+    adapter = NaNAdapter(
+        ProviderSettings(
+            enabled=True,
+            host="https://inference.example/v1",
+            options={"allow_custom_host": True},
+        )
+    )
     adapter._build_client()
     assert calls["base_url"] == "https://inference.example/v1"
 

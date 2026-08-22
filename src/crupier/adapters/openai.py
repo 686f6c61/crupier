@@ -6,7 +6,7 @@ import json
 import re
 from typing import Any, NoReturn
 
-from crupier.config import ProviderSettings
+from crupier.config import ProviderSettings, validate_provider_endpoint
 from crupier.errors import (
     CrupierProviderAuthError,
     CrupierProviderRateLimitError,
@@ -282,6 +282,7 @@ class OpenAIAdapter:
         )
 
     def _build_client(self) -> Any:
+        validate_provider_endpoint(self.provider, self.settings)
         api_key = require_api_key(self.settings, "OPENAI_API_KEY", provider=self.provider)
         try:
             from openai import OpenAI
