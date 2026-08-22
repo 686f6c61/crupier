@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, date, datetime
 
 import pytest
@@ -186,7 +187,8 @@ def test_execute_tool_plan_records_success_failure_and_duplicates():
     assert [item.status for item in executions] == ["completed", "skipped_duplicate", "failed"]
     assert executions[0].result == {"value": 6}
     assert executions[1].result == {"value": 6}
-    assert executions[2].error == "provider record unavailable"
+    assert executions[2].error == "Tool execution failed."
+    assert executions[2].error_code == "tool_exception"
 
 
 def test_execute_tool_plan_skips_completed_execution_from_previous_round():
@@ -302,8 +304,52 @@ def test_execute_tool_plan_bounds_large_results_and_long_errors():
     assert large.result["truncated"] is True
     assert len(large.result["preview"]) == 256
     assert large.result["original_chars"] > 256
-    assert len(failed.error) == 4000
-    assert failed.error.endswith("...")
+    assert failed.error == "Tool execution failed."
+    assert failed.error_code == "tool_exception"
+    assert failed.error_detail is None
+
+
+def test_tool_exception_secret_is_not_in_final_or_replanning_prompt():
+    bearer = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signaturelong"
+    api_key = "sk-proj-toolsecretabcdefghijklmnopqrstuv"
+    path = "/Users/me/.env"
+
+    def fail():
+        raise RuntimeError(f"could not read {path} with {bearer} and {api_key}")
+
+    tools = [ToolSpec(name="lookup", handler=fail)]
+    executions = execute_tool_plan(
+        [ToolCallRequest(name="lookup")],
+        tools,
+        RequestEnvelope(task="Use the tool"),
+    )
+    request = RequestEnvelope(task="Use the tool")
+    final = build_tool_final_prompt(request, executions)
+    replanning = build_tool_replanning_prompt(request, tools, executions)
+
+    for blob in (final, replanning, json.dumps(executions[0].to_dict())):
+        assert bearer not in blob
+        assert api_key not in blob
+        assert path not in blob
+
+
+def test_tool_failure_keeps_safe_error_code_for_model_recovery():
+    def fail():
+        raise RuntimeError("Bearer secret-token-value /etc/passwd leaked")
+
+    execution = execute_tool_plan(
+        [ToolCallRequest(name="lookup")],
+        [ToolSpec(name="lookup", handler=fail)],
+        RequestEnvelope(task="x"),
+    )[0]
+
+    payload = execution.to_dict()
+    assert payload["name"] == "lookup"
+    assert payload["status"] == "failed"
+    assert payload["error_code"] == "tool_exception"
+    assert "Bearer" not in (payload.get("error") or "")
+    assert "/etc/passwd" not in (payload.get("error") or "")
+    assert "error_detail" not in payload
 
 
 def test_tool_execution_serializes_provider_objects_and_omits_none():

@@ -23,6 +23,10 @@ from .errors import (
     CrupierToolApprovalRequired,
 )
 from .models import RequestEnvelope
+from .redaction import redact_text
+
+SAFE_TOOL_ERROR = "Tool execution failed."
+SAFE_TOOL_ERROR_CODE = "tool_exception"
 
 
 @dataclass(slots=True)
@@ -58,9 +62,11 @@ class ToolExecution:
     status: str
     result: Any = None
     error: str | None = None
+    error_code: str | None = None
+    error_detail: str | None = None
     requires_approval: bool = False
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, *, include_error_detail: bool = False) -> dict[str, Any]:
         data = {
             "idempotency_key": self.idempotency_key,
             "name": self.name,
@@ -68,8 +74,11 @@ class ToolExecution:
             "status": self.status,
             "result": _jsonable(self.result),
             "error": self.error,
+            "error_code": self.error_code,
             "requires_approval": self.requires_approval,
         }
+        if include_error_detail and self.error_detail:
+            data["error_detail"] = self.error_detail
         return {key: value for key, value in data.items() if value is not None}
 
 
@@ -259,13 +268,16 @@ def execute_tool_plan(
                 result=result,
                 requires_approval=requires_approval,
             )
-        except Exception as exc:  # noqa: BLE001 - tool exceptions become ledger entries
+        except Exception as exc:  # noqa: BLE001 - las excepciones no deben cruzar al proveedor
+            include_detail = request.constraints.get("include_tool_error_detail") is True
             execution = ToolExecution(
                 idempotency_key=key,
                 name=call.name,
                 arguments=call.arguments,
                 status="failed",
-                error=_truncate(str(exc), 4000),
+                error=SAFE_TOOL_ERROR,
+                error_code=SAFE_TOOL_ERROR_CODE,
+                error_detail=redact_text(_truncate(str(exc), 4000)) if include_detail else None,
                 requires_approval=requires_approval,
             )
         executions.append(execution)
