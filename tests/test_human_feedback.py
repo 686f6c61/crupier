@@ -127,6 +127,46 @@ def test_sensitive_append_is_atomic_and_preserves_private_mode(tmp_path):
     assert stat.S_IMODE(client.feedback.path.stat().st_mode) == 0o600
 
 
+def test_feedback_summary_refuses_to_apply_when_jsonl_is_corrupt(tmp_path):
+    client = make_feedback_client(tmp_path)
+    client.feedback.record(
+        project=client.config.project.name,
+        models=["openai:good-model"],
+        rating=5,
+        verdict="accept",
+    )
+    with client.feedback.path.open("a", encoding="utf-8") as handle:
+        handle.write("{truncated\n")
+    original = client.registry.get("openai:good-model").to_dict()
+
+    summary = client.feedback.summary()
+    with pytest.raises(CrupierError, match="corrupt"):
+        client.feedback.apply_to_registry(client.registry)
+
+    assert summary["count"] == 1
+    assert summary["complete"] is False
+    assert client.registry.get("openai:good-model").to_dict() == original
+
+
+def test_feedback_diagnostic_includes_line_without_echoing_content(tmp_path):
+    client = make_feedback_client(tmp_path)
+    secret = "private-feedback-content-must-not-leak"
+    client.feedback.record(
+        project=client.config.project.name,
+        models=["openai:good-model"],
+        rating=4,
+    )
+    with client.feedback.path.open("a", encoding="utf-8") as handle:
+        handle.write(secret + "\n")
+
+    summary = client.feedback.summary()
+    serialized = json.dumps(summary["diagnostics"])
+
+    assert summary["diagnostics"][0]["line"] == 2
+    assert summary["diagnostics"][0]["error_type"] == "invalid_json"
+    assert secret not in serialized
+
+
 def test_cli_feedback_record_summary_and_apply(tmp_path, capsys):
     write_default_project(tmp_path)
 

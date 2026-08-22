@@ -19,7 +19,7 @@ from uuid import uuid4
 from .errors import CrupierError
 from .models import ModelRef
 from .redaction import redact_text
-from .state import ensure_private_directory, private_append_text, private_write_text
+from .state import ArtifactDiagnostic, ensure_private_directory, private_append_text, private_write_text
 
 VERDICTS = {"accept", "reject", "needs_work", "unknown"}
 
@@ -58,6 +58,16 @@ class HumanFeedbackRecord:
 
     def to_dict(self) -> dict[str, Any]:
         return {key: value for key, value in asdict(self).items() if value not in (None, "", [])}
+
+
+class HumanFeedbackListResult(list[HumanFeedbackRecord]):
+    def __init__(self, records: list[HumanFeedbackRecord], diagnostics: list[ArtifactDiagnostic]):
+        super().__init__(records)
+        self.diagnostics = diagnostics
+
+    @property
+    def complete(self) -> bool:
+        return not self.diagnostics
 
 
 @dataclass(slots=True)
@@ -178,24 +188,66 @@ class HumanFeedbackStore:
         )
         return record
 
-    def list(self) -> list[HumanFeedbackRecord]:
+    def list(self) -> HumanFeedbackListResult:
         if not self.path.exists():
-            return []
+            return HumanFeedbackListResult([], [])
         records: list[HumanFeedbackRecord] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
+        diagnostics: list[ArtifactDiagnostic] = []
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return HumanFeedbackListResult(
+                [],
+                [ArtifactDiagnostic(self.path, "io_error", "Feedback artifact could not be read.")],
+            )
+        except UnicodeDecodeError:
+            return HumanFeedbackListResult(
+                [],
+                [ArtifactDiagnostic(self.path, "invalid_encoding", "Feedback artifact is not valid UTF-8.")],
+            )
+        for line_number, line in enumerate(lines, start=1):
             if not line.strip():
                 continue
             try:
                 data = json.loads(line)
-                records.append(HumanFeedbackRecord.from_dict(data))
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            except json.JSONDecodeError:
+                diagnostics.append(
+                    ArtifactDiagnostic(
+                        self.path,
+                        "invalid_json",
+                        "Feedback record is not valid JSON.",
+                        line=line_number,
+                    )
+                )
                 continue
-        return records
+            if not isinstance(data, dict):
+                diagnostics.append(
+                    ArtifactDiagnostic(
+                        self.path,
+                        "invalid_schema",
+                        "Feedback record must contain a JSON object.",
+                        line=line_number,
+                    )
+                )
+                continue
+            try:
+                records.append(HumanFeedbackRecord.from_dict(data))
+            except (KeyError, TypeError, ValueError):
+                diagnostics.append(
+                    ArtifactDiagnostic(
+                        self.path,
+                        "invalid_schema",
+                        "Feedback record has an invalid schema.",
+                        line=line_number,
+                    )
+                )
+        return HumanFeedbackListResult(records, diagnostics)
 
     def summary(self, *, model: str | None = None, mode: str | None = None) -> dict[str, Any]:
         model_key = ModelRef.parse(model).key if model else None
         groups: dict[tuple[str, str], dict[str, Any]] = {}
-        for record in self.list():
+        records = self.list()
+        for record in records:
             if mode and record.mode != mode:
                 continue
             for item in record.models:
@@ -243,6 +295,8 @@ class HumanFeedbackStore:
         items.sort(key=lambda item: (item["model"], item["mode"]))
         dry_run_source_count = sum(int(item["dry_run_source_count"]) for item in items)
         return {
+            "complete": records.complete,
+            "diagnostics": [diagnostic.to_dict() for diagnostic in records.diagnostics],
             "count": sum(item["count"] for item in items),
             "dry_run_source_count": dry_run_source_count,
             "production_feedback_count": sum(item["count"] for item in items) - dry_run_source_count,
@@ -251,6 +305,8 @@ class HumanFeedbackStore:
 
     def apply_to_registry(self, registry: Any, *, min_count: int = 1, dry_run: bool = False) -> dict[str, Any]:
         summary = self.summary()
+        if not summary["complete"]:
+            raise CrupierError("Cannot apply feedback scores while corrupt feedback records remain unacknowledged.")
         updated: list[dict[str, Any]] = []
         skipped: list[dict[str, str]] = []
         written_files: list[str] = []

@@ -64,6 +64,26 @@ def test_sensitive_artifacts_are_private_under_permissive_umask(tmp_path):
     assert all(stat.S_IMODE(path.stat().st_mode) == 0o700 for path in directories)
 
 
+def test_trace_list_reports_corrupt_trace_path(tmp_path):
+    client = Crupier(make_config(tmp_path))
+    valid = client.deal(
+        "Keep valid trace",
+        constraints={"store_trace": True},
+        dry_run=True,
+        trace="summary",
+    )
+    corrupt_path = client.config.traces_dir / "truncated.json"
+    corrupt_path.write_text('{"trace_id":', encoding="utf-8")
+
+    result = client.traces.list()
+
+    assert valid.trace is not None
+    assert [item.trace_id for item in result] == [valid.trace.trace_id]
+    assert result.complete is False
+    assert result.diagnostics[0].path == corrupt_path
+    assert result.diagnostics[0].error_type == "invalid_json"
+
+
 def test_trace_store_metadata_does_not_store_prompt_response_or_secret(tmp_path):
     client = Crupier(make_config(tmp_path))
     fake_secret = "s" + "k-test-secret-value"

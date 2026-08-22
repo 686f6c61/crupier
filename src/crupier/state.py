@@ -22,6 +22,24 @@ from .errors import CrupierError
 _PRIVATE_IO_LOCK = RLock()
 
 
+@dataclass(frozen=True, slots=True)
+class ArtifactDiagnostic:
+    path: Path
+    error_type: str
+    message: str
+    line: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "path": str(self.path),
+            "error_type": self.error_type,
+            "message": self.message,
+        }
+        if self.line is not None:
+            payload["line"] = self.line
+        return payload
+
+
 def ensure_private_directory(path: str | Path) -> Path:
     """Create a private artifact directory without following a symlink at its leaf."""
 

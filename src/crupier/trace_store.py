@@ -17,7 +17,7 @@ from typing import Any
 from .errors import CrupierError
 from .models import CrupierResult, OperationResult, RequestEnvelope
 from .redaction import redact_text, redact_value
-from .state import private_write_text
+from .state import ArtifactDiagnostic, private_write_text
 
 
 @dataclass(slots=True)
@@ -40,6 +40,16 @@ class StoredTraceRef:
             "replayable": self.replayable,
             "summary": self.summary,
         }
+
+
+class TraceListResult(list[StoredTraceRef]):
+    def __init__(self, refs: list[StoredTraceRef], diagnostics: list[ArtifactDiagnostic]):
+        super().__init__(refs)
+        self.diagnostics = diagnostics
+
+    @property
+    def complete(self) -> bool:
+        return not self.diagnostics
 
 
 class TraceStore:
@@ -69,28 +79,66 @@ class TraceStore:
         private_write_text(path, json.dumps(record, indent=2, sort_keys=True) + "\n")
         return path
 
-    def list(self) -> list[StoredTraceRef]:
+    def list(self) -> TraceListResult:
         refs: list[StoredTraceRef] = []
+        diagnostics: list[ArtifactDiagnostic] = []
         if not self.root.exists():
-            return refs
+            return TraceListResult(refs, diagnostics)
         for path in sorted(self.root.glob("*.json"), reverse=True):
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            route = data.get("result", {}).get("route") or {}
-            refs.append(
-                StoredTraceRef(
-                    trace_id=str(data.get("trace_id") or path.stem),
-                    path=path,
-                    created_at=data.get("created_at"),
-                    strategy=route.get("strategy"),
-                    models=_route_models(route),
-                    replayable=bool(data.get("replayable", False)),
-                    summary=str(data.get("request", {}).get("summary", "")),
+                raw = path.read_text(encoding="utf-8")
+            except OSError:
+                diagnostics.append(
+                    ArtifactDiagnostic(path, "io_error", "Trace artifact could not be read.")
                 )
-            )
-        return refs
+                continue
+            except UnicodeDecodeError:
+                diagnostics.append(
+                    ArtifactDiagnostic(path, "invalid_encoding", "Trace artifact is not valid UTF-8.")
+                )
+                continue
+            try:
+                data = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                diagnostics.append(
+                    ArtifactDiagnostic(path, "invalid_json", "Trace artifact is not valid JSON.", line=exc.lineno)
+                )
+                continue
+            if not isinstance(data, dict):
+                diagnostics.append(
+                    ArtifactDiagnostic(path, "invalid_schema", "Trace artifact must contain a JSON object.")
+                )
+                continue
+            result = data.get("result", {})
+            request = data.get("request", {})
+            if not isinstance(result, dict) or not isinstance(request, dict):
+                diagnostics.append(
+                    ArtifactDiagnostic(path, "invalid_schema", "Trace artifact has an invalid schema.")
+                )
+                continue
+            route = result.get("route") or {}
+            if not isinstance(route, dict):
+                diagnostics.append(
+                    ArtifactDiagnostic(path, "invalid_schema", "Trace artifact has an invalid route schema.")
+                )
+                continue
+            try:
+                refs.append(
+                    StoredTraceRef(
+                        trace_id=str(data.get("trace_id") or path.stem),
+                        path=path,
+                        created_at=data.get("created_at"),
+                        strategy=route.get("strategy"),
+                        models=_route_models(route),
+                        replayable=bool(data.get("replayable", False)),
+                        summary=str(request.get("summary", "")),
+                    )
+                )
+            except (AttributeError, TypeError, ValueError):
+                diagnostics.append(
+                    ArtifactDiagnostic(path, "invalid_schema", "Trace artifact has an invalid schema.")
+                )
+        return TraceListResult(refs, diagnostics)
 
     def read(self, trace_id: str) -> dict[str, Any]:
         path = self._path(trace_id)

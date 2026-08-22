@@ -1730,10 +1730,13 @@ def cmd_feedback_summary(args: argparse.Namespace) -> int:
     summary = client.feedback.summary(model=args.model, mode=args.mode)
     if args.json:
         print(json.dumps(summary, indent=2, sort_keys=True))
-        return 0
+        return 0 if summary.get("complete", True) else 1
+    for diagnostic in summary.get("diagnostics", []):
+        line = f":{diagnostic['line']}" if diagnostic.get("line") is not None else ""
+        print(f"corrupt feedback: {diagnostic['path']}{line} ({diagnostic['error_type']})", file=sys.stderr)
     if not summary["groups"]:
         print("No human feedback found.")
-        return 0
+        return 0 if summary.get("complete", True) else 1
     print(f"feedback: records={summary['count']} groups={len(summary['groups'])}")
     for item in summary["groups"]:
         print(
@@ -1743,7 +1746,7 @@ def cmd_feedback_summary(args: argparse.Namespace) -> int:
         tags = ", ".join(f"{tag['tag']}:{tag['count']}" for tag in item.get("top_tags", []))
         if tags:
             print(f"  tags: {tags}")
-    return 0
+    return 0 if summary.get("complete", True) else 1
 
 
 def cmd_feedback_apply(args: argparse.Namespace) -> int:
@@ -2674,17 +2677,25 @@ def cmd_route(args: argparse.Namespace) -> int:
 def cmd_trace_list(args: argparse.Namespace) -> int:
     client = Crupier.from_project(args.project)
     refs = client.traces.list()
+    diagnostics = getattr(refs, "diagnostics", [])
+    complete = bool(getattr(refs, "complete", True))
     if args.json:
         print(json.dumps([ref.to_dict() for ref in refs], indent=2, sort_keys=True))
-        return 0
+        for diagnostic in diagnostics:
+            line = f":{diagnostic.line}" if diagnostic.line is not None else ""
+            print(f"corrupt trace: {diagnostic.path}{line} ({diagnostic.error_type})", file=sys.stderr)
+        return 0 if complete else 1
     if not refs:
         print("No stored traces found.")
-        return 0
+        return 0 if complete else 1
     for ref in refs:
         models = ",".join(ref.models or [])
         replayable = "replayable" if ref.replayable else "metadata-only"
         print(f"{ref.trace_id}\t{ref.created_at}\t{ref.strategy}\t{models}\t{replayable}\t{ref.summary}")
-    return 0
+    for diagnostic in diagnostics:
+        line = f":{diagnostic.line}" if diagnostic.line is not None else ""
+        print(f"corrupt trace: {diagnostic.path}{line} ({diagnostic.error_type})", file=sys.stderr)
+    return 0 if complete else 1
 
 
 def cmd_trace_show(args: argparse.Namespace) -> int:
