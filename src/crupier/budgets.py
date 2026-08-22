@@ -37,10 +37,12 @@ class ExecutionBudget:
             default=config.routing.max_calls,
         )
         self.max_cost_usd = _optional_non_negative_float(
-            request.constraints.get("max_cost_usd", config.routing.max_cost_per_request_usd)
+            request.constraints.get("max_cost_usd", config.routing.max_cost_per_request_usd),
+            default=config.routing.max_cost_per_request_usd,
         )
         self.max_latency_ms = _optional_non_negative_float(
-            request.constraints.get("max_latency_ms", config.routing.max_latency_ms)
+            request.constraints.get("max_latency_ms", config.routing.max_latency_ms),
+            default=config.routing.max_latency_ms,
         )
         self.calls_started = 0
         self.estimated_cost_reserved_usd = 0.0
@@ -154,10 +156,10 @@ def _positive_int(value: object, *, default: int) -> int:
     return max(1, _non_negative_int(value, default=default))
 
 
-def _optional_non_negative_float(value: object) -> float | None:
+def _optional_non_negative_float(value: object, *, default: float | None = None) -> float | None:
     if value is None:
         return None
     try:
         return max(0.0, float(value))  # type: ignore[arg-type]
     except (TypeError, ValueError):
-        return None
+        return None if default is None else max(0.0, float(default))

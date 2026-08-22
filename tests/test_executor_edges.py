@@ -99,6 +99,49 @@ def test_execution_budget_reserve_call_raises_when_accumulated_cost_exceeds_max(
         budget.reserve_call(estimated_usd=0.03)
 
 
+def test_execution_budget_ensure_deadline_raises_after_deadline(tmp_path):
+    config = _config(tmp_path)
+    budget = ExecutionBudget(
+        config,
+        RequestEnvelope(task="x", constraints={"max_latency_ms": 1000}),
+        [],
+        started_at=perf_counter() - 10,
+    )
+
+    with pytest.raises(CrupierExecutionLimitError, match="exceeded max_latency_ms"):
+        budget.ensure_deadline()
+
+
+def test_execution_budget_remaining_helpers_without_limits(tmp_path):
+    config = _config(tmp_path)
+    request = RequestEnvelope(
+        task="x",
+        constraints={"max_calls": 7, "max_cost_usd": None, "max_latency_ms": None},
+    )
+    budget = ExecutionBudget(config, request, [])
+
+    assert budget.remaining_cost_usd() is None
+    assert budget.remaining_latency_ms() is None
+    assert budget.remaining_calls() == 7
+
+
+def test_execution_budget_coerces_invalid_constraint_values(tmp_path):
+    config = _config(tmp_path)
+    config.routing.max_calls = 9
+    config.routing.max_cost_per_request_usd = 1.5
+    config.routing.max_latency_ms = 2500
+    request = RequestEnvelope(
+        task="x",
+        constraints={"max_calls": "x", "max_cost_usd": "no-num", "max_latency_ms": [1]},
+    )
+
+    budget = ExecutionBudget(config, request, [])
+
+    assert budget.max_calls == config.routing.max_calls
+    assert budget.max_cost_usd == config.routing.max_cost_per_request_usd
+    assert budget.max_latency_ms == config.routing.max_latency_ms
+
+
 def test_route_second_call_blocked_by_accumulated_budget(tmp_path):
     config = _config(tmp_path, allow=["openai:a", "openai:b"])
     adapter = ScriptedAdapter(errors=[CrupierProviderUnavailableError("first model failed")])
