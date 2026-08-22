@@ -36,6 +36,13 @@ from .config import (
 from .default_cards import BUILTIN_CAPABILITY_CARDS
 
 _FINAL_PUBLIC_VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+_FULL_GITHUB_ACTION_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PINNED_GITHUB_ACTIONS = {
+    "actions/checkout": "3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "actions/setup-python": "5fda3b95a4ea91299a34e894583c3862153e4b97",
+    "actions/upload-artifact": "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "pypa/gh-action-pypi-publish": "dc37677b2e1c63e2034f94d8a5b11f265b73ba33",
+}
 _NON_FINAL_RELEASE_PATTERNS = [
     re.compile(r"\b\d+\.\d+\.\d+(?:a|b|alpha|beta|rc)\d*\b", re.IGNORECASE),
     re.compile(r"\b(?:alpha|beta|pre-release|prerelease|release candidate)\b", re.IGNORECASE),
@@ -1155,8 +1162,8 @@ def _ci_check(root: Path) -> ReleaseCheck:
     required_markers = [
         "permissions:",
         "contents: read",
-        "actions/checkout@v7",
-        "actions/setup-python@v7",
+        f"actions/checkout@{_PINNED_GITHUB_ACTIONS['actions/checkout']}",
+        f"actions/setup-python@{_PINNED_GITHUB_ACTIONS['actions/setup-python']}",
         "python -m pytest",
         "--cov-fail-under=95",
         "python -m ruff check src tests",
@@ -1165,6 +1172,7 @@ def _ci_check(root: Path) -> ReleaseCheck:
         "crupier release check",
     ]
     missing_markers = [marker for marker in required_markers if marker not in ci_text]
+    missing_markers.extend(_workflow_action_pin_issues(ci_text, {"actions/checkout", "actions/setup-python"}))
     ok = bool(workflows) and not missing_markers
     return ReleaseCheck(
         id="ci",
@@ -1215,9 +1223,9 @@ def _publish_workflow_check(root: Path) -> ReleaseCheck:
         "      id-token: write",
         "workflow_dispatch:",
         "confirm_publish",
-        "actions/checkout@v7",
+        f"actions/checkout@{_PINNED_GITHUB_ACTIONS['actions/checkout']}",
         "fetch-depth: 0",
-        "actions/setup-python@v7",
+        f"actions/setup-python@{_PINNED_GITHUB_ACTIONS['actions/setup-python']}",
         "Verify publish event matches package version",
         "GITHUB_EVENT_NAME",
         "GITHUB_REF_NAME",
@@ -1241,11 +1249,12 @@ def _publish_workflow_check(root: Path) -> ReleaseCheck:
         "python -m mypy src/crupier",
         "python -m pip_audit --skip-editable --progress-spinner off",
         "python -m build --sdist --wheel --outdir dist",
-        "actions/upload-artifact@v7",
+        f"actions/upload-artifact@{_PINNED_GITHUB_ACTIONS['actions/upload-artifact']}",
         "if-no-files-found: error",
-        "pypa/gh-action-pypi-publish",
+        f"pypa/gh-action-pypi-publish@{_PINNED_GITHUB_ACTIONS['pypa/gh-action-pypi-publish']}",
     ]
     missing_markers = [marker for marker in required_markers if marker not in text]
+    missing_markers.extend(_workflow_action_pin_issues(text, set(_PINNED_GITHUB_ACTIONS)))
     ok = path.exists() and not missing_markers
     return ReleaseCheck(
         id="publish_workflow",
@@ -1261,6 +1270,23 @@ def _publish_workflow_check(root: Path) -> ReleaseCheck:
         if not ok
         else [],
     )
+
+
+def _workflow_action_pin_issues(text: str, allowed_actions: set[str]) -> list[str]:
+    issues: list[str] = []
+    action_lines = re.findall(r"^\s*-?\s*uses:\s*([^\s#]+)", text, flags=re.MULTILINE)
+    for reference in action_lines:
+        action, separator, revision = reference.partition("@")
+        if action not in allowed_actions:
+            issues.append(f"unexpected action: {action}")
+            continue
+        if not separator or not _FULL_GITHUB_ACTION_SHA_RE.fullmatch(revision):
+            issues.append(f"action is not pinned to a full SHA: {reference}")
+            continue
+        expected_revision = _PINNED_GITHUB_ACTIONS[action]
+        if revision != expected_revision:
+            issues.append(f"action is not pinned to the reviewed SHA: {reference}")
+    return issues
 
 
 def _script_check(project: dict[str, Any]) -> ReleaseCheck:

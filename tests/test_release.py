@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 import sys
 import tarfile
@@ -7,6 +8,8 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import HTTPError
+
+import yaml
 
 from crupier.cli import main
 from crupier.release import (
@@ -27,6 +30,26 @@ from crupier.release import (
     check_pypi_project_name,
     run_release_checks,
 )
+
+
+PINNED_ACTIONS = {
+    "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+    "actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97",
+    "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+    "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33",
+}
+
+
+def _collect_action_uses(value):
+    if isinstance(value, dict):
+        return [
+            item
+            for key, child in value.items()
+            for item in ([child] if key == "uses" else _collect_action_uses(child))
+        ]
+    if isinstance(value, list):
+        return [item for child in value for item in _collect_action_uses(child)]
+    return []
 
 
 def write_release_project(root):
@@ -173,8 +196,8 @@ def write_release_project(root):
         "jobs:\n"
         "  test:\n"
         "    steps:\n"
-        "      - uses: actions/checkout@v7\n"
-        "      - uses: actions/setup-python@v7\n"
+        "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\n"
+        "      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7\n"
         "      - run: python -m pytest --cov=crupier --cov-fail-under=95\n"
         "      - run: python -m ruff check src tests\n"
         "      - run: python -m mypy src/crupier\n"
@@ -201,10 +224,10 @@ def write_release_project(root):
         "      contents: read\n"
         "      id-token: write\n"
         "    steps:\n"
-        "      - uses: actions/checkout@v7\n"
+        "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7\n"
         "        with:\n"
         "          fetch-depth: 0\n"
-        "      - uses: actions/setup-python@v7\n"
+        "      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7\n"
         "      - name: Verify publish event matches package version\n"
         "        run: echo GITHUB_EVENT_NAME GITHUB_REF_NAME REQUESTED_VERSION CONFIRM_PUBLISH 'git\", \"fetch\", \"--quiet\", \"origin\", \"main:refs/remotes/origin/main\", \"--tags' 'git\", \"rev-parse\", \"origin/main' 'Publish commit does not match origin/main.'\n"
         "        env:\n"
@@ -224,10 +247,10 @@ def write_release_project(root):
         "      - run: python -m mypy src/crupier\n"
         "      - run: python -m pip_audit --skip-editable --progress-spinner off\n"
         "      - run: python -m build --sdist --wheel --outdir dist\n"
-        "      - uses: actions/upload-artifact@v7\n"
+        "      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\n"
         "        with:\n"
         "          if-no-files-found: error\n"
-        "      - uses: pypa/gh-action-pypi-publish@release/v1\n",
+        "      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1\n",
         encoding="utf-8",
     )
     (root / "pyproject.toml").write_text(
@@ -538,6 +561,26 @@ def test_release_check_fails_when_public_github_yaml_is_invalid(tmp_path):
     assert checks["public_yaml"].evidence["failures"][0]["path"] == ".github/workflows/ci.yml"
 
 
+def test_ci_and_publish_actions_are_pinned_to_full_sha():
+    root = Path(__file__).parents[1]
+    references = []
+    for name in ("ci.yml", "publish.yml"):
+        workflow = yaml.safe_load((root / ".github" / "workflows" / name).read_text(encoding="utf-8"))
+        references.extend(_collect_action_uses(workflow))
+
+    assert references
+    assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", reference) for reference in references)
+
+
+def test_publish_oidc_job_contains_only_allowlisted_pinned_actions():
+    root = Path(__file__).parents[1]
+    workflow = yaml.safe_load((root / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8"))
+    oidc_jobs = [job for job in workflow["jobs"].values() if job.get("permissions", {}).get("id-token") == "write"]
+
+    assert len(oidc_jobs) == 1
+    assert set(_collect_action_uses(oidc_jobs[0])) == PINNED_ACTIONS
+
+
 def test_release_check_fails_without_strict_publish_workflow(tmp_path):
     write_release_project(tmp_path)
     (tmp_path / ".github" / "workflows" / "publish.yml").write_text(
@@ -560,7 +603,9 @@ def test_release_check_fails_without_strict_publish_workflow(tmp_path):
         "crupier release check --strict-public --verify-project-urls --check-pypi-name"
         in checks["publish_workflow"].evidence["missing_markers"]
     )
-    assert "actions/checkout@v7" in checks["publish_workflow"].evidence["missing_markers"]
+    assert next(pin for pin in PINNED_ACTIONS if pin.startswith("actions/checkout@")) in checks[
+        "publish_workflow"
+    ].evidence["missing_markers"]
     assert "concurrency:" in checks["publish_workflow"].evidence["missing_markers"]
     assert "pypi-publish-${{ github.ref }}" in checks["publish_workflow"].evidence["missing_markers"]
     assert "cancel-in-progress: false" in checks["publish_workflow"].evidence["missing_markers"]
@@ -570,8 +615,12 @@ def test_release_check_fails_without_strict_publish_workflow(tmp_path):
     assert "      contents: read" in checks["publish_workflow"].evidence["missing_markers"]
     assert "      id-token: write" in checks["publish_workflow"].evidence["missing_markers"]
     assert "fetch-depth: 0" in checks["publish_workflow"].evidence["missing_markers"]
-    assert "actions/setup-python@v7" in checks["publish_workflow"].evidence["missing_markers"]
-    assert "actions/upload-artifact@v7" in checks["publish_workflow"].evidence["missing_markers"]
+    assert next(pin for pin in PINNED_ACTIONS if pin.startswith("actions/setup-python@")) in checks[
+        "publish_workflow"
+    ].evidence["missing_markers"]
+    assert next(pin for pin in PINNED_ACTIONS if pin.startswith("actions/upload-artifact@")) in checks[
+        "publish_workflow"
+    ].evidence["missing_markers"]
     assert "if-no-files-found: error" in checks["publish_workflow"].evidence["missing_markers"]
     assert "Verify publish event matches package version" in checks["publish_workflow"].evidence["missing_markers"]
     assert "GITHUB_EVENT_NAME" in checks["publish_workflow"].evidence["missing_markers"]
@@ -726,8 +775,12 @@ def test_release_check_requires_absent_dependabot_and_warns_on_minimal_ci_permis
     assert checks["dependency_updates"].status == "pass"
     assert checks["ci"].status == "warn"
     assert "contents: read" in checks["ci"].evidence["missing_markers"]
-    assert "actions/checkout@v7" in checks["ci"].evidence["missing_markers"]
-    assert "actions/setup-python@v7" in checks["ci"].evidence["missing_markers"]
+    assert next(pin for pin in PINNED_ACTIONS if pin.startswith("actions/checkout@")) in checks["ci"].evidence[
+        "missing_markers"
+    ]
+    assert next(pin for pin in PINNED_ACTIONS if pin.startswith("actions/setup-python@")) in checks["ci"].evidence[
+        "missing_markers"
+    ]
     assert "python -m ruff check src tests" in checks["ci"].evidence["missing_markers"]
     assert "python -m mypy src/crupier" in checks["ci"].evidence["missing_markers"]
     assert "--cov-fail-under=95" in checks["ci"].evidence["missing_markers"]
