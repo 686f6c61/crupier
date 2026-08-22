@@ -1367,7 +1367,9 @@ def _publish_workflow_semantic_issues(document: dict[str, Any] | None) -> list[s
         issues.append("cancel-in-progress: false")
 
     jobs = document.get("jobs")
-    publish_job = jobs.get("publish") if isinstance(jobs, dict) else None
+    if not isinstance(jobs, dict):
+        return [*issues, "jobs.publish"]
+    publish_job = jobs.get("publish")
     if not isinstance(publish_job, dict):
         return [*issues, "jobs.publish"]
     oidc_jobs = [
@@ -1412,7 +1414,8 @@ def _publish_workflow_semantic_issues(document: dict[str, Any] | None) -> list[s
     verify_index = _find_enabled_step(steps, name="Verify publish event matches package version")
     verify_step = steps[verify_index] if verify_index is not None else {}
     verify_text = str(verify_step.get("run", ""))
-    verify_env = verify_step.get("env") if isinstance(verify_step.get("env"), dict) else {}
+    verify_env_value = verify_step.get("env")
+    verify_env = verify_env_value if isinstance(verify_env_value, dict) else {}
     verification_markers = [
         "GITHUB_EVENT_NAME",
         "GITHUB_REF_NAME",
@@ -1436,7 +1439,8 @@ def _publish_workflow_semantic_issues(document: dict[str, Any] | None) -> list[s
     )
     release_step = steps[release_index] if release_index is not None else {}
     release_run = str(release_step.get("run", ""))
-    release_env = release_step.get("env") if isinstance(release_step.get("env"), dict) else {}
+    release_env_value = release_step.get("env")
+    release_env = release_env_value if isinstance(release_env_value, dict) else {}
     if "FIRST_PUBLIC_RELEASE_VERSION" not in release_env:
         issues.append("FIRST_PUBLIC_RELEASE_VERSION")
     if "--allow-existing-pypi-project" not in release_run:
@@ -1444,12 +1448,14 @@ def _publish_workflow_semantic_issues(document: dict[str, Any] | None) -> list[s
 
     checkout_index = _find_enabled_step(steps, uses=checkout)
     checkout_step = steps[checkout_index] if checkout_index is not None else {}
-    checkout_with = checkout_step.get("with") if isinstance(checkout_step.get("with"), dict) else {}
+    checkout_with_value = checkout_step.get("with")
+    checkout_with = checkout_with_value if isinstance(checkout_with_value, dict) else {}
     if checkout_with.get("fetch-depth") != 0:
         issues.append("fetch-depth: 0")
     upload_index = _find_enabled_step(steps, uses=upload)
     upload_step = steps[upload_index] if upload_index is not None else {}
-    upload_with = upload_step.get("with") if isinstance(upload_step.get("with"), dict) else {}
+    upload_with_value = upload_step.get("with")
+    upload_with = upload_with_value if isinstance(upload_with_value, dict) else {}
     if upload_with.get("if-no-files-found") != "error":
         issues.append("if-no-files-found: error")
     return issues

@@ -166,11 +166,11 @@ def build_openai_compatible_server(
         request_body_limit = max(1, int(max_request_bytes))
         bind_host = host
         expected_bearer_token = bearer_token
-        request_authenticator = authenticator
+        request_authenticator = staticmethod(authenticator) if authenticator is not None else None
         require_authentication = allow_remote or dry_run is not True
         has_authentication = authentication_configured
         access_log_enabled = access_log
-        access_log_writer = access_log_sink
+        access_log_writer = staticmethod(access_log_sink) if access_log_sink is not None else None
         expose_policy_internals = expose_policy_metadata
 
     return ThreadingHTTPServer((host, port), Handler)
@@ -229,6 +229,7 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
     access_log_enabled: bool = True
     access_log_writer: Callable[[str], None] | None = None
     expose_policy_internals: bool = False
+    _crupier_response_size: int | None = None
 
     def do_OPTIONS(self) -> None:
         if not self._validate_request_context(authenticate=False):
