@@ -5,6 +5,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from _synthetic_secrets import (
+    SYNTHETIC_ANTHROPIC_API_KEY,
+    SYNTHETIC_BEARER_TOKEN,
+    SYNTHETIC_GOOGLE_API_KEY,
+    SYNTHETIC_OPENAI_API_KEY,
+)
 
 from crupier import Crupier
 from crupier.cli import main
@@ -259,7 +265,7 @@ def test_metadata_trace_keeps_non_content_metrics(tmp_path):
 
 def test_metadata_trace_redacts_provider_metadata_and_warnings(tmp_path):
     client = Crupier(make_config(tmp_path))
-    secret = "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"
+    secret = SYNTHETIC_GOOGLE_API_KEY
     request = RequestEnvelope(
         task="Expediente de Marta Pérez",
         constraints={"store_trace": True, "store_prompt": False},
@@ -327,7 +333,7 @@ def test_metadata_trace_omits_orchestrator_error_text_when_store_response_is_fal
 
 
 def test_orchestrator_call_record_redacts_provider_exception() -> None:
-    secret = "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"
+    secret = SYNTHETIC_GOOGLE_API_KEY
     context = PlanningContext(
         request=RequestEnvelope(task="planificar"),
         candidates=[],
@@ -442,14 +448,14 @@ def test_cli_trace_commands(tmp_path, capsys):
 
 
 PROVIDER_SECRETS = [
-    ("openai", "sk-proj-abcdefghijklmnopqrstuvwxyz012345"),
-    ("anthropic", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345"),
-    ("google", "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"),
+    ("openai", SYNTHETIC_OPENAI_API_KEY),
+    ("anthropic", SYNTHETIC_ANTHROPIC_API_KEY),
+    ("google", SYNTHETIC_GOOGLE_API_KEY),
     ("ollama", "ollama_live_abcdefghijklmnopqrstuvwxyz012345"),
     ("openrouter", "sk-or-v1-" + "ab" * 32),
     ("nan", "nan_live_abcdefghijklmnopqrstuvwxyz012345"),
     ("aws", "AKIAIOSFODNN7EXAMPLE"),
-    ("bearer", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signaturelong"),
+    ("bearer", SYNTHETIC_BEARER_TOKEN),
 ]
 
 
@@ -461,7 +467,7 @@ def test_central_redactor_covers_supported_provider_key_formats(provider: str, s
 
 
 def test_project_audit_report_uses_central_redactor() -> None:
-    secret = "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"
+    secret = SYNTHETIC_GOOGLE_API_KEY
     report_error = _canary_error(
         "provider.generate",
         "generate",
@@ -511,13 +517,11 @@ class _SecretFailAdapter:
 
     def generate(self, *, model, prompt, request):
         del model, prompt, request
-        raise CrupierProviderUnavailableError(
-            "upstream rejected AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"
-        )
+        raise CrupierProviderUnavailableError(f"upstream rejected {SYNTHETIC_GOOGLE_API_KEY}")
 
 
 def test_trace_feedback_eval_and_experiment_use_same_redactor(tmp_path) -> None:
-    secret = "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"
+    secret = SYNTHETIC_GOOGLE_API_KEY
     config = CrupierConfig.from_dict(
         {
             "project": {"name": "redact-artifacts", "default_profile": "agentic"},

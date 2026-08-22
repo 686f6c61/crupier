@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+from _synthetic_secrets import SYNTHETIC_GOOGLE_API_KEY
 
 import crupier.server as server_module
 from crupier import Crupier
@@ -54,7 +55,7 @@ class GoogleSecretFailAdapter(FakeAdapter):
     def generate(self, *, model, prompt, request):
         del model, prompt, request
         raise CrupierProviderAuthError(
-            "Provider rejected AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe",
+            f"Provider rejected {SYNTHETIC_GOOGLE_API_KEY}",
             provider="google",
             env_key="GOOGLE_API_KEY",
         )
@@ -611,7 +612,7 @@ def test_provider_auth_error_maps_to_401_and_redacts_secret(tmp_path):
 
 
 def test_server_error_message_uses_central_redactor(tmp_path):
-    secret = "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"
+    secret = SYNTHETIC_GOOGLE_API_KEY
 
     def run(address):
         status, _, data = request_json(

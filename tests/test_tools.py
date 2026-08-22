@@ -2,6 +2,7 @@ import json
 from datetime import UTC, date, datetime
 
 import pytest
+from _synthetic_secrets import SYNTHETIC_BEARER_TOKEN, SYNTHETIC_OPENAI_API_KEY
 
 from crupier.errors import (
     CrupierModelUnsupportedError,
@@ -310,8 +311,8 @@ def test_execute_tool_plan_bounds_large_results_and_long_errors():
 
 
 def test_tool_exception_secret_is_not_in_final_or_replanning_prompt():
-    bearer = "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signaturelong"
-    api_key = "sk-proj-toolsecretabcdefghijklmnopqrstuv"
+    bearer = SYNTHETIC_BEARER_TOKEN
+    api_key = SYNTHETIC_OPENAI_API_KEY
     path = "/Users/me/.env"
 
     def fail():

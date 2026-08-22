@@ -98,6 +98,14 @@ _SECRET_SCAN_PATTERNS = (
     ("ollama_cloud_key", re.compile(r"\b[a-f0-9]{40}\.[A-Za-z0-9_\-]{20,}\b", re.IGNORECASE)),
     ("bearer_token", re.compile(r"\bBearer\s+[A-Za-z0-9._\-]{32,}\b", re.IGNORECASE)),
 )
+# Fake credentials deliberately published for redaction tests. A real credential must
+# never match any of these examples byte for byte.
+_SECRET_SCAN_KNOWN_EXAMPLE_TOKENS = {
+    "sk-proj-abcdefghijklmnopqrstuvwxyz012345",
+    "sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345",
+    "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe",
+    "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signaturelong",
+}
 _SECRET_SCAN_SKIP_NAMES = {
     ".git",
     ".hg",
@@ -659,7 +667,10 @@ def _public_secret_scan_check(root: Path) -> ReleaseCheck:
         checked.append(relative.as_posix())
         for line_number, line in enumerate(text.splitlines(), start=1):
             for pattern_name, pattern in _SECRET_SCAN_PATTERNS:
-                if pattern.search(line):
+                if any(
+                    match.group(0) not in _SECRET_SCAN_KNOWN_EXAMPLE_TOKENS
+                    for match in pattern.finditer(line)
+                ):
                     findings.append(
                         {
                             "path": relative.as_posix(),
