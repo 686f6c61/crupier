@@ -34,6 +34,7 @@ from .prompts import (
     build_orchestrator_repair_prompt,
 )
 from .registry import ModelRegistry
+from .redaction import redact_text, redact_value
 from .route_schema import ALLOWED_STRATEGIES, validate_route_plan_shape
 from .runtime_policy import apply_runtime_policy
 from .selector import ModelSelector
@@ -559,7 +560,7 @@ class ModelOrchestrator:
             except (CrupierBudgetExceededError, CrupierExecutionLimitError):
                 raise
             except Exception as exc:  # noqa: BLE001 - invalid model plans fall back safely
-                last_error = str(exc)
+                last_error = redact_text(str(exc))
 
         attempted = " -> ".join(attempted_models)
         reason = last_error or "model plan was invalid"
@@ -592,7 +593,7 @@ class ModelOrchestrator:
                 plan.reason = (plan.reason + " Model orchestrator proposed and validated this route.").strip()
                 return plan
             except Exception as exc:  # noqa: BLE001 - invalid model plans are repaired or escalated
-                last_error = str(exc)
+                last_error = redact_text(str(exc))
                 self._annotate_last_orchestrator_call(
                     context,
                     plan_status="invalid",
@@ -665,7 +666,7 @@ class ModelOrchestrator:
                     "model": model_ref.key,
                     "latency_ms": int((perf_counter() - started) * 1000),
                     "error_type": exc.__class__.__name__,
-                    "error": str(exc),
+                    "error": redact_text(str(exc)),
                     "estimated_usd_reserved": reservation.estimated_usd if reservation else None,
                 },
             )
@@ -690,13 +691,13 @@ class ModelOrchestrator:
     def _record_orchestrator_call(context: PlanningContext, record: dict[str, Any]) -> None:
         calls = context.request.metadata.setdefault("_crupier_orchestrator_calls", [])
         if isinstance(calls, list):
-            calls.append(record)
+            calls.append(redact_value(record))
 
     @staticmethod
     def _annotate_last_orchestrator_call(context: PlanningContext, **updates: Any) -> None:
         calls = context.request.metadata.get("_crupier_orchestrator_calls")
         if isinstance(calls, list) and calls and isinstance(calls[-1], dict):
-            calls[-1].update(updates)
+            calls[-1].update(redact_value(updates))
 
     @staticmethod
     def _planning_latency_ms(context: PlanningContext) -> int:

@@ -9,6 +9,8 @@ from crupier import Crupier
 from crupier.cli import main
 from crupier.config import CrupierConfig, write_default_project
 from crupier.errors import CrupierProviderUnavailableError
+from crupier.models import PlanningContext, RequestEnvelope
+from crupier.orchestrator import ModelOrchestrator
 from crupier.redaction import redact_text, redact_value
 
 
@@ -159,6 +161,95 @@ def test_metadata_trace_keeps_non_content_metrics(tmp_path):
     assert f"chars={len(task)}" in trace_summary
     assert "prompt omitted" in summary
     assert "sha256=" in summary
+
+
+def test_metadata_trace_redacts_provider_metadata_and_warnings(tmp_path):
+    client = Crupier(make_config(tmp_path))
+    secret = "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"
+    request = RequestEnvelope(
+        task="Expediente de Marta Pérez",
+        constraints={"store_trace": True, "store_prompt": False},
+    )
+    result = client.deal(
+        request.task,
+        constraints=request.constraints,
+        dry_run=True,
+        trace="summary",
+    )
+    result.provider_metadata["upstream"] = {"credential": secret}
+    result.warnings.append(f"El proveedor devolvió {secret}")
+
+    client.traces.write(
+        project=client.config.project.name,
+        request=request,
+        result=result,
+        dry_run=True,
+        trace_level="summary",
+    )
+
+    serialized = json.dumps(client.traces.read(result.trace.trace_id))
+    assert secret not in serialized
+    assert "[redacted]" in serialized
+
+
+def test_metadata_trace_omits_orchestrator_error_text_when_store_response_is_false(tmp_path):
+    client = Crupier(make_config(tmp_path))
+    fragment = "Marta Perez NIF 12345678Z"
+    request = RequestEnvelope(
+        task="Clasifica el expediente",
+        constraints={"store_trace": True, "store_prompt": False, "store_response": False},
+    )
+    result = client.deal(
+        request.task,
+        constraints=request.constraints,
+        dry_run=True,
+        trace="summary",
+    )
+    result.provider_metadata["orchestrator_calls"] = [
+        {
+            "provider": "openai",
+            "model": "openai:planner",
+            "error_type": "ProviderError",
+            "error": f"Falló al procesar {fragment}",
+        }
+    ]
+    assert result.route is not None
+    result.route.reason = f"Fallback tras error: {fragment}"
+
+    client.traces.write(
+        project=client.config.project.name,
+        request=request,
+        result=result,
+        dry_run=True,
+        trace_level="summary",
+    )
+
+    record = client.traces.read(result.trace.trace_id)
+    serialized = json.dumps(record)
+    call = record["result"]["provider_metadata"]["orchestrator_calls"][0]
+    assert fragment not in serialized
+    assert "error" not in call
+    assert call["error_type"] == "ProviderError"
+
+
+def test_orchestrator_call_record_redacts_provider_exception() -> None:
+    secret = "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"
+    context = PlanningContext(
+        request=RequestEnvelope(task="planificar"),
+        candidates=[],
+    )
+
+    ModelOrchestrator._record_orchestrator_call(
+        context,
+        {
+            "error_type": "ProviderError",
+            "error": str(CrupierProviderUnavailableError(f"rechazo para {secret}")),
+        },
+    )
+
+    call = context.request.metadata["_crupier_orchestrator_calls"][0]
+    assert secret not in call["error"]
+    assert "[redacted]" in call["error"]
 
 
 def test_trace_store_replay_requires_prompt_storage(tmp_path):

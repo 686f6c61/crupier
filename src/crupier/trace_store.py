@@ -211,6 +211,7 @@ class TraceStore:
                 result.trace,
                 request=request,
                 store_prompt=store_prompt,
+                store_response=store_response,
                 salt=project,
                 trace_level=trace_level,
             ),
@@ -262,11 +263,16 @@ def _result_record(
     metadata = dict(result.provider_metadata)
     if "tool_calls" in metadata:
         metadata["tool_calls"] = [_safe_tool_call(call, store_prompt=store_prompt, store_response=store_response) for call in metadata["tool_calls"]]
+    metadata = _safe_provider_metadata(metadata, store_response=store_response)
     data: dict[str, Any] = {
-        "route": result.route.to_dict() if result.route else None,
+        "route": _safe_route_record(result.route.to_dict(), store_prompt=store_prompt) if result.route else None,
         "cost": result.cost.to_dict(),
         "latency_ms": result.latency_ms,
-        "warnings": result.warnings,
+        "warnings": (
+            _jsonable(_redact_value(result.warnings))
+            if store_prompt or store_response
+            else ["[warning omitted]" for _ in result.warnings]
+        ),
         "provider_metadata": _jsonable(metadata),
     }
     if isinstance(result, OperationResult):
@@ -305,6 +311,94 @@ def _safe_tool_call(call: dict[str, Any], *, store_prompt: bool, store_response:
     if store_response and "result" in call:
         data["result"] = _redact_value(call["result"])
     return {key: value for key, value in data.items() if value is not None}
+
+
+_SAFE_METADATA_TEXT_FIELDS = frozenset(
+    {
+        "classified_operation",
+        "error_type",
+        "finish_reason",
+        "model",
+        "operation",
+        "plan_status",
+        "provider",
+        "role",
+        "status",
+        "type",
+    }
+)
+_SAFE_ROUTE_TEXT_FIELDS = frozenset(
+    {
+        "model",
+        "models",
+        "name",
+        "policy_filters_applied",
+        "provider",
+        "risk_level",
+        "role",
+        "status",
+        "strategy",
+        "type",
+    }
+)
+
+
+def _safe_provider_metadata(metadata: dict[str, Any], *, store_response: bool) -> dict[str, Any]:
+    """Conserva métricas estructurales y elimina texto libre sin permiso de respuesta."""
+
+    return _safe_metadata_value(metadata, store_response=store_response)
+
+
+def _safe_metadata_value(value: Any, *, store_response: bool, field: str | None = None) -> Any:
+    if isinstance(value, dict):
+        safe: dict[str, Any] = {}
+        for key, item in value.items():
+            name = str(key)
+            if name == "error" and not store_response:
+                continue
+            safe[name] = _safe_metadata_value(
+                item,
+                store_response=store_response,
+                field=name,
+            )
+        return safe
+    if isinstance(value, list):
+        return [
+            _safe_metadata_value(item, store_response=store_response, field=field)
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return [
+            _safe_metadata_value(item, store_response=store_response, field=field)
+            for item in value
+        ]
+    if isinstance(value, str):
+        redacted = _redact(value)
+        if store_response or field in _SAFE_METADATA_TEXT_FIELDS or redacted != value:
+            return redacted
+        return "[content omitted]"
+    return value
+
+
+def _safe_route_record(route: dict[str, Any], *, store_prompt: bool) -> dict[str, Any]:
+    if store_prompt:
+        return _jsonable(_redact_value(route))
+    return _safe_route_value(route)
+
+
+def _safe_route_value(value: Any, *, field: str | None = None) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _safe_route_value(item, field=str(key))
+            for key, item in value.items()
+        }
+    if isinstance(value, list | tuple):
+        return [_safe_route_value(item, field=field) for item in value]
+    if isinstance(value, str):
+        if field in _SAFE_ROUTE_TEXT_FIELDS:
+            return _redact(value)
+        return "[content omitted]" if value else value
+    return value
 
 
 def _route_models(route: dict[str, Any]) -> list[str]:
@@ -359,10 +453,17 @@ def _trace_record(
     *,
     request: RequestEnvelope,
     store_prompt: bool,
+    store_response: bool,
     salt: str,
     trace_level: bool | str,
 ) -> dict[str, Any]:
     payload = _jsonable(_redact_value(trace.to_dict(summary=trace_level != "debug")))
+    if not store_prompt and isinstance(payload.get("route_plan"), dict):
+        payload["route_plan"] = _safe_route_record(payload["route_plan"], store_prompt=False)
+    if not store_response:
+        for key in ("provider_calls", "fallbacks", "errors", "final_quality_signals"):
+            if key in payload:
+                payload[key] = _safe_metadata_value(payload[key], store_response=False)
     payload["request_summary"] = task_summary_for_storage(
         request.task,
         store_prompt=store_prompt,

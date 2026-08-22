@@ -29,7 +29,7 @@ from .models import (
 from .orchestrator import DeterministicOrchestrator, ModelOrchestrator
 from .policy import Exclusion
 from .prompts import build_operation_classification_prompt
-from .redaction import redact_text
+from .redaction import redact_text, redact_value
 from .registry import ModelRegistry
 from .runtime_policy import apply_runtime_policy
 
@@ -217,7 +217,7 @@ class OperationRouter:
                     "operation": operation,
                     "latency_ms": int((perf_counter() - call_started) * 1000),
                     "error_type": exc.__class__.__name__,
-                    "error": str(exc),
+                    "error": redact_text(str(exc)),
                 }
             )
             trace_obj.errors.append(
@@ -226,7 +226,7 @@ class OperationRouter:
                     "provider": model_ref.provider,
                     "model": selected,
                     "error_type": exc.__class__.__name__,
-                    "error": str(exc),
+                    "error": redact_text(str(exc)),
                 }
             )
             raise
@@ -453,7 +453,7 @@ class OperationRouter:
             except (CrupierBudgetExceededError, CrupierExecutionLimitError):
                 raise
             except Exception as exc:  # noqa: BLE001 - fallback is explicit and traceable
-                last_error = str(exc)
+                last_error = redact_text(str(exc))
                 self._record_classifier_call(
                     request,
                     {
@@ -462,7 +462,7 @@ class OperationRouter:
                         "model": model_ref.key,
                         "latency_ms": int((perf_counter() - call_started) * 1000),
                         "error_type": exc.__class__.__name__,
-                        "error": str(exc),
+                        "error": redact_text(str(exc)),
                     },
                 )
         if self.client.config.orchestrator.fallback == "error":
@@ -512,7 +512,7 @@ class OperationRouter:
     def _record_classifier_call(request: RequestEnvelope, call: dict[str, Any]) -> None:
         calls = request.metadata.setdefault("_crupier_orchestrator_calls", [])
         if isinstance(calls, list):
-            calls.append(call)
+            calls.append(redact_value(call))
 
     def rerank(
         self,
