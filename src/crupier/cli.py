@@ -77,18 +77,31 @@ DEFAULT_PROVIDER_ENV_KEYS = {
 _ENV_FILE_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
+def _emit_cli_error(message: object, *, hint: str | None = None) -> None:
+    print(f"crupier: error: {message}", file=sys.stderr)
+    if hint:
+        print(f"hint: {hint}", file=sys.stderr)
+
+
+def _rating_1_to_5(value: str) -> int:
+    try:
+        rating = int(value)
+    except ValueError as exc:
+        raise CrupierError("Feedback rating must be an integer from 1 to 5.") from exc
+    if not 1 <= rating <= 5:
+        raise CrupierError("Feedback rating must be an integer from 1 to 5.")
+    return rating
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
     try:
+        args = parser.parse_args(argv)
         if args.env_file:
             _load_env_file(args.env_file, project=args.project)
         return args.func(args)
     except CrupierError as exc:
-        print(f"crupier: error: {exc}", file=sys.stderr)
-        hint = getattr(exc, "hint", None)
-        if hint:
-            print(f"hint: {hint}", file=sys.stderr)
+        _emit_cli_error(exc, hint=getattr(exc, "hint", None))
         return 1
 
 
@@ -387,7 +400,7 @@ def build_parser() -> argparse.ArgumentParser:
     feedback_record.add_argument("--model", action="append", help="Model ref to score; can be passed multiple times")
     feedback_record.add_argument("--mode", help="Route mode/profile for this feedback")
     feedback_record.add_argument("--strategy", help="Route strategy for this feedback")
-    feedback_record.add_argument("--rating", type=int, required=True, help="Human rating from 1 to 5")
+    feedback_record.add_argument("--rating", type=_rating_1_to_5, required=True, help="Human rating from 1 to 5")
     feedback_record.add_argument(
         "--verdict",
         choices=["accept", "reject", "needs_work", "unknown"],
@@ -730,7 +743,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Choose automatic, provider-native, or extracted file handling",
     )
     deal.add_argument("--response-schema", help="JSON Schema object for structured output")
-    deal.add_argument("--trace", choices=["none", "summary", "debug"], default="none")
+    deal.add_argument("--trace", choices=["none", "summary", "debug"], default="summary")
     deal.add_argument("--store-trace", action="store_true", help="Persist a trace under .crupier/traces")
     deal.add_argument("--store-prompt", action="store_true", help="Allow storing prompt/input data for replay")
     deal.add_argument("--store-response", action="store_true", help="Allow storing model output text/JSON")
@@ -924,10 +937,9 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_update(args: argparse.Namespace) -> int:
     client = Crupier.from_project(args.project)
     if args.provider and args.provider not in client.adapters:
-        print(
-            f"Provider {args.provider!r} is not enabled in crupier.toml or has no adapter. "
-            f"Set [providers.{args.provider}].enabled = true and configure its env_key/host.",
-            file=sys.stderr,
+        _emit_cli_error(
+            f"Provider {args.provider!r} is not enabled in crupier.toml or has no adapter.",
+            hint=f"Set [providers.{args.provider}].enabled = true and configure its env_key/host.",
         )
         return 1
     report = client.update(dry_run=args.dry_run, online=args.online, provider=args.provider)
@@ -1083,10 +1095,9 @@ def cmd_models_show(args: argparse.Namespace) -> int:
 def cmd_models_discover(args: argparse.Namespace) -> int:
     client = Crupier.from_project(args.project)
     if args.provider and args.provider not in client.adapters:
-        print(
-            f"Provider {args.provider!r} is not enabled in crupier.toml or has no adapter. "
-            f"Set [providers.{args.provider}].enabled = true and configure its env_key/host.",
-            file=sys.stderr,
+        _emit_cli_error(
+            f"Provider {args.provider!r} is not enabled in crupier.toml or has no adapter.",
+            hint=f"Set [providers.{args.provider}].enabled = true and configure its env_key/host.",
         )
         return 1
     warnings: list[str] = []
@@ -1099,13 +1110,13 @@ def cmd_models_discover(args: argparse.Namespace) -> int:
         for warning in warnings:
             print(f"warning: {warning}", file=sys.stderr)
         print(json.dumps([model.to_dict() for model in models], indent=2, sort_keys=True))
-        return 0
+        return 0 if models else 1
     for warning in warnings:
         print(f"warning: {warning}")
     if not models:
         provider = args.provider or "enabled providers"
         print(f"No models discovered for {provider}. Check provider enabled flags and API keys.")
-        return 0
+        return 1
     for model in models:
         label = f"\tname={model.name}" if model.name else ""
         print(f"{model.model_ref}{label}")
@@ -2805,9 +2816,9 @@ def cmd_smoke(args: argparse.Namespace) -> int:
     model_refs = _smoke_model_refs(client.config, provider=args.provider, explicit=args.model, all_models=args.all)
     if not model_refs:
         provider = args.provider or "enabled providers"
-        print(
-            f"No allowed models found for {provider}. Use `crupier models discover` and `crupier models allow ...` first.",
-            file=sys.stderr,
+        _emit_cli_error(
+            f"No allowed models found for {provider}.",
+            hint="Use `crupier models discover` and `crupier models allow ...` first.",
         )
         return 1
 
@@ -2929,6 +2940,8 @@ def _parse_input(value: str | None) -> Any:
     try:
         return json.loads(value)
     except json.JSONDecodeError:
+        if value.startswith(("{", "[")):
+            print("warning: --input looks like JSON but could not be parsed; treating it as text.", file=sys.stderr)
         return value
 
 

@@ -15,6 +15,7 @@ from crupier.cli import (
     _compare_variants,
     _comparison_dry_run,
     _decode_env_double_quoted,
+    _emit_cli_error,
     _filter_model_cards,
     _load_env_file,
     _ollama_cloud_host,
@@ -42,6 +43,7 @@ from crupier.cli import (
     _select_comparison_from_report,
     _select_variant_from_comparison,
     _strip_env_inline_comment,
+    build_parser,
     cmd_adopt_package,
     cmd_capabilities_probe,
     cmd_capabilities_readiness,
@@ -64,6 +66,7 @@ from crupier.cli import (
     cmd_trace_list,
     cmd_trace_replay,
     cmd_trace_show,
+    main,
 )
 from crupier.config import CrupierConfig
 from crupier.errors import CrupierConfigError, CrupierError
@@ -538,6 +541,77 @@ def test_model_filter_and_cli_value_helpers():
     assert constraints["store_response"] is True
 
 
+def test_parser_trace_default_consistent():
+    parser = build_parser()
+
+    deal = parser.parse_args(["deal", "hello"])
+    approval = parser.parse_args(["approvals", "execute"])
+    replay = parser.parse_args(["trace", "replay", "trace-1"])
+
+    assert deal.trace == approval.trace == replay.trace == "summary"
+
+
+def test_deal_trace_summary_emits_trace(monkeypatch):
+    captured = {}
+    result = NS(output_text="planned", route=None, warnings=[], trace={"route": "single"})
+
+    def deal(**kwargs):
+        captured.update(kwargs)
+        return result
+
+    monkeypatch.setattr(cli_module.Crupier, "from_project", lambda project: NS(deal=deal))
+    args = build_parser().parse_args(["deal", "hello", "--trace", "summary"])
+
+    assert args.func(args) == 0
+    assert captured["trace"] == "summary"
+    assert result.trace is not None
+
+
+def test_cli_input_invalid_json_emits_warning(capsys):
+    assert _parse_input('{"a":') == '{"a":'
+
+    assert "warning:" in capsys.readouterr().err
+
+
+def test_cli_input_bare_string_no_warning(capsys):
+    assert _parse_input("hola") == "hola"
+
+    assert capsys.readouterr().err == ""
+
+
+def test_cli_error_prefix_uniforme(monkeypatch, capsys):
+    blocked = NS(adapters={}, config=CrupierConfig.from_dict({}))
+    monkeypatch.setattr(cli_module.Crupier, "from_project", lambda project: blocked)
+
+    assert cli_module.cmd_update(NS(project=".", provider="openai", dry_run=False, online=False, json=False)) == 1
+    assert cmd_models_discover(NS(project=".", provider="openai", json=False)) == 1
+    assert cmd_smoke(NS(project=".", provider=None, model=None, all=False, show_output=False, json=False)) == 1
+
+    lines = capsys.readouterr().err.splitlines()
+    assert sum(line.startswith("crupier: error:") for line in lines) == 3
+
+
+def test_cli_error_hint_when_available(capsys):
+    _emit_cli_error("boom")
+    assert capsys.readouterr().err.splitlines() == ["crupier: error: boom"]
+
+    _emit_cli_error("boom", hint="try this")
+    assert capsys.readouterr().err.splitlines() == ["crupier: error: boom", "hint: try this"]
+
+
+@pytest.mark.parametrize("rating", ["0", "6"])
+def test_feedback_record_rejects_out_of_range_rating(rating, capsys):
+    assert main(["feedback", "record", "--rating", rating]) == 1
+    assert "integer from 1 to 5" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("rating", ["1", "5"])
+def test_feedback_record_accepts_rating_bounds_1_a_5(rating):
+    args = build_parser().parse_args(["feedback", "record", "--rating", rating])
+
+    assert args.rating == int(rating)
+
+
 def test_compare_variant_and_route_record_helpers():
     variants = _compare_variants(
         argparse.Namespace(
@@ -654,7 +728,7 @@ def test_models_discover_handles_disabled_empty_json_and_text_results(monkeypatc
 
     assert cmd_models_discover(NS(project=".", provider="openai", json=False)) == 1
     client.adapters = {"openai": object()}
-    assert cmd_models_discover(NS(project=".", provider="openai", json=False)) == 0
+    assert cmd_models_discover(NS(project=".", provider="openai", json=False)) == 1
 
     state["models"] = [ProviderModel(id="gpt-test", provider="openai", name="GPT Test")]
     state["warnings"] = ["partial discovery"]
