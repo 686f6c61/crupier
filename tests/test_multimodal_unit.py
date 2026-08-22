@@ -1,5 +1,6 @@
 import base64
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -380,6 +381,36 @@ def test_extract_pdf_text_falls_back_to_pdftotext(tmp_path, monkeypatch):
         max_chars=100,
         max_pages=10,
     ) == ("fallback text", False)
+
+
+def test_pdftotext_command_uses_absolute_path_and_option_terminator(tmp_path, monkeypatch):
+    from crupier import multimodal
+
+    monkeypatch.chdir(tmp_path)
+    pdf = Path("-f.pdf")
+    pdf.write_bytes(b"pdf")
+    monkeypatch.setitem(sys.modules, "pypdf", None)
+    monkeypatch.setattr(multimodal.shutil, "which", lambda name: "/usr/bin/pdftotext")
+    observed = {}
+
+    def fake_run(command, **kwargs):
+        observed["command"] = command
+        with open(command[-1], "w", encoding="utf-8") as handle:
+            handle.write("fallback text")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(multimodal.subprocess, "run", fake_run)
+
+    _extract_pdf_text(
+        normalize_file(pdf),
+        max_file_bytes=100,
+        max_chars=100,
+        max_pages=10,
+    )
+
+    separator = observed["command"].index("--")
+    assert observed["command"][separator + 1] == str(pdf.resolve())
+    assert Path(observed["command"][separator + 1]).is_absolute()
 
 
 def test_extract_pdf_text_reports_dependency_process_and_size_errors(tmp_path, monkeypatch):

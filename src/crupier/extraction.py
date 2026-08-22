@@ -100,9 +100,10 @@ class TesseractOCRAdapter:
             raise CrupierModelUnsupportedError(
                 f"OCR adapter {self.name!r} requires the {self.executable!r} executable."
             )
-        command = [executable, str(path), "stdout"]
+        command = [executable]
         if self.languages:
             command.extend(["-l", self.languages])
+        command.extend(["--", str(path.resolve()), "stdout"])
         try:
             completed = subprocess.run(
                 command,

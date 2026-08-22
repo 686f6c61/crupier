@@ -269,5 +269,34 @@ def test_tesseract_command_never_uses_a_shell(tmp_path, monkeypatch):
 
     TesseractOCRAdapter().extract(path, max_chars=100)
 
-    assert observed["command"] == ["/opt/tesseract", str(path), "stdout", "-l", "eng"]
+    assert observed["command"] == [
+        "/opt/tesseract",
+        "-l",
+        "eng",
+        "--",
+        str(path.resolve()),
+        "stdout",
+    ]
     assert "shell" not in observed["kwargs"]
+
+
+def test_ocr_command_uses_absolute_path_and_option_terminator(tmp_path, monkeypatch):
+    from crupier import extraction
+
+    monkeypatch.chdir(tmp_path)
+    path = Path("-l.png")
+    path.write_bytes(b"image")
+    observed = {}
+    monkeypatch.setattr(extraction.shutil, "which", lambda executable: "/opt/tesseract")
+
+    def run(command, **kwargs):
+        observed["command"] = command
+        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(extraction.subprocess, "run", run)
+
+    TesseractOCRAdapter().extract(path, max_chars=100)
+
+    separator = observed["command"].index("--")
+    assert observed["command"][separator + 1] == str(path.resolve())
+    assert Path(observed["command"][separator + 1]).is_absolute()
