@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import warnings
 from typing import Any, NoReturn
 
 from crupier.config import ProviderSettings, validate_provider_endpoint
@@ -25,6 +26,8 @@ from .common import (
     request_timeout_seconds,
     require_api_key,
 )
+
+_SAFE_DEGRADABLE_RESPONSE_PARAMS = frozenset({"temperature"})
 
 
 class OpenAIAdapter:
@@ -85,7 +88,9 @@ class OpenAIAdapter:
                 }
             }
 
-        response, removed_params = self._responses_create_with_param_repair(client, payload)
+        response, removed_params, degradation_events = self._responses_create_with_param_repair(
+            client, payload
+        )
 
         text = extract_openai_text(response)
         usage = object_to_dict(getattr(response, "usage", None))
@@ -97,6 +102,7 @@ class OpenAIAdapter:
             "native_files": sum(item["kind"] != "image" for item in native_payloads),
             "response_format": "json_schema" if response_schema else None,
             "removed_params": removed_params,
+            "degradation_events": degradation_events,
         }
         return AdapterResponse(
             text=text,
@@ -299,16 +305,29 @@ class OpenAIAdapter:
             kwargs["timeout"] = timeout
         return OpenAI(**kwargs)
 
-    def _responses_create_with_param_repair(self, client: Any, payload: dict[str, Any]) -> tuple[Any, list[str]]:
+    def _responses_create_with_param_repair(
+        self, client: Any, payload: dict[str, Any]
+    ) -> tuple[Any, list[str], list[dict[str, str]]]:
         try:
-            return client.responses.create(**payload), []
+            return client.responses.create(**payload), [], []
         except Exception as exc:  # noqa: BLE001 - provider SDK exceptions vary by version
             unsupported = _unsupported_parameter(exc)
-            if unsupported and unsupported in payload:
+            root_param = unsupported.split(".", 1)[0] if unsupported else None
+            if root_param in _SAFE_DEGRADABLE_RESPONSE_PARAMS and root_param in payload:
                 repaired = dict(payload)
-                repaired.pop(unsupported, None)
+                repaired.pop(root_param, None)
+                event = {
+                    "type": "unsupported_parameter_removed",
+                    "parameter": root_param,
+                    "provider": self.provider,
+                }
+                warnings.warn(
+                    f"OpenAI rejected optional parameter {root_param!r}; retrying without it.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 try:
-                    return client.responses.create(**repaired), [unsupported]
+                    return client.responses.create(**repaired), [root_param], [event]
                 except Exception as repaired_exc:  # noqa: BLE001
                     self._raise_mapped_error(repaired_exc)
             self._raise_mapped_error(exc)

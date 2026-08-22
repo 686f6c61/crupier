@@ -179,12 +179,48 @@ def test_openai_probe_and_param_repair_map_errors():
             raise RuntimeError("still broken")
 
     adapter._client = SimpleNamespace(responses=RepairFails())
-    with pytest.raises(CrupierProviderUnavailableError, match="still broken"):
+    with (
+        pytest.warns(RuntimeWarning, match="temperature"),
+        pytest.raises(CrupierProviderUnavailableError, match="still broken"),
+    ):
         adapter.generate(
             model="gpt-test",
             prompt="x",
             request=RequestEnvelope(task="x", constraints={"temperature": 0}),
         )
+
+
+@pytest.mark.parametrize(
+    ("unsupported", "constraints"),
+    [
+        ("text", {"response_schema": {"type": "object"}}),
+        ("max_output_tokens", {"max_output_tokens": 64}),
+        ("timeout", {"timeout_seconds": 2}),
+    ],
+)
+def test_openai_param_repair_rejects_removal_of_schema_budget_and_timeout_controls(
+    unsupported, constraints
+):
+    class RejectControl:
+        def __init__(self):
+            self.payloads = []
+
+        def create(self, **payload):
+            self.payloads.append(payload)
+            raise RuntimeError(f"Unsupported parameter: '{unsupported}'")
+
+    responses = RejectControl()
+    adapter = OpenAIAdapter(ProviderSettings(enabled=True))
+    adapter._client = SimpleNamespace(responses=responses)
+
+    with pytest.raises(CrupierProviderUnavailableError, match=unsupported):
+        adapter.generate(
+            model="gpt-test",
+            prompt="x",
+            request=RequestEnvelope(task="x", constraints=constraints),
+        )
+
+    assert len(responses.payloads) == 1
 
 
 def test_openai_build_client_supports_host_and_reports_missing_dependency(monkeypatch):

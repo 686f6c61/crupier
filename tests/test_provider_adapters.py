@@ -3,6 +3,8 @@ import sys
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
+
 from crupier.adapters import ProviderModel
 from crupier.adapters.anthropic import AnthropicAdapter
 from crupier.adapters.factory import build_default_adapters
@@ -135,7 +137,7 @@ def test_openai_adapter_sends_request_timeout():
     assert client.responses.payload["timeout"] == 12.5
 
 
-def test_openai_adapter_retries_without_unsupported_temperature():
+def test_openai_temperature_degradation_is_visible():
     class UnsupportedTemperatureResponses:
         def __init__(self):
             self.payloads = []
@@ -157,16 +159,24 @@ def test_openai_adapter_retries_without_unsupported_temperature():
     client.responses = UnsupportedTemperatureResponses()
     adapter._client = client
 
-    response = adapter.generate(
-        model="gpt-5.5",
-        prompt="hello",
-        request=RequestEnvelope(task="x", constraints={"temperature": 0}),
-    )
+    with pytest.warns(RuntimeWarning, match="temperature"):
+        response = adapter.generate(
+            model="gpt-5.5",
+            prompt="hello",
+            request=RequestEnvelope(task="x", constraints={"temperature": 0}),
+        )
 
     assert response.text == "openai text"
     assert "temperature" in client.responses.payloads[0]
     assert "temperature" not in client.responses.payloads[1]
     assert response.metadata["removed_params"] == ["temperature"]
+    assert response.metadata["degradation_events"] == [
+        {
+            "type": "unsupported_parameter_removed",
+            "parameter": "temperature",
+            "provider": "openai",
+        }
+    ]
 
 
 def test_openai_adapter_builds_client_with_provider_timeout(monkeypatch):
