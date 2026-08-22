@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import warnings
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from uuid import uuid4
 
 from crupier.client import Crupier
 from crupier.config import CrupierConfig
-from crupier.errors import CrupierProviderUnavailableError
+from crupier.errors import CrupierConfigError, CrupierProviderUnavailableError
 from crupier.models import CrupierResult, OperationResult
 from crupier.multimodal import DEFAULT_MAX_DATA_URL_BYTES, enforce_file_access_policy
 
@@ -68,14 +69,50 @@ class OpenAI:
         crupier: Crupier | None = None,
         config: CrupierConfig | dict[str, Any] | None = None,
         project: str = ".",
+        api_key: str | None = None,
+        base_url: str | None = None,
+        organization: str | None = None,
+        timeout: float | None = None,
+        max_retries: int | None = None,
         dry_run: bool | None = None,
         compat_mode: str = "balanced",
         allow_local_file_uris: bool = True,
         file_root: str | Path | None = None,
         max_data_url_bytes: int | None = None,
         allow_request_controls: bool = True,
-        **_: Any,
+        **unknown: Any,
     ):
+        rejected = [
+            name
+            for name, value in (
+                ("api_key", api_key),
+                ("base_url", base_url),
+                ("organization", organization),
+            )
+            if value is not None
+        ]
+        if rejected:
+            names = ", ".join(rejected)
+            raise CrupierConfigError(
+                f"El cliente de compatibilidad no acepta {names}; "
+                "Crupier gobierna las credenciales, la organización y el enrutado mediante crupier.toml."
+            )
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            warnings.warn(
+                f"El cliente de compatibilidad descarta argumentos de constructor no reconocidos: {names}.",
+                UserWarning,
+                stacklevel=2,
+            )
+        self._constructor_constraints: dict[str, Any] = {}
+        if timeout is not None:
+            if isinstance(timeout, bool) or not isinstance(timeout, int | float) or timeout <= 0:
+                raise TypeError("timeout debe ser un número positivo de segundos.")
+            self._constructor_constraints["timeout_seconds"] = float(timeout)
+        if max_retries is not None:
+            if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
+                raise TypeError("max_retries debe ser un entero mayor o igual que cero.")
+            self._constructor_constraints["max_provider_retries"] = max_retries
         if crupier is not None:
             self._crupier = crupier
         elif config is not None:
@@ -127,11 +164,14 @@ class OpenAI:
         explicit_constraints = kwargs.pop("constraints", {}) or {}
         if not isinstance(explicit_constraints, dict):
             raise TypeError("constraints must be a dictionary.")
-        constraints = _compat_constraints(
-            model=model,
-            stream=stream,
-            compat_mode=str(kwargs.pop("compat_mode", self._compat_mode)),
-            kwargs=kwargs,
+        constraints = dict(self._constructor_constraints)
+        constraints.update(
+            _compat_constraints(
+                model=model,
+                stream=stream,
+                compat_mode=str(kwargs.pop("compat_mode", self._compat_mode)),
+                kwargs=kwargs,
+            )
         )
         nested_constraints = crupier_options.get("constraints", {}) or {}
         if not isinstance(nested_constraints, dict):
@@ -180,7 +220,10 @@ class OpenAI:
 
     def _operation_kwargs(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         values = dict(kwargs)
-        constraints = dict(values.pop("constraints", {}) or {})
+        constraints = {
+            **self._constructor_constraints,
+            **dict(values.pop("constraints", {}) or {}),
+        }
         for key in ("max_calls", "max_cost_usd", "max_latency_ms", "timeout_seconds"):
             if values.get(key) is not None:
                 constraints[key] = values.pop(key)

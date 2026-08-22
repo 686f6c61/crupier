@@ -996,6 +996,12 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+El cliente compatible no acepta `api_key`, `base_url` ni `organization`:
+Crupier obtiene credenciales y destinos de `crupier.toml` para evitar que una
+aplicación autopatcheada cambie de cuenta o endpoint en silencio. Los argumentos
+`timeout` y `max_retries` sí se trasladan a los límites de ejecución de Crupier;
+cualquier otro argumento de constructor desconocido produce un aviso explícito.
+
 Control-plane options can travel in the namespaced `crupier` object without
 changing ordinary OpenAI request fields:
 

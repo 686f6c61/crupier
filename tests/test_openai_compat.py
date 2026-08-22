@@ -1,11 +1,13 @@
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from crupier import Crupier, CrupierResult, install
 from crupier.adapters import AdapterResponse, EmbeddingResponse, OperationResponse
 from crupier.compat.openai import OpenAI
 from crupier.config import CrupierConfig
-from crupier.errors import CrupierModelUnsupportedError
+from crupier.errors import CrupierConfigError, CrupierModelUnsupportedError
 
 
 class FakeAdapter:
@@ -91,6 +93,37 @@ def make_client(tmp_path, *, dry_run=False):
     adapter = FakeAdapter()
     crupier = Crupier(config, adapters={"openai": adapter})
     return OpenAI(crupier=crupier, dry_run=dry_run), adapter
+
+
+def test_compat_client_rejects_api_key_and_base_url():
+    with pytest.raises(CrupierConfigError) as caught:
+        OpenAI(crupier=SimpleNamespace(), api_key="secret", base_url="https://example.test/v1")
+
+    assert "api_key" in str(caught.value)
+    assert "base_url" in str(caught.value)
+
+
+def test_compat_client_warns_on_unknown_arguments():
+    with pytest.warns(UserWarning, match="unknown_option"):
+        OpenAI(crupier=SimpleNamespace(), unknown_option=True)
+
+
+def test_compat_client_translates_timeout_and_retries():
+    class SpyCrupier:
+        def __init__(self):
+            self.kwargs = None
+
+        def deal(self, **kwargs):
+            self.kwargs = kwargs
+            return CrupierResult(output_text="ok")
+
+    spy = SpyCrupier()
+    client = OpenAI(crupier=spy, timeout=3.5, max_retries=2)
+
+    client.responses.create(input="hello")
+
+    assert spy.kwargs["constraints"]["timeout_seconds"] == 3.5
+    assert spy.kwargs["constraints"]["max_provider_retries"] == 2
 
 
 def test_compat_forwards_control_options_constraints_and_metadata():
@@ -294,6 +327,22 @@ def test_install_patches_openai_module_with_compat_client(tmp_path):
 
     assert patched == ["openai"]
     assert response.output_text == "fake gpt-5.5"
+
+
+def test_autopatched_openai_constructor_fails_loudly_on_ignored_credentials(tmp_path):
+    client, _ = make_client(tmp_path)
+    original_module = sys.modules.get("openai")
+    fake_openai = SimpleNamespace(OpenAI=object)
+    sys.modules["openai"] = fake_openai
+    try:
+        install("openai", crupier=client._crupier)
+        with pytest.raises(CrupierConfigError, match="api_key"):
+            fake_openai.OpenAI(api_key="must-not-be-ignored")
+    finally:
+        if original_module is None:
+            sys.modules.pop("openai", None)
+        else:
+            sys.modules["openai"] = original_module
 
 
 def test_embeddings_create_returns_openai_like_list(tmp_path):
