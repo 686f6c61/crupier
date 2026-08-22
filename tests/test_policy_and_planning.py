@@ -229,6 +229,61 @@ def test_policy_rejects_model_whose_provider_is_not_configured(tmp_path):
         raise AssertionError("models from unconfigured providers must not be routable")
 
 
+def test_policy_filter_excludes_denied_model(tmp_path):
+    config = make_config(tmp_path, allow=[])
+    config.models.deny = ["openai:gpt-5.4-mini"]
+    cards = [
+        CapabilityCard(model_ref=ModelRef.parse(model), last_updated="test")
+        for model in ("openai:gpt-5.4-mini", "anthropic:claude-opus-4-8")
+    ]
+
+    result = PolicyEngine(config).filter_candidates(RequestEnvelope(task="x"), cards)
+
+    assert [card.model_ref.key for card in result.allowed] == ["anthropic:claude-opus-4-8"]
+    assert "deny_list" in result.filters_applied
+    assert result.excluded[0].model == "openai:gpt-5.4-mini"
+    assert "explicitly denied" in result.excluded[0].reason
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_filter"),
+    [
+        ("allowed_providers", "request_allowed_providers"),
+        ("provider_disabled", "provider_enabled"),
+        ("openrouter_disabled", "openrouter_byok"),
+        ("preview", "stable_models_only"),
+        ("require_zdr", "require_zdr"),
+        ("streaming", "streaming"),
+    ],
+)
+def test_policy_filter_exclusions_parametrizado(tmp_path, case, expected_filter):
+    config = make_config(tmp_path, allow=[])
+    request = RequestEnvelope(task="x")
+    excluded = CapabilityCard(model_ref=ModelRef.parse("openai:excluded"), last_updated="test")
+    allowed = CapabilityCard(model_ref=ModelRef.parse("anthropic:allowed"), last_updated="test")
+
+    if case == "allowed_providers":
+        request.constraints["allowed_providers"] = ["anthropic"]
+    elif case == "provider_disabled":
+        config.providers["openai"].enabled = False
+    elif case == "openrouter_disabled":
+        excluded.model_ref = ModelRef.parse("openrouter:excluded")
+    elif case == "preview":
+        excluded.model_ref = ModelRef.parse("openai:excluded-preview")
+    elif case == "require_zdr":
+        request.constraints["require_zdr"] = True
+        allowed.zdr_eligible = True
+    elif case == "streaming":
+        request.constraints["require_streaming"] = True
+        excluded.supports_streaming = False
+
+    result = PolicyEngine(config).filter_candidates(request, [excluded, allowed])
+
+    assert [card.model_ref.key for card in result.allowed] == ["anthropic:allowed"]
+    assert expected_filter in result.filters_applied
+    assert result.excluded[0].model == excluded.model_ref.key
+
+
 def test_private_mode_prefers_ollama_local_first(tmp_path):
     client = Crupier(make_config(tmp_path))
 

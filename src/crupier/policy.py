@@ -98,11 +98,11 @@ class PolicyEngine:
             if provider_settings is None and not offline_planning:
                 self._exclude(result, key, f"provider {provider!r} is not configured", "provider_configured")
                 continue
-            if provider_settings is not None and not provider_settings.enabled:
-                self._exclude(result, key, f"provider {provider!r} is disabled", "provider_enabled")
-                continue
             if provider == "openrouter" and (provider_settings is None or not provider_settings.enabled):
                 self._exclude(result, key, "OpenRouter is optional BYOK and not enabled", "openrouter_byok")
+                continue
+            if provider_settings is not None and not provider_settings.enabled:
+                self._exclude(result, key, f"provider {provider!r} is disabled", "provider_enabled")
                 continue
             lifecycle = card.routing_hints.get("lifecycle") or card.natural_profile.get("lifecycle")
             routing_status = card.routing_hints.get("routing_status") or card.natural_profile.get("routing_status")
