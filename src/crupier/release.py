@@ -644,6 +644,7 @@ def _public_secret_scan_check(root: Path) -> ReleaseCheck:
     candidates = release_files if release_files else _public_secret_scan_fallback_files(root)
     checked: list[str] = []
     skipped_large: list[str] = []
+    unreadable: list[str] = []
     findings: list[dict[str, Any]] = []
 
     for relative in sorted(set(candidates), key=lambda path: path.as_posix()):
@@ -655,6 +656,7 @@ def _public_secret_scan_check(root: Path) -> ReleaseCheck:
         try:
             size = path.stat().st_size
         except OSError:
+            unreadable.append(relative.as_posix())
             continue
         if size > _SECRET_SCAN_MAX_BYTES:
             skipped_large.append(relative.as_posix())
@@ -662,6 +664,7 @@ def _public_secret_scan_check(root: Path) -> ReleaseCheck:
         try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
+            unreadable.append(relative.as_posix())
             continue
 
         checked.append(relative.as_posix())
@@ -684,18 +687,23 @@ def _public_secret_scan_check(root: Path) -> ReleaseCheck:
         if len(findings) >= 50:
             break
 
-    ok = not findings
+    ok = not findings and not unreadable
     return ReleaseCheck(
         id="public_secret_scan",
-        status="pass" if ok else "fail",
+        status="pass" if ok else ("fail" if findings else "warn"),
         severity="high",
         summary="Public tracked files do not contain provider-key shaped secrets."
         if ok
-        else "Public tracked files contain provider-key shaped secrets.",
+        else (
+            "Public tracked files contain provider-key shaped secrets."
+            if findings
+            else "Some public tracked files could not be scanned for secrets."
+        ),
         evidence={
             "checked_count": len(checked),
             "checked_sample": checked[:25],
             "skipped_large": skipped_large,
+            "unreadable": unreadable,
             "finding_count": len(findings),
             "findings": findings,
             "scanned_git_tracked_files": bool(release_files),
@@ -704,7 +712,9 @@ def _public_secret_scan_check(root: Path) -> ReleaseCheck:
         actions=[
             "Remove committed provider keys/tokens, rotate any exposed credentials, and rerun the release check before opening the repository publicly."
         ]
-        if not ok
+        if findings
+        else ["Make every tracked release file readable, then rerun the release check."]
+        if unreadable
         else [],
     )
 
@@ -714,10 +724,7 @@ def _public_secret_scan_fallback_files(root: Path) -> list[Path]:
     for path in root.rglob("*"):
         if not path.is_file():
             continue
-        try:
-            relative = path.relative_to(root)
-        except ValueError:  # pragma: no cover - rglob(root) cannot yield a path outside root
-            continue
+        relative = path.relative_to(root)
         files.append(relative)
     return files
 
@@ -918,7 +925,7 @@ def _public_yaml_check(root: Path) -> ReleaseCheck:
             summary="PyYAML is not installed, so public GitHub YAML syntax was not checked.",
             evidence={"parser_available": False, "checked": [], "failures": []},
             actions=[
-                "Install the CI-equivalent development environment with `python -m pip install -e '.[dev]'`."
+                "Install the reproducible test environment with `python -m pip install -e '.[dev]'`."
             ],
         )
 
@@ -1256,29 +1263,54 @@ def _dependency_updates_check(root: Path) -> ReleaseCheck:
     renovate_paths = [root / "renovate.json", root / ".github" / "renovate.json", root / "renovate.json5"]
     dependabot_exists = dependabot_path.exists()
     renovate_path = next((path for path in renovate_paths if path.exists()), None)
+    renovate_valid = False
+    renovate_error: str | None = None
+    if renovate_path is not None:
+        try:
+            renovate_document = json.loads(renovate_path.read_text(encoding="utf-8"))
+            renovate_valid = (
+                isinstance(renovate_document, dict)
+                and bool(renovate_document)
+                and renovate_document.get("enabled") is not False
+            )
+            if not renovate_valid:
+                renovate_error = "configuration must be a non-empty, enabled JSON object"
+        except (OSError, json.JSONDecodeError) as exc:
+            renovate_error = f"{exc.__class__.__name__}: {exc}"
     ci_path = root / ".github" / "workflows" / "ci.yml"
     document = _load_workflow_document(ci_path)
     triggers = _workflow_triggers(document) if document is not None else {}
     schedules = triggers.get("schedule")
     jobs = document.get("jobs") if document is not None else None
-    dependency_job = jobs.get("dependency-audit") if isinstance(jobs, dict) else None
+    dependency_job_name: str | None = None
+    dependency_job: dict[str, Any] | None = None
+    if isinstance(jobs, dict):
+        for name, candidate in jobs.items():
+            if not isinstance(candidate, dict) or not _step_is_enabled(candidate):
+                continue
+            candidate_steps = _workflow_steps(candidate)
+            candidate_strategy = candidate.get("strategy")
+            candidate_matrix = (
+                candidate_strategy.get("matrix") if isinstance(candidate_strategy, dict) else None
+            )
+            candidate_resolutions = (
+                candidate_matrix.get("resolution") if isinstance(candidate_matrix, dict) else None
+            )
+            if candidate_resolutions == ["minimum", "latest"] and any(
+                "pip_audit" in str(step.get("run", "")) for step in candidate_steps
+            ):
+                dependency_job_name = str(name)
+                dependency_job = candidate
+                break
     steps = _workflow_steps(dependency_job)
-    commands = "\n".join(str(step.get("run", "")) for step in steps)
-    uses = {str(step.get("uses", "")) for step in steps}
-    matrix = dependency_job.get("strategy", {}).get("matrix", {}) if isinstance(dependency_job, dict) else {}
+    enabled_steps = [step for step in steps if _step_is_enabled(step)]
+    uses = {str(step.get("uses", "")) for step in enabled_steps}
+    strategy = dependency_job.get("strategy") if isinstance(dependency_job, dict) else None
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
     resolutions = matrix.get("resolution") if isinstance(matrix, dict) else None
     contributing_path = root / "CONTRIBUTING.md"
     contributing = contributing_path.read_text(encoding="utf-8", errors="replace") if contributing_path.exists() else ""
-    required_documentation = [
-        "## Dependency Update Process",
-        "weekly",
-        "dependency-audit",
-        "minimum",
-        "latest",
-        "dependency-versions-minimum.json",
-        "dependency-versions-latest.json",
-    ]
-    missing_equivalent = []
+    missing_equivalent: list[str] = []
     if not isinstance(schedules, list) or not schedules:
         missing_equivalent.append("weekly schedule")
     if resolutions != ["minimum", "latest"]:
@@ -1287,20 +1319,31 @@ def _dependency_updates_check(root: Path) -> ReleaseCheck:
         "python -m pytest -q",
         "python -m pip_audit --skip-editable --progress-spinner off",
         "python -m pip list --format=json",
+        ".[all,dev]",
+        "cyclonedx-json",
     ):
-        if marker not in commands:
+        if _find_enabled_step(enabled_steps, run_marker=marker) is None:
             missing_equivalent.append(marker)
     upload = f"actions/upload-artifact@{_PINNED_GITHUB_ACTIONS['actions/upload-artifact']}"
     if upload not in uses:
         missing_equivalent.append(upload)
-    missing_equivalent.extend(marker for marker in required_documentation if marker not in contributing)
+    documentation_markers = {
+        "dependency section": bool(re.search(r"(?im)^## .*dependenc", contributing)),
+        "weekly cadence": bool(re.search(r"(?i)weekly|semanal|cada semana", contributing)),
+        "minimum/latest policy": bool(re.search(r"(?i)minimum|m[ií]nim", contributing))
+        and bool(re.search(r"(?i)latest|[uú]ltim", contributing)),
+        "component evidence": any(
+            marker in contributing.lower() for marker in ("component", "sbom", "cyclonedx")
+        ),
+    }
+    missing_equivalent.extend(label for label, present in documentation_markers.items() if not present)
 
     if dependabot_exists:
         status = "warn"
         channel = "dependabot"
         summary = "Dependabot configuration is not allowed by repository policy."
         actions = ["Remove .github/dependabot.yml before publishing."]
-    elif renovate_path is not None:
+    elif renovate_valid:
         status = "pass"
         channel = "renovate"
         summary = "Renovate provides an automated dependency-update channel."
@@ -1327,7 +1370,10 @@ def _dependency_updates_check(root: Path) -> ReleaseCheck:
             "exists": dependabot_exists,
             "channel": channel,
             "renovate_path": str(renovate_path.relative_to(root)) if renovate_path is not None else None,
+            "renovate_valid": renovate_valid,
+            "renovate_error": renovate_error,
             "ci_path": ".github/workflows/ci.yml",
+            "ci_job": dependency_job_name,
             "missing_equivalent_markers": missing_equivalent,
         },
         actions=actions,

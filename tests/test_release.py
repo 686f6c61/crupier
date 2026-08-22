@@ -1,9 +1,11 @@
+import copy
 import json
 import os
 import re
 import subprocess
 import sys
 import tarfile
+import tomllib
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
@@ -913,15 +915,19 @@ def test_release_check_warns_without_any_dependency_update_channel(tmp_path):
 
 def test_dev_extra_installs_files_and_yaml():
     root = Path(__file__).parents[1]
-    data = __import__("tomllib").loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    data = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     dev = data["project"]["optional-dependencies"]["dev"]
 
     assert any(requirement.startswith("python-docx") for requirement in dev)
     assert any(requirement.startswith("openpyxl") for requirement in dev)
-    assert any(requirement.startswith("PyYAML") for requirement in dev)
+    for requirement in ("openai", "anthropic", "google-genai", "pyasn1", "pypdf"):
+        assert any(value.startswith(requirement) for value in dev)
+    assert "PyYAML>=6.0.1" in dev
+    assert "mypy>=1.18.1" in dev
+    assert "pip-audit>=2.10.1" in dev
 
 
-def test_clean_dev_extra_runs_full_suite():
+def test_ci_test_job_declares_clean_dev_install_and_suite():
     root = Path(__file__).parents[1]
     workflow = yaml.safe_load((root / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
     steps = workflow["jobs"]["test"]["steps"]
@@ -929,6 +935,8 @@ def test_clean_dev_extra_runs_full_suite():
 
     assert "python -m pip install -e '.[dev]'" in commands
     assert "python -m pytest -q" in commands
+    assert commands.index("python -m pip install -e '.[dev]'") < commands.index("python -m mypy src/crupier")
+    assert commands.index("python -m pip install -e '.[dev]'") < commands.index("python -m pip_audit")
 
 
 def test_release_check_names_ci_equivalent_environment(tmp_path, monkeypatch):
@@ -946,7 +954,7 @@ def test_release_check_names_ci_equivalent_environment(tmp_path, monkeypatch):
     checks = {check.id: check for check in report.checks}
 
     assert checks["public_yaml"].actions == [
-        "Install the CI-equivalent development environment with `python -m pip install -e '.[dev]'`."
+        "Install the reproducible test environment with `python -m pip install -e '.[dev]'`."
     ]
 
 
@@ -957,10 +965,15 @@ def test_dependency_matrix_resolves_minimum_and_latest_extras():
     commands = "\n".join(str(step.get("run", "")) for step in job["steps"])
 
     assert job["strategy"]["matrix"]["resolution"] == ["minimum", "latest"]
+    assert 'optional["all"]' in commands
+    assert 'optional["dev"]' in commands
     assert "minimum-requirements.txt" in commands
+    assert "python -m pip install --dry-run -r minimum-requirements.txt" in commands
     assert "--upgrade-strategy eager" in commands
+    assert ".[all,dev]" in commands
     assert "python -m pip_audit --skip-editable --progress-spinner off" in commands
     assert "python -m pip list --format=json" in commands
+    assert "cyclonedx-json" in commands
 
     checks = {check.id: check for check in run_release_checks(root, build=False).checks}
     assert checks["dependency_updates"].status == "pass"
@@ -1048,8 +1061,61 @@ def test_release_build_branch_and_secret_scan_io_failures(tmp_path, monkeypatch)
     monkeypatch.setattr(Path, "read_text", flaky_read)
     check = release_module._public_secret_scan_check(tmp_path)
 
-    assert check.status == "pass"
-    assert check.evidence["checked_count"] <= 1
+    assert check.status == "warn"
+    assert check.evidence["checked_count"] == 0
+    assert check.evidence["unreadable"] == ["read-error.txt", "stat-error.txt"]
+    assert check.actions == ["Make every tracked release file readable, then rerun the release check."]
+
+
+def test_dependency_update_gate_is_fail_closed_for_disabled_or_malformed_ci(tmp_path):
+    root = Path(__file__).parents[1]
+    write_release_project(tmp_path)
+    (tmp_path / "renovate.json").unlink()
+    (tmp_path / "CONTRIBUTING.md").write_text(
+        (root / "CONTRIBUTING.md").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    ci_path = tmp_path / ".github" / "workflows" / "ci.yml"
+    original = yaml.safe_load((root / ".github/workflows/ci.yml").read_text(encoding="utf-8"))
+
+    renamed = copy.deepcopy(original)
+    renamed["jobs"]["deps-weekly"] = renamed["jobs"].pop("dependency-audit")
+    ci_path.write_text(yaml.safe_dump(renamed, sort_keys=False), encoding="utf-8")
+    renamed_check = release_module._dependency_updates_check(tmp_path)
+    assert renamed_check.status == "pass"
+    assert renamed_check.evidence["ci_job"] == "deps-weekly"
+
+    disabled_steps = copy.deepcopy(original)
+    for step in disabled_steps["jobs"]["dependency-audit"]["steps"]:
+        if step.get("name") in {"Run full suite", "Audit resolved dependencies"}:
+            step["if"] = False
+    ci_path.write_text(yaml.safe_dump(disabled_steps, sort_keys=False), encoding="utf-8")
+    assert release_module._dependency_updates_check(tmp_path).status == "warn"
+
+    disabled_job = copy.deepcopy(original)
+    disabled_job["jobs"]["dependency-audit"]["if"] = False
+    ci_path.write_text(yaml.safe_dump(disabled_job, sort_keys=False), encoding="utf-8")
+    assert release_module._dependency_updates_check(tmp_path).status == "warn"
+
+    missing_strategy = copy.deepcopy(original)
+    missing_strategy["jobs"]["dependency-audit"]["strategy"] = None
+    ci_path.write_text(yaml.safe_dump(missing_strategy, sort_keys=False), encoding="utf-8")
+    malformed_check = release_module._dependency_updates_check(tmp_path)
+    assert malformed_check.status == "warn"
+    assert "minimum/latest resolution matrix" in malformed_check.evidence["missing_equivalent_markers"]
+
+
+def test_dependency_update_gate_rejects_empty_or_invalid_renovate_config(tmp_path):
+    write_release_project(tmp_path)
+    renovate = tmp_path / "renovate.json"
+
+    for content in ("", "[]\n", "{}\n", '{"enabled": false}\n', "not json\n"):
+        renovate.write_text(content, encoding="utf-8")
+        check = release_module._dependency_updates_check(tmp_path)
+        assert check.status == "warn"
+        assert check.evidence["channel"] is None
+        assert check.evidence["renovate_valid"] is False
+        assert check.evidence["renovate_error"]
 
 
 def test_release_archive_metadata_and_legacy_extraction_edges(tmp_path, monkeypatch):

@@ -11,7 +11,7 @@ Use Python 3.11 or newer:
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install --upgrade pip "setuptools>=83" wheel
-python -m pip install -e ".[all,dev]"
+python -m pip install -e '.[dev]'
 python -m pytest
 ```
 
@@ -135,9 +135,13 @@ policy is intentionally changed.
 Dependabot and Renovate pull requests remain disabled by repository policy. The
 scheduled `dependency-audit` job in `.github/workflows/ci.yml` is the equivalent
 weekly update channel: every Monday it resolves both the declared direct minimum
-versions and the latest compatible versions from the CI-equivalent `.[dev]`
-environment, runs the full suite and `pip-audit`, and uploads
+versions and the latest compatible versions from `.[all]` and the reproducible
+`.[dev]` environment, which includes every published optional dependency needed
+by tests, type checking and auditing. The job runs the full suite and `pip-audit`, and uploads
 `dependency-versions-minimum.json` and `dependency-versions-latest.json` as the
-resolved component evidence. Maintainers review failures and available upgrades
-from that run, update bounds in a focused pull request, and can reproduce the
-gate at any time with `workflow_dispatch`.
+resolved component inventory together with CycloneDX SBOM evidence. Maintainers
+review failures and available upgrades from that run, update bounds in a focused
+pull request, and can reproduce the gate at any time with `workflow_dispatch`.
+GitHub may disable scheduled workflows after 60 days without repository activity,
+so maintainers also verify that the weekly run remains active during dependency
+review.

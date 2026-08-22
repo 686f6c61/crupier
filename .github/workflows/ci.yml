@@ -58,7 +58,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install CI-equivalent development environment
+      - name: Install reproducible test environment
         run: |
           python -m pip install --upgrade pip "setuptools>=83" wheel
           python -m pip install -e '.[dev]'
@@ -72,8 +72,10 @@ jobs:
           from packaging.requirements import Requirement
 
           data = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))
-          requirements = data["project"]["optional-dependencies"]["dev"]
-          minimums = []
+          project = data["project"]
+          optional = project["optional-dependencies"]
+          requirements = [*project.get("dependencies", []), *optional["all"], *optional["dev"]]
+          minimums = {}
           for value in requirements:
               requirement = Requirement(value)
               lower = next(
@@ -83,23 +85,34 @@ jobs:
               if lower is None:
                   raise SystemExit(f"Missing direct lower bound: {value}")
               extras = f"[{','.join(sorted(requirement.extras))}]" if requirement.extras else ""
-              minimums.append(f"{requirement.name}{extras}=={lower}")
-          pathlib.Path("minimum-requirements.txt").write_text("\n".join(minimums) + "\n", encoding="utf-8")
+              minimums[requirement.name.lower()] = f"{requirement.name}{extras}=={lower}"
+          pathlib.Path("minimum-requirements.txt").write_text(
+              "\n".join(minimums[name] for name in sorted(minimums)) + "\n",
+              encoding="utf-8",
+          )
           PY
+          python -m pip install --dry-run -r minimum-requirements.txt
           python -m pip install --upgrade --force-reinstall -r minimum-requirements.txt
           python -m pip install --no-deps -e .
       - name: Resolve latest compatible dependencies
         if: matrix.resolution == 'latest'
-        run: python -m pip install --upgrade --upgrade-strategy eager -e '.[dev]'
+        run: python -m pip install --upgrade --upgrade-strategy eager -e '.[all,dev]'
       - name: Run full suite
         run: python -m pytest -q
       - name: Audit resolved dependencies
         run: python -m pip_audit --skip-editable --progress-spinner off
       - name: Record resolved component versions
         run: python -m pip list --format=json > dependency-versions-${{ matrix.resolution }}.json
+      - name: Generate CycloneDX component evidence
+        run: >-
+          python -m pip_audit --skip-editable --progress-spinner off
+          --format cyclonedx-json --output dependency-sbom-${{ matrix.resolution }}.json
       - name: Upload resolved component evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dependency-versions-${{ matrix.resolution }}
-          path: dependency-versions-${{ matrix.resolution }}.json
+          path: |
+            dependency-versions-${{ matrix.resolution }}.json
+            dependency-sbom-${{ matrix.resolution }}.json
+            minimum-requirements.txt
           if-no-files-found: error
