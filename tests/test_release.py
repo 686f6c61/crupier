@@ -191,6 +191,11 @@ def write_release_project(root):
     )
     (root / ".github" / "workflows" / "ci.yml").write_text(
         "name: CI\n"
+        "on:\n"
+        "  push:\n"
+        "    branches: [main]\n"
+        "  pull_request:\n"
+        "  workflow_dispatch:\n"
         "permissions:\n"
         "  contents: read\n"
         "jobs:\n"
@@ -211,6 +216,8 @@ def write_release_project(root):
         "  group: pypi-publish-${{ github.ref }}\n"
         "  cancel-in-progress: false\n"
         "on:\n"
+        "  release:\n"
+        "    types: [published]\n"
         "  workflow_dispatch:\n"
         "    inputs:\n"
         "      confirm_publish:\n"
@@ -229,23 +236,20 @@ def write_release_project(root):
         "          fetch-depth: 0\n"
         "      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7\n"
         "      - name: Verify publish event matches package version\n"
-        "        run: echo GITHUB_EVENT_NAME GITHUB_REF_NAME REQUESTED_VERSION CONFIRM_PUBLISH 'git\", \"fetch\", \"--quiet\", \"origin\", \"main:refs/remotes/origin/main\", \"--tags' 'git\", \"rev-parse\", \"origin/main' 'Publish commit does not match origin/main.'\n"
+        "        run: echo GITHUB_EVENT_NAME GITHUB_REF_NAME REQUESTED_VERSION CONFIRM_PUBLISH 'git\", \"fetch\", \"--quiet\", \"origin\", \"main:refs/remotes/origin/main\", \"--tags' 'git\", \"rev-parse\", \"origin/main' 'Publish commit does not match origin/main.' 'Publishing from draft GitHub Releases is not allowed.' 'Publishing from prerelease GitHub Releases is not allowed.' 'is not the main branch; is not main'\n"
         "        env:\n"
         "          RELEASE_IS_DRAFT: false\n"
         "          RELEASE_IS_PRERELEASE: false\n"
         "          RELEASE_TARGET_COMMITISH: main\n"
-        "      - run: echo 'Publishing from draft GitHub Releases is not allowed.'\n"
-        "      - run: echo 'Publishing from prerelease GitHub Releases is not allowed.'\n"
-        "      - run: echo 'is not the main branch; is not main'\n"
+        "      - run: python -m pytest --cov=crupier --cov-fail-under=95\n"
+        "      - run: python -m ruff check src tests\n"
+        "      - run: python -m mypy src/crupier\n"
+        "      - run: python -m pip_audit --skip-editable --progress-spinner off\n"
         "      - name: Release readiness check\n"
         "        env:\n"
         "          FIRST_PUBLIC_RELEASE_VERSION: \"0.2.0\"\n"
         "        run: |\n"
         "          crupier release check --strict-public --verify-project-urls --check-pypi-name --allow-existing-pypi-project\n"
-        "      - run: python -m pytest --cov=crupier --cov-fail-under=95\n"
-        "      - run: python -m ruff check src tests\n"
-        "      - run: python -m mypy src/crupier\n"
-        "      - run: python -m pip_audit --skip-editable --progress-spinner off\n"
         "      - run: python -m build --sdist --wheel --outdir dist\n"
         "      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7\n"
         "        with:\n"
@@ -652,6 +656,57 @@ def test_release_check_fails_without_strict_publish_workflow(tmp_path):
     assert "python -m mypy src/crupier" in checks["publish_workflow"].evidence["missing_markers"]
     assert "--cov-fail-under=95" in checks["publish_workflow"].evidence["missing_markers"]
     assert "python -m pip_audit --skip-editable --progress-spinner off" in checks["publish_workflow"].evidence["missing_markers"]
+
+
+def test_release_check_rejects_publish_markers_only_in_comments(tmp_path):
+    write_release_project(tmp_path)
+    publish = tmp_path / ".github" / "workflows" / "publish.yml"
+    publish.write_text(
+        "\n".join(f"# {line}" for line in publish.read_text(encoding="utf-8").splitlines()) + "\n",
+        encoding="utf-8",
+    )
+
+    checks = {check.id: check for check in run_release_checks(tmp_path, build=False).checks}
+
+    assert checks["publish_workflow"].status == "fail"
+    assert "valid workflow YAML" in checks["publish_workflow"].evidence["missing_markers"]
+
+
+def test_release_check_rejects_oidc_permission_on_wrong_job(tmp_path):
+    write_release_project(tmp_path)
+    publish = tmp_path / ".github" / "workflows" / "publish.yml"
+    text = publish.read_text(encoding="utf-8")
+    text = text.replace("      id-token: write\n", "      id-token: read\n", 1)
+    text = text.replace(
+        "jobs:\n",
+        "jobs:\n  unrelated:\n    permissions:\n      id-token: write\n    steps: []\n",
+        1,
+    )
+    publish.write_text(text, encoding="utf-8")
+
+    checks = {check.id: check for check in run_release_checks(tmp_path, build=False).checks}
+
+    assert checks["publish_workflow"].status == "fail"
+    assert "      id-token: write" in checks["publish_workflow"].evidence["missing_markers"]
+
+
+def test_release_check_rejects_non_executed_release_gate(tmp_path):
+    write_release_project(tmp_path)
+    publish = tmp_path / ".github" / "workflows" / "publish.yml"
+    text = publish.read_text(encoding="utf-8").replace(
+        "      - name: Release readiness check\n",
+        "      - name: Release readiness check\n        if: false\n",
+        1,
+    )
+    publish.write_text(text, encoding="utf-8")
+
+    checks = {check.id: check for check in run_release_checks(tmp_path, build=False).checks}
+
+    assert checks["publish_workflow"].status == "fail"
+    assert (
+        "crupier release check --strict-public --verify-project-urls --check-pypi-name"
+        in checks["publish_workflow"].evidence["missing_markers"]
+    )
 
 
 def test_release_check_warns_without_contributing_guide(tmp_path):

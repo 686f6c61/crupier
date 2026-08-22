@@ -1158,21 +1158,44 @@ def _ci_check(root: Path) -> ReleaseCheck:
         (root / ".github" / "workflows").glob("*.yaml")
     )
     ci_path = root / ".github" / "workflows" / "ci.yml"
-    ci_text = ci_path.read_text(encoding="utf-8", errors="replace") if ci_path.exists() else ""
-    required_markers = [
-        "permissions:",
-        "contents: read",
-        f"actions/checkout@{_PINNED_GITHUB_ACTIONS['actions/checkout']}",
-        f"actions/setup-python@{_PINNED_GITHUB_ACTIONS['actions/setup-python']}",
-        "python -m pytest",
-        "--cov-fail-under=95",
-        "python -m ruff check src tests",
-        "python -m mypy src/crupier",
-        "python -m pip_audit --skip-editable --progress-spinner off",
-        "crupier release check",
-    ]
-    missing_markers = [marker for marker in required_markers if marker not in ci_text]
-    missing_markers.extend(_workflow_action_pin_issues(ci_text, {"actions/checkout", "actions/setup-python"}))
+    document = _load_workflow_document(ci_path)
+    missing_markers: list[str] = []
+    if document is None:
+        missing_markers.append("valid workflow YAML")
+    else:
+        triggers = _workflow_triggers(document)
+        push_trigger = triggers.get("push")
+        push_branches = push_trigger.get("branches") if isinstance(push_trigger, dict) else None
+        if not isinstance(push_branches, list) or "main" not in push_branches:
+            missing_markers.append("on.push.branches includes main")
+        for trigger in ("pull_request", "workflow_dispatch"):
+            if trigger not in triggers:
+                missing_markers.append(f"on.{trigger}")
+        permissions = document.get("permissions")
+        if not isinstance(permissions, dict) or permissions.get("contents") != "read":
+            missing_markers.append("contents: read")
+        jobs = document.get("jobs")
+        test_job = jobs.get("test") if isinstance(jobs, dict) else None
+        steps = _workflow_steps(test_job)
+        required_actions = {
+            f"actions/checkout@{_PINNED_GITHUB_ACTIONS['actions/checkout']}",
+            f"actions/setup-python@{_PINNED_GITHUB_ACTIONS['actions/setup-python']}",
+        }
+        action_references = {str(step.get("uses")) for step in steps if "uses" in step}
+        missing_markers.extend(sorted(required_actions - action_references))
+        required_commands = [
+            "python -m pytest",
+            "--cov-fail-under=95",
+            "python -m ruff check src tests",
+            "python -m mypy src/crupier",
+            "python -m pip_audit --skip-editable --progress-spinner off",
+            "crupier release check",
+        ]
+        missing_markers.extend(
+            marker for marker in required_commands if _find_enabled_step(steps, run_marker=marker) is None
+        )
+        ci_text = ci_path.read_text(encoding="utf-8", errors="replace")
+        missing_markers.extend(_workflow_action_pin_issues(ci_text, {"actions/checkout", "actions/setup-python"}))
     ok = bool(workflows) and not missing_markers
     return ReleaseCheck(
         id="ci",
@@ -1209,51 +1232,9 @@ def _dependency_updates_check(root: Path) -> ReleaseCheck:
 
 def _publish_workflow_check(root: Path) -> ReleaseCheck:
     path = root / ".github" / "workflows" / "publish.yml"
-    text = path.read_text(encoding="utf-8") if path.exists() else ""
-    required_markers = [
-        "id-token: write",
-        "concurrency:",
-        "pypi-publish-${{ github.ref }}",
-        "cancel-in-progress: false",
-        "environment:",
-        "name: pypi",
-        "url: https://pypi.org/project/crupier/",
-        "    permissions:",
-        "      contents: read",
-        "      id-token: write",
-        "workflow_dispatch:",
-        "confirm_publish",
-        f"actions/checkout@{_PINNED_GITHUB_ACTIONS['actions/checkout']}",
-        "fetch-depth: 0",
-        f"actions/setup-python@{_PINNED_GITHUB_ACTIONS['actions/setup-python']}",
-        "Verify publish event matches package version",
-        "GITHUB_EVENT_NAME",
-        "GITHUB_REF_NAME",
-        "REQUESTED_VERSION",
-        "CONFIRM_PUBLISH",
-        "RELEASE_IS_DRAFT",
-        "RELEASE_IS_PRERELEASE",
-        "RELEASE_TARGET_COMMITISH",
-        "git\", \"fetch\", \"--quiet\", \"origin\", \"main:refs/remotes/origin/main\", \"--tags",
-        "git\", \"rev-parse\", \"origin/main",
-        "Publish commit does not match origin/main.",
-        "Publishing from draft GitHub Releases is not allowed.",
-        "Publishing from prerelease GitHub Releases is not allowed.",
-        "is not the main branch",
-        "is not main",
-        "FIRST_PUBLIC_RELEASE_VERSION",
-        "crupier release check --strict-public --verify-project-urls --check-pypi-name",
-        "--allow-existing-pypi-project",
-        "--cov-fail-under=95",
-        "python -m ruff check src tests",
-        "python -m mypy src/crupier",
-        "python -m pip_audit --skip-editable --progress-spinner off",
-        "python -m build --sdist --wheel --outdir dist",
-        f"actions/upload-artifact@{_PINNED_GITHUB_ACTIONS['actions/upload-artifact']}",
-        "if-no-files-found: error",
-        f"pypa/gh-action-pypi-publish@{_PINNED_GITHUB_ACTIONS['pypa/gh-action-pypi-publish']}",
-    ]
-    missing_markers = [marker for marker in required_markers if marker not in text]
+    document = _load_workflow_document(path)
+    missing_markers = _publish_workflow_semantic_issues(document)
+    text = path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
     missing_markers.extend(_workflow_action_pin_issues(text, set(_PINNED_GITHUB_ACTIONS)))
     ok = path.exists() and not missing_markers
     return ReleaseCheck(
@@ -1286,6 +1267,173 @@ def _workflow_action_pin_issues(text: str, allowed_actions: set[str]) -> list[st
         expected_revision = _PINNED_GITHUB_ACTIONS[action]
         if revision != expected_revision:
             issues.append(f"action is not pinned to the reviewed SHA: {reference}")
+    return issues
+
+
+def _load_workflow_document(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:
+        return None
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, yaml.YAMLError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _workflow_steps(job: Any) -> list[dict[str, Any]]:
+    if not isinstance(job, dict) or not isinstance(job.get("steps"), list):
+        return []
+    return [step for step in job["steps"] if isinstance(step, dict)]
+
+
+def _step_is_enabled(step: Mapping[str, Any]) -> bool:
+    condition = step.get("if", True)
+    if condition is False:
+        return False
+    normalized = str(condition).strip().lower().replace(" ", "")
+    return normalized not in {"false", "${{false}}"}
+
+
+def _find_enabled_step(
+    steps: list[dict[str, Any]],
+    *,
+    run_marker: str | None = None,
+    uses: str | None = None,
+    name: str | None = None,
+) -> int | None:
+    for index, step in enumerate(steps):
+        if not _step_is_enabled(step):
+            continue
+        if run_marker is not None:
+            executable_run = "\n".join(
+                line for line in str(step.get("run", "")).splitlines() if not line.lstrip().startswith("#")
+            )
+            if run_marker not in executable_run:
+                continue
+        if uses is not None and step.get("uses") != uses:
+            continue
+        if name is not None and step.get("name") != name:
+            continue
+        return index
+    return None
+
+
+def _workflow_triggers(document: Mapping[Any, Any]) -> Mapping[str, Any]:
+    triggers = document.get("on", document.get(True, {}))
+    return triggers if isinstance(triggers, dict) else {}
+
+
+def _publish_workflow_semantic_issues(document: dict[str, Any] | None) -> list[str]:
+    if document is None:
+        return ["valid workflow YAML"]
+
+    issues: list[str] = []
+    triggers = _workflow_triggers(document)
+    release_trigger = triggers.get("release")
+    release_types = release_trigger.get("types") if isinstance(release_trigger, dict) else None
+    if not isinstance(release_types, list) or "published" not in release_types:
+        issues.append("on.release.types includes published")
+    manual_trigger = triggers.get("workflow_dispatch")
+    manual_inputs = manual_trigger.get("inputs") if isinstance(manual_trigger, dict) else None
+    if not isinstance(manual_inputs, dict) or "confirm_publish" not in manual_inputs:
+        issues.extend(["workflow_dispatch:", "confirm_publish"])
+
+    concurrency = document.get("concurrency")
+    if not isinstance(concurrency, dict) or concurrency.get("group") != "pypi-publish-${{ github.ref }}":
+        issues.extend(["concurrency:", "pypi-publish-${{ github.ref }}"])
+    if not isinstance(concurrency, dict) or concurrency.get("cancel-in-progress") is not False:
+        issues.append("cancel-in-progress: false")
+
+    jobs = document.get("jobs")
+    publish_job = jobs.get("publish") if isinstance(jobs, dict) else None
+    if not isinstance(publish_job, dict):
+        return [*issues, "jobs.publish"]
+    oidc_jobs = [
+        job
+        for job in jobs.values()
+        if isinstance(job, dict) and isinstance(job.get("permissions"), dict)
+        and job["permissions"].get("id-token") == "write"
+    ]
+    permissions = publish_job.get("permissions")
+    if oidc_jobs != [publish_job] or not isinstance(permissions, dict) or permissions.get("contents") != "read":
+        issues.extend(["    permissions:", "      contents: read", "      id-token: write"])
+
+    environment = publish_job.get("environment")
+    if not isinstance(environment, dict) or environment.get("name") != "pypi":
+        issues.append("name: pypi")
+    if not isinstance(environment, dict) or environment.get("url") != "https://pypi.org/project/crupier/":
+        issues.append("url: https://pypi.org/project/crupier/")
+
+    steps = _workflow_steps(publish_job)
+    checkout = f"actions/checkout@{_PINNED_GITHUB_ACTIONS['actions/checkout']}"
+    setup_python = f"actions/setup-python@{_PINNED_GITHUB_ACTIONS['actions/setup-python']}"
+    upload = f"actions/upload-artifact@{_PINNED_GITHUB_ACTIONS['actions/upload-artifact']}"
+    publish = f"pypa/gh-action-pypi-publish@{_PINNED_GITHUB_ACTIONS['pypa/gh-action-pypi-publish']}"
+    required_steps = [
+        (checkout, _find_enabled_step(steps, uses=checkout)),
+        (setup_python, _find_enabled_step(steps, uses=setup_python)),
+        ("Verify publish event matches package version", _find_enabled_step(steps, name="Verify publish event matches package version")),
+        ("--cov-fail-under=95", _find_enabled_step(steps, run_marker="--cov-fail-under=95")),
+        ("python -m ruff check src tests", _find_enabled_step(steps, run_marker="python -m ruff check src tests")),
+        ("python -m mypy src/crupier", _find_enabled_step(steps, run_marker="python -m mypy src/crupier")),
+        ("python -m pip_audit --skip-editable --progress-spinner off", _find_enabled_step(steps, run_marker="python -m pip_audit --skip-editable --progress-spinner off")),
+        ("crupier release check --strict-public --verify-project-urls --check-pypi-name", _find_enabled_step(steps, run_marker="crupier release check --strict-public --verify-project-urls --check-pypi-name")),
+        ("python -m build --sdist --wheel --outdir dist", _find_enabled_step(steps, run_marker="python -m build --sdist --wheel --outdir dist")),
+        (upload, _find_enabled_step(steps, uses=upload)),
+        (publish, _find_enabled_step(steps, uses=publish)),
+    ]
+    issues.extend(label for label, index in required_steps if index is None)
+    indexes = [index for _, index in required_steps if index is not None]
+    if len(indexes) == len(required_steps) and indexes != sorted(indexes):
+        issues.append("publish validation and action step order")
+
+    verify_index = _find_enabled_step(steps, name="Verify publish event matches package version")
+    verify_step = steps[verify_index] if verify_index is not None else {}
+    verify_text = str(verify_step.get("run", ""))
+    verify_env = verify_step.get("env") if isinstance(verify_step.get("env"), dict) else {}
+    verification_markers = [
+        "GITHUB_EVENT_NAME",
+        "GITHUB_REF_NAME",
+        "REQUESTED_VERSION",
+        "CONFIRM_PUBLISH",
+        "git\", \"fetch\", \"--quiet\", \"origin\", \"main:refs/remotes/origin/main\", \"--tags",
+        "git\", \"rev-parse\", \"origin/main",
+        "Publish commit does not match origin/main.",
+        "Publishing from draft GitHub Releases is not allowed.",
+        "Publishing from prerelease GitHub Releases is not allowed.",
+        "is not the main branch",
+        "is not main",
+    ]
+    issues.extend(marker for marker in verification_markers if marker not in verify_text)
+    for env_name in ("RELEASE_IS_DRAFT", "RELEASE_IS_PRERELEASE", "RELEASE_TARGET_COMMITISH"):
+        if env_name not in verify_env:
+            issues.append(env_name)
+
+    release_index = _find_enabled_step(
+        steps, run_marker="crupier release check --strict-public --verify-project-urls --check-pypi-name"
+    )
+    release_step = steps[release_index] if release_index is not None else {}
+    release_run = str(release_step.get("run", ""))
+    release_env = release_step.get("env") if isinstance(release_step.get("env"), dict) else {}
+    if "FIRST_PUBLIC_RELEASE_VERSION" not in release_env:
+        issues.append("FIRST_PUBLIC_RELEASE_VERSION")
+    if "--allow-existing-pypi-project" not in release_run:
+        issues.append("--allow-existing-pypi-project")
+
+    checkout_index = _find_enabled_step(steps, uses=checkout)
+    checkout_step = steps[checkout_index] if checkout_index is not None else {}
+    checkout_with = checkout_step.get("with") if isinstance(checkout_step.get("with"), dict) else {}
+    if checkout_with.get("fetch-depth") != 0:
+        issues.append("fetch-depth: 0")
+    upload_index = _find_enabled_step(steps, uses=upload)
+    upload_step = steps[upload_index] if upload_index is not None else {}
+    upload_with = upload_step.get("with") if isinstance(upload_step.get("with"), dict) else {}
+    if upload_with.get("if-no-files-found") != "error":
+        issues.append("if-no-files-found: error")
     return issues
 
 
