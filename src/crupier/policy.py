@@ -10,6 +10,7 @@ from .config import CrupierConfig, PolicyRule
 from .constraints import request_allows_parallel
 from .errors import (
     CrupierBudgetExceededError,
+    CrupierConfigError,
     CrupierPolicyError,
     CrupierRouteValidationError,
 )
@@ -43,6 +44,7 @@ class PolicyEngine:
         self.config = config
 
     def filter_candidates(self, request: RequestEnvelope, candidates: list[CapabilityCard]) -> PolicyResult:
+        self._require_well_formed_policy()
         result = PolicyResult()
         deny = {ModelRef.parse(model).key for model in self.config.models.deny}
         constraints = request.constraints
@@ -156,6 +158,16 @@ class PolicyEngine:
             reasons = "; ".join(f"{item.model}: {item.reason}" for item in result.excluded)
             raise CrupierPolicyError(f"No models remain after policy filtering. {reasons}")
         return result
+
+    def _require_well_formed_policy(self) -> None:
+        rules = self.config.policy.rules
+        if not isinstance(rules, list):
+            raise CrupierConfigError("[policy].rules must be an array of rule objects.")
+        for index, rule in enumerate(rules):
+            if not isinstance(rule, PolicyRule):
+                raise CrupierConfigError(
+                    f"[policy].rules[{index}] must be a table/object, not {type(rule).__name__}."
+                )
 
     def validate_route(self, plan: RoutePlan, policy_result: PolicyResult, request: RequestEnvelope) -> None:
         max_calls = int(request.constraints.get("max_calls", self.config.routing.max_calls))

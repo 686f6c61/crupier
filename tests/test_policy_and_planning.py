@@ -6,6 +6,7 @@ from crupier import Crupier
 from crupier.adapters import AdapterResponse, ProviderModel
 from crupier.config import CrupierConfig, PolicyRule, ProviderSettings
 from crupier.errors import (
+    CrupierConfigError,
     CrupierPolicyError,
     CrupierProviderAuthError,
     CrupierRouteValidationError,
@@ -105,6 +106,25 @@ class ConcurrentDiscoveryAdapter:
     def list_models(self):
         self.barrier.wait(timeout=2)
         return [ProviderModel(id=self.model, provider=self.provider)]
+
+
+def test_malformed_deny_policy_cannot_route_a_model(tmp_path):
+    with pytest.raises(CrupierConfigError, match="rules"):
+        CrupierConfig.from_dict(
+            {
+                "project": {"name": "test", "default_profile": "agentic"},
+                "providers": {"openai": {"enabled": True, "env_key": "OPENAI_API_KEY"}},
+                "models": {"allow": ["openai:gpt-5.5"]},
+                "policy": {"rules": ["deny openai:gpt-5.5"]},
+            }
+        )
+    try:
+        client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.5"]))
+        client.config.policy.rules = ["deny openai:gpt-5.5"]  # type: ignore[assignment]
+        client.deal("Route this", dry_run=True)
+    except (CrupierConfigError, CrupierPolicyError, CrupierRouteValidationError, TypeError):
+        return
+    raise AssertionError("malformed deny policy must not produce a route")
 
 
 def test_policy_filters_latest_aliases(tmp_path):

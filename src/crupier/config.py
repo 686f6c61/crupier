@@ -569,13 +569,24 @@ def _experiment_settings_from_dict(data: Any) -> dict[str, ExperimentSettings]:
     return experiments
 
 
-def _policy_settings_from_dict(data: dict[str, Any]) -> PolicySettings:
+def _policy_settings_from_dict(data: Any) -> PolicySettings:
+    if data is None:
+        raise CrupierConfigError("policy must be a table/object.")
     if not isinstance(data, dict):
+        raise CrupierConfigError("policy must be a table/object.")
+    if "rules" not in data:
         return PolicySettings()
-    raw_rules = data.get("rules", [])
+    raw_rules = data.get("rules")
     if not isinstance(raw_rules, list):
-        return PolicySettings()
-    return PolicySettings(rules=[_policy_rule_from_dict(item) for item in raw_rules if isinstance(item, dict)])
+        raise CrupierConfigError("[policy].rules must be an array of rule objects.")
+    rules: list[PolicyRule] = []
+    for index, item in enumerate(raw_rules):
+        if not isinstance(item, dict):
+            raise CrupierConfigError(
+                f"[policy].rules[{index}] must be a table/object, not {type(item).__name__}."
+            )
+        rules.append(_policy_rule_from_dict(item))
+    return PolicySettings(rules=rules)
 
 
 def _policy_rule_from_dict(data: dict[str, Any]) -> PolicyRule:

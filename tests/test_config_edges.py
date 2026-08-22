@@ -74,12 +74,13 @@ def test_scoring_and_policy_parsers_handle_invalid_values() -> None:
     assert "bad" not in parsed.quality_weight
     assert parsed.skill_fit_cap == ScoringSettings().skill_fit_cap
 
-    assert config_module._policy_settings_from_dict([]).rules == []
-    assert config_module._policy_settings_from_dict({"rules": "invalid"}).rules == []
+    with pytest.raises(CrupierConfigError, match="policy must be a table"):
+        config_module._policy_settings_from_dict([])
+    with pytest.raises(CrupierConfigError, match="rules"):
+        config_module._policy_settings_from_dict({"rules": "invalid"})
     settings = config_module._policy_settings_from_dict(
         {
             "rules": [
-                "ignored",
                 {
                     "effect": "deny",
                     "mode": "private",
@@ -228,6 +229,26 @@ def test_scoring_writer_handles_missing_file_appended_section_and_toml_values(tm
     assert "skill_fit_cap = 10" in text
     assert config_module._toml_value(None) == '""'
     assert config_module._toml_value(["one", 2]) == '["one", 2]'
+
+
+@pytest.mark.parametrize("rules", ["deny-all", {"effect": "deny"}, None])
+def test_policy_rules_wrong_shape_fails_closed(rules) -> None:
+    with pytest.raises(CrupierConfigError, match="rules"):
+        CrupierConfig.from_dict({"policy": {"rules": rules}})
+
+
+def test_policy_rejects_non_object_rule_instead_of_skipping_it() -> None:
+    with pytest.raises(CrupierConfigError, match=r"rules\[0\]"):
+        CrupierConfig.from_dict(
+            {
+                "policy": {
+                    "rules": [
+                        "deny openai",
+                        {"effect": "deny", "providers": ["openai"]},
+                    ]
+                }
+            }
+        )
 
 
 def test_custom_host_requires_explicit_opt_in_and_https() -> None:
