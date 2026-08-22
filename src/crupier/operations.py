@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from time import perf_counter
 from typing import TYPE_CHECKING, Any
@@ -30,6 +29,7 @@ from .models import (
 from .orchestrator import DeterministicOrchestrator, ModelOrchestrator
 from .policy import Exclusion
 from .prompts import build_operation_classification_prompt
+from .redaction import redact_text
 from .registry import ModelRegistry
 from .runtime_policy import apply_runtime_policy
 
@@ -946,14 +946,4 @@ def _file_value(value: Any) -> Any:
 
 
 def _redact_planning_text(text: str) -> str:
-    redacted = text
-    for pattern, replacement in _PLANNING_SECRET_REPLACERS:
-        redacted = pattern.sub(replacement, redacted)
-    return redacted
-
-
-_PLANNING_SECRET_REPLACERS = (
-    (re.compile(("s" + "k-") + r"[A-Za-z0-9_\-]{10,}"), "[redacted]"),
-    (re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]{12,}", re.IGNORECASE), r"\1[redacted]"),
-    (re.compile(r"([A-Z][A-Z0-9_]*_API_KEY=)[^\s]+"), r"\1[redacted]"),
-)
+    return redact_text(text)

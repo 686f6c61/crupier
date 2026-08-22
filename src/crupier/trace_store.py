@@ -16,6 +16,7 @@ from typing import Any
 
 from .errors import CrupierError
 from .models import CrupierResult, OperationResult, RequestEnvelope
+from .redaction import redact_text, redact_value
 
 
 @dataclass(slots=True)
@@ -268,13 +269,7 @@ def _route_models(route: dict[str, Any]) -> list[str]:
 
 
 def _redact_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return _redact(value)
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _redact_value(item) for key, item in value.items()}
-    return value
+    return redact_value(value)
 
 
 def _jsonable(value: Any) -> Any:
@@ -292,10 +287,7 @@ def _jsonable(value: Any) -> Any:
 
 
 def _redact(text: str) -> str:
-    redacted = text
-    for pattern, replacement in _SECRET_REPLACERS:
-        redacted = pattern.sub(replacement, redacted)
-    return redacted
+    return redact_text(text)
 
 
 _TRACE_SUMMARY_SALT = "crupier.metadata-trace.v1"
@@ -338,10 +330,3 @@ def _summarize(text: str) -> str:
 
 def _safe_trace_id(trace_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", trace_id)
-
-
-_SECRET_REPLACERS = (
-    (re.compile(("s" + "k-") + r"[A-Za-z0-9_\-]{10,}"), "[redacted]"),
-    (re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]{12,}", re.IGNORECASE), r"\1[redacted]"),
-    (re.compile(r"([A-Z][A-Z0-9_]*_API_KEY=)[^\s]+"), r"\1[redacted]"),
-)

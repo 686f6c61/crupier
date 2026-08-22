@@ -18,6 +18,7 @@ from uuid import uuid4
 
 from .errors import CrupierError
 from .models import ModelRef
+from .redaction import redact_text
 
 VERDICTS = {"accept", "reject", "needs_work", "unknown"}
 
@@ -800,14 +801,4 @@ def _truncate_note(note: str) -> str:
 
 
 def _redact(text: str) -> str:
-    redacted = text
-    for pattern, replacement in _SECRET_REPLACERS:
-        redacted = pattern.sub(replacement, redacted)
-    return redacted
-
-
-_SECRET_REPLACERS = (
-    (re.compile(("s" + "k-") + r"[A-Za-z0-9_\-]{10,}"), "[redacted]"),
-    (re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]{12,}", re.IGNORECASE), r"\1[redacted]"),
-    (re.compile(r"([A-Z][A-Z0-9_]*_API_KEY=)[^\s]+"), r"\1[redacted]"),
-)
+    return redact_text(text)

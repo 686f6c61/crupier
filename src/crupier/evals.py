@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import RoutePlan
+from .redaction import redact_value
 
 BUILTIN_ROUTING_EVALS: list[dict[str, Any]] = [
     {
@@ -759,7 +760,7 @@ def write_eval_report(root: Path, report: EvalRunReport) -> Path:
     runs_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = runs_dir / f"routing_{timestamp}.json"
-    path.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(redact_value(report.to_dict()), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
 
 
@@ -768,7 +769,7 @@ def write_compare_report(root: Path, report: CompareRunReport) -> Path:
     runs_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = runs_dir / f"compare_{timestamp}.json"
-    path.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(redact_value(report.to_dict()), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
 
 
@@ -777,7 +778,7 @@ def write_compare_dataset_report(root: Path, report: CompareDatasetReport) -> Pa
     runs_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     path = runs_dir / f"compare_dataset_{timestamp}.json"
-    path.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(redact_value(report.to_dict()), indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return path
 
 
@@ -798,7 +799,7 @@ def write_compare_history(root: Path, report: CompareDatasetReport) -> Path:
         "model_scores": [score.to_dict() for score in report.model_scores],
     }
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, sort_keys=True) + "\n")
+        handle.write(json.dumps(redact_value(record), sort_keys=True) + "\n")
     return path
 
 

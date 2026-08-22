@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
@@ -18,6 +17,7 @@ from uuid import uuid4
 from .config import ExperimentSettings
 from .errors import CrupierError
 from .models import CrupierResult, ExperimentObservation
+from .redaction import redact_text
 from .state import SQLiteStateStore
 from .tools import normalize_tools
 
@@ -1188,15 +1188,5 @@ def _validated_checks(checks: Any) -> dict[str, Any]:
     return dict(decoded)
 
 
-_SECRET_REPLACERS = (
-    (re.compile(("s" + "k-") + r"[A-Za-z0-9_\-]{10,}"), "[redacted]"),
-    (re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]{12,}", re.IGNORECASE), r"\1[redacted]"),
-    (re.compile(r"([A-Z][A-Z0-9_]*_API_KEY=)[^\s]+"), r"\1[redacted]"),
-)
-
-
 def _redact(message: str) -> str:
-    redacted = message
-    for pattern, replacement in _SECRET_REPLACERS:
-        redacted = pattern.sub(replacement, redacted)
-    return redacted[:4_000]
+    return redact_text(message)[:4_000]

@@ -1,8 +1,13 @@
 import json
+from pathlib import Path
+
+import pytest
 
 from crupier import Crupier
 from crupier.cli import main
 from crupier.config import CrupierConfig, write_default_project
+from crupier.errors import CrupierProviderUnavailableError
+from crupier.redaction import redact_text, redact_value
 
 
 def make_config(tmp_path):
@@ -144,3 +149,118 @@ def test_cli_trace_commands(tmp_path, capsys):
     capsys.readouterr()
     assert main(["--project", str(tmp_path), "trace", "list", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == []
+
+
+PROVIDER_SECRETS = [
+    ("openai", "sk-proj-abcdefghijklmnopqrstuvwxyz012345"),
+    ("anthropic", "sk-ant-api03-abcdefghijklmnopqrstuvwxyz012345"),
+    ("google", "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"),
+    ("ollama", "ollama_live_abcdefghijklmnopqrstuvwxyz012345"),
+    ("openrouter", "sk-or-v1-" + "ab" * 32),
+    ("nan", "nan_live_abcdefghijklmnopqrstuvwxyz012345"),
+    ("aws", "AKIAIOSFODNN7EXAMPLE"),
+    ("bearer", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signaturelong"),
+]
+
+
+@pytest.mark.parametrize(("provider", "secret"), PROVIDER_SECRETS)
+def test_central_redactor_covers_supported_provider_key_formats(provider: str, secret: str) -> None:
+    redacted = redact_text(f"{provider} credential {secret} stays hidden")
+    assert secret not in redacted
+    assert "[redacted]" in redacted
+
+
+def test_structural_redactor_blocks_secret_field_names_case_insensitively() -> None:
+    payload = {
+        "Authorization": "secret-header-value",
+        "nested": {
+            "X-Api-Key": "nested-api-key-value",
+            "Password": "hunter2-secret",
+            "headers": {"cookie": "session=abc123secret"},
+        },
+    }
+    redacted = redact_value(payload)
+    serialized = json.dumps(redacted)
+    for secret in ("secret-header-value", "nested-api-key-value", "hunter2-secret", "session=abc123secret"):
+        assert secret not in serialized
+    assert redacted["Authorization"] == "[redacted]"
+    assert redacted["nested"]["X-Api-Key"] == "[redacted]"
+    assert redacted["nested"]["Password"] == "[redacted]"
+    assert redacted["nested"]["headers"]["cookie"] == "[redacted]"
+
+
+class _SecretFailAdapter:
+    provider = "openai"
+
+    def generate(self, *, model, prompt, request):
+        del model, prompt, request
+        raise CrupierProviderUnavailableError(
+            "upstream rejected AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"
+        )
+
+
+def test_trace_feedback_eval_and_experiment_use_same_redactor(tmp_path) -> None:
+    secret = "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"
+    config = CrupierConfig.from_dict(
+        {
+            "project": {"name": "redact-artifacts", "default_profile": "agentic"},
+            "providers": {"openai": {"enabled": True, "env_key": "OPENAI_API_KEY"}},
+            "models": {"allow": ["openai:gpt-5.4-mini", "openai:gpt-5.5"]},
+            "routing": {
+                "default_strategy": "single",
+                "require_operational_providers": False,
+                "max_provider_retries": 0,
+            },
+            "experiments": {
+                "shadow-sync": {
+                    "traffic": "shadow",
+                    "sample_rate": 1.0,
+                    "execution": "sync",
+                    "candidate_models": ["openai:gpt-5.4-mini"],
+                }
+            },
+        }
+    )
+    config.root = tmp_path
+    client = Crupier(config, adapters={"openai": _SecretFailAdapter()})
+
+    client.deal(
+        f"Plan with {secret}",
+        constraints={"store_trace": True, "store_prompt": True},
+        dry_run=True,
+        trace="summary",
+    )
+    trace_blob = json.dumps(client.traces.read(client.traces.list()[0].trace_id))
+
+    feedback = client.feedback.record(
+        project=client.config.project.name,
+        models=["openai:gpt-5.4-mini"],
+        rating=3,
+        note=f"reviewer pasted {secret}",
+    )
+    feedback_blob = json.dumps(feedback.to_dict())
+
+    eval_report = client.evals.compare(task=f"Compare {secret}", write_report=True, dry_run=True)
+    eval_blob = Path(eval_report.written_path).read_text(encoding="utf-8")
+
+    try:
+        client.deal(
+            "Run experiment",
+            constraints={"force_model": "openai:gpt-5.5"},
+            dry_run=False,
+            experiment="shadow-sync",
+        )
+    except CrupierProviderUnavailableError:
+        pass
+    experiment_blob = json.dumps(
+        [record.to_dict() for record in client.experiments.store.list("experiment_observation", limit=100)]
+    )
+
+    for name, blob in (
+        ("trace", trace_blob),
+        ("feedback", feedback_blob),
+        ("eval", eval_blob),
+        ("experiment", experiment_blob),
+    ):
+        assert secret not in blob, name
+        assert "[redacted]" in blob, name
