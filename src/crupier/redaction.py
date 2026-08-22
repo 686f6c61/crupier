@@ -30,14 +30,22 @@ _SECRET_FIELD_TOKENS = frozenset(
 
 _SK_PREFIX = "s" + "k-"
 _DEFAULT_PATTERN_SPECS: tuple[tuple[str, str, int], ...] = (
+    (r"(https?://)[^\s/:@]+:[^\s/@]+@", r"\1" + REPLACEMENT + "@", re.IGNORECASE),
     (_SK_PREFIX + r"[A-Za-z0-9_\-]{10,}", REPLACEMENT, 0),
     (r"AIza[0-9A-Za-z\-_]{20,}", REPLACEMENT, 0),
     (r"AKIA[0-9A-Z]{16}", REPLACEMENT, 0),
     (r"ollama_[A-Za-z0-9_\-]{16,}", REPLACEMENT, 0),
     (r"nan_[A-Za-z0-9_\-]{16,}", REPLACEMENT, 0),
+    (r"\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b", REPLACEMENT, 0),
     (r"(Bearer\s+)[A-Za-z0-9._\-]{12,}", r"\1" + REPLACEMENT, re.IGNORECASE),
     (r"([A-Z][A-Z0-9_]*_API_KEY=)[^\s]+", r"\1" + REPLACEMENT, 0),
+    (
+        r"((?:authorization|x-api-key|api-key|api_key|client-secret|access-token)\s*[:=]\s*)[^\s,;]+",
+        r"\1" + REPLACEMENT,
+        re.IGNORECASE,
+    ),
     (r"(?i)(aws_secret_access_key\s*[=:]\s*)[A-Za-z0-9/+=]{30,}", r"\1" + REPLACEMENT, 0),
+    (r"\b(?=[A-Za-z0-9/+=]{40}\b)(?=[A-Za-z0-9/+=]*[/+=])[A-Za-z0-9/+=]{40}\b", REPLACEMENT, 0),
 )
 _DEFAULT_PATTERNS = tuple(
     (re.compile(pattern, flags), replacement) for pattern, replacement, flags in _DEFAULT_PATTERN_SPECS

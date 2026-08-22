@@ -50,6 +50,16 @@ class AuthFailAdapter(FakeAdapter):
         )
 
 
+class GoogleSecretFailAdapter(FakeAdapter):
+    def generate(self, *, model, prompt, request):
+        del model, prompt, request
+        raise CrupierProviderAuthError(
+            "Provider rejected AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe",
+            provider="google",
+            env_key="GOOGLE_API_KEY",
+        )
+
+
 class FakeOperationAdapter:
     provider = "nan"
 
@@ -539,6 +549,23 @@ def test_provider_auth_error_maps_to_401_and_redacts_secret(tmp_path):
         assert "test-secret-value" not in data["error"]["message"]
 
     with_server(tmp_path, run, adapter=AuthFailAdapter())
+
+
+def test_server_error_message_uses_central_redactor(tmp_path):
+    secret = "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"
+
+    def run(address):
+        status, _, data = request_json(
+            address,
+            "POST",
+            "/v1/responses",
+            {"model": "gpt-5.4-mini", "input": "Hello"},
+        )
+        assert status == 401
+        assert secret not in data["error"]["message"]
+        assert "[redacted]" in data["error"]["message"]
+
+    with_server(tmp_path, run, adapter=GoogleSecretFailAdapter())
 
 
 def test_embeddings_endpoint_returns_openai_like_json(tmp_path):

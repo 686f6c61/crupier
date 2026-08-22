@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Callable, Iterator
 from email import policy
 from email.parser import BytesParser
@@ -34,6 +33,7 @@ from .errors import (
     CrupierToolApprovalRequired,
     CrupierUpdateRequiresConfirmation,
 )
+from .redaction import redact_text
 
 _OPENAI_HTTP_ALLOWED_FIELDS = {
     "/v1/responses": frozenset(
@@ -566,7 +566,7 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         self._write_json(
             {
                 "error": {
-                    "message": _sanitize_error_message(message),
+                    "message": redact_text(message),
                     "type": error_type,
                     "param": param,
                     "code": code,
@@ -733,7 +733,7 @@ def _openai_error_payload(exc: Exception) -> dict[str, Any]:
         message = "Internal server error."
     payload: dict[str, Any] = {
         "error": {
-            "message": _sanitize_error_message(message),
+            "message": redact_text(message),
             "type": error_type,
             "param": None,
             "code": code,
@@ -745,20 +745,3 @@ def _openai_error_payload(exc: Exception) -> dict[str, Any]:
             "trace_id": exc.trace_id,
         }
     return payload
-
-
-_SECRET_PATTERNS = (
-    re.compile(("s" + "k-") + r"[A-Za-z0-9_\-]{10,}"),
-    re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]{12,}", re.IGNORECASE),
-    re.compile(r"([A-Z][A-Z0-9_]*_API_KEY=)[^\s]+"),
-)
-
-
-def _sanitize_error_message(message: str) -> str:
-    sanitized = message
-    for pattern in _SECRET_PATTERNS:
-        if pattern.pattern.startswith("("):
-            sanitized = pattern.sub(r"\1[redacted]", sanitized)
-        else:
-            sanitized = pattern.sub("[redacted]", sanitized)
-    return sanitized

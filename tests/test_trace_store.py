@@ -12,6 +12,7 @@ from crupier.config import CrupierConfig, write_default_project
 from crupier.errors import CrupierProviderUnavailableError
 from crupier.models import PlanningContext, RequestEnvelope
 from crupier.orchestrator import ModelOrchestrator
+from crupier.project_audit import _canary_error
 from crupier.redaction import redact_text, redact_value
 
 
@@ -402,6 +403,33 @@ PROVIDER_SECRETS = [
 @pytest.mark.parametrize(("provider", "secret"), PROVIDER_SECRETS)
 def test_central_redactor_covers_supported_provider_key_formats(provider: str, secret: str) -> None:
     redacted = redact_text(f"{provider} credential {secret} stays hidden")
+    assert secret not in redacted
+    assert "[redacted]" in redacted
+
+
+def test_project_audit_report_uses_central_redactor() -> None:
+    secret = "AIzaSyDaGmWKa4JsXZHjGw7ISLn_3namBGewQe"
+    report_error = _canary_error(
+        "provider.generate",
+        "generate",
+        "google:gemini-2.5-flash",
+        CrupierProviderUnavailableError(secret),
+    )
+    assert secret not in report_error["error"]
+    assert report_error["error"] == "[redacted]"
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "https://user:pass@host.example/path",
+        "X-Api-Key: prose-secret-value",
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturevalue",
+    ],
+)
+def test_central_redactor_covers_url_credentials_header_values_and_jwt(secret: str) -> None:
+    redacted = redact_text(f"upstream returned {secret} in diagnostics")
     assert secret not in redacted
     assert "[redacted]" in redacted
 

@@ -25,6 +25,7 @@ from .errors import CrupierError
 from .models import ModelRef
 from .orchestrator import ModelOrchestrator
 from .planner import RoutePlanner
+from .redaction import redact_text
 
 REAL_PROVIDER_CHOICES = ("openai", "anthropic", "google", "ollama", "openrouter")
 DEFAULT_PROVIDER_ENV_KEYS = {
@@ -613,7 +614,7 @@ class ProjectAuditRunner:
                             status="fail" if real else "warn",
                             severity="high" if real else "medium",
                             summary=f"{provider} readiness check failed.",
-                            evidence={"error": _redact_secrets(str(exc))},
+                            evidence={"error": redact_text(str(exc))},
                         )
                     )
         return checks
@@ -660,7 +661,7 @@ class ProjectAuditRunner:
                         id=case["id"],
                         task=case["task"],
                         status="fail",
-                        error=_redact_secrets(str(exc)),
+                        error=redact_text(str(exc)),
                         human_questions=list(case["human_questions"]),
                     )
                 )
@@ -1422,7 +1423,7 @@ def record_adoption_signoff(
         "project": project,
         "verdict": normalized,
         "reviewer_hash": reviewer_hash,
-        "note": _redact_secrets(" ".join(str(note or "").split())[:1000]),
+        "note": redact_text(" ".join(str(note or "").split())[:1000]),
         "handoff": str(handoff) if handoff else None,
         "adoption_path": adoption_path,
     }
@@ -2011,7 +2012,7 @@ def import_code_comment_decisions(
                 "priority": comment.priority,
                 "category": comment.category,
                 "verdict": verdict,
-                "note": _redact_secrets(" ".join(str(item.get("note") or "").split())[:500]),
+                "note": redact_text(" ".join(str(item.get("note") or "").split())[:500]),
             }
         )
 
@@ -2024,7 +2025,7 @@ def import_code_comment_decisions(
         "source": "code_comment_decisions",
         "created_at": created_at,
         "reviewer_hash": reviewer_hash,
-        "note": _redact_secrets(" ".join(str(note or "").split())[:1000]),
+        "note": redact_text(" ".join(str(note or "").split())[:1000]),
         "decision_file": str(path),
         "comment_count": len(reviewed),
         "comment_fingerprints": list(reviewed),
@@ -2071,7 +2072,7 @@ def acknowledge_code_comments(
         "review_id": review_id,
         "created_at": created_at,
         "reviewer_hash": reviewer_hash,
-        "note": _redact_secrets(" ".join(str(note or "").split())[:1000]),
+        "note": redact_text(" ".join(str(note or "").split())[:1000]),
         "comment_count": len(comments),
         "comment_fingerprints": [_code_comment_fingerprint(comment) for comment in comments],
         "comments": [
@@ -3275,22 +3276,8 @@ def _canary_error(canary_id: str, kind: str, model_ref: str, exc: Exception) -> 
         "ok": False,
         "model": model_ref,
         "error_type": exc.__class__.__name__,
-        "error": _redact_secrets(str(exc)),
+        "error": redact_text(str(exc)),
     }
-
-
-_SECRET_REPLACERS = (
-    (re.compile(("s" + "k-") + r"[A-Za-z0-9_\-]{10,}"), "[redacted]"),
-    (re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]{12,}", re.IGNORECASE), r"\1[redacted]"),
-    (re.compile(r"([A-Z][A-Z0-9_]*_API_KEY=)[^\s]+"), r"\1[redacted]"),
-)
-
-
-def _redact_secrets(message: str) -> str:
-    redacted = message
-    for pattern, replacement in _SECRET_REPLACERS:
-        redacted = pattern.sub(replacement, redacted)
-    return redacted
 
 
 def ensure_audit_ok(report: ProjectAuditReport) -> None:
