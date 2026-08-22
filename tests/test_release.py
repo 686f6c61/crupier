@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from urllib.error import HTTPError
 
 import yaml
+from _synthetic_secrets import SYNTHETIC_GOOGLE_API_KEY
 
 from crupier.cli import main
 from crupier.release import (
@@ -22,6 +23,7 @@ from crupier.release import (
     _public_model_examples_check,
     _public_release_language_check,
     _public_repository_surface_check,
+    _public_secret_scan_check,
     _runtime_safety_defaults_check,
     _sdist_examples_smoke,
     _sdist_install_smoke,
@@ -462,6 +464,36 @@ def test_release_check_fails_when_public_file_contains_provider_secret(tmp_path)
     assert finding["pattern"] == "openai_api_key"
     assert isinstance(finding["line"], int)
     assert secret not in json.dumps(checks["public_secret_scan"].to_dict())
+
+
+def test_public_secret_scan_allows_exact_known_example_token(tmp_path, monkeypatch):
+    (tmp_path / "fixture.py").write_text(SYNTHETIC_GOOGLE_API_KEY, encoding="utf-8")
+    monkeypatch.setattr(
+        "crupier.release._git_tracked_files",
+        lambda root, include_untracked=False: [Path("fixture.py")],
+    )
+
+    check = _public_secret_scan_check(tmp_path)
+
+    assert check.status == "pass"
+    assert check.evidence["finding_count"] == 0
+
+
+def test_public_secret_scan_rejects_changed_known_example_token(tmp_path, monkeypatch):
+    changed_token = f"{SYNTHETIC_GOOGLE_API_KEY[:-1]}f"
+    (tmp_path / "fixture.py").write_text(changed_token, encoding="utf-8")
+    monkeypatch.setattr(
+        "crupier.release._git_tracked_files",
+        lambda root, include_untracked=False: [Path("fixture.py")],
+    )
+
+    check = _public_secret_scan_check(tmp_path)
+
+    assert check.status == "fail"
+    assert check.evidence["finding_count"] == 1
+    assert check.evidence["findings"] == [
+        {"path": "fixture.py", "line": 1, "pattern": "google_api_key"}
+    ]
 
 
 def test_release_check_ignores_local_env_file_without_git_tracking(tmp_path):
