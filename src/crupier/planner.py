@@ -26,7 +26,7 @@ class RoutePlanner:
         candidates: list[CapabilityCard],
         filters_applied: list[str],
     ) -> PlanningContext:
-        limit = int(request.constraints.get("selection_trace_limit", 5))
+        limit = request.constraints.get("selection_trace_limit", 5)
         deterministic_scores = [
             score.to_dict() for score in self.selector.score_all(request, candidates)[:limit]
         ]

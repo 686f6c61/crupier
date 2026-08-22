@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from typing import Any
 
 from .config import CrupierConfig
@@ -122,19 +124,55 @@ BOOLEAN_CONSTRAINTS = frozenset(
     }
 )
 
-POSITIVE_INTEGER_CONSTRAINTS = frozenset(
-    {
-        "approval_ttl_seconds",
-        "max_cell_chars",
-        "max_document_tables",
-        "max_file_bytes",
-        "max_file_context_chars",
-        "max_pdf_pages",
-        "max_table_columns",
-        "max_table_rows",
-        "max_table_sheets",
-    }
-)
+@dataclass(frozen=True, slots=True)
+class _NumericConstraint:
+    integer: bool
+    minimum: int | float
+    maximum: int | float | None = None
+    minimum_inclusive: bool = True
+
+
+_POSITIVE_INTEGER = _NumericConstraint(integer=True, minimum=1)
+_NON_NEGATIVE_INTEGER = _NumericConstraint(integer=True, minimum=0)
+_POSITIVE_NUMBER = _NumericConstraint(integer=False, minimum=0, minimum_inclusive=False)
+_NON_NEGATIVE_NUMBER = _NumericConstraint(integer=False, minimum=0)
+
+NUMERIC_CONSTRAINTS: dict[str, _NumericConstraint] = {
+    "approval_ttl_seconds": _POSITIVE_INTEGER,
+    "cascade_min_output_chars": _NON_NEGATIVE_INTEGER,
+    "max_calls": _POSITIVE_INTEGER,
+    "max_cell_chars": _POSITIVE_INTEGER,
+    "max_cost_usd": _NON_NEGATIVE_NUMBER,
+    "max_depth": _NON_NEGATIVE_INTEGER,
+    "max_document_tables": _POSITIVE_INTEGER,
+    "max_file_bytes": _POSITIVE_INTEGER,
+    "max_file_context_chars": _POSITIVE_INTEGER,
+    "max_latency_ms": _POSITIVE_INTEGER,
+    "max_native_file_bytes": _POSITIVE_INTEGER,
+    "max_output_tokens": _POSITIVE_INTEGER,
+    "max_panel_size": _POSITIVE_INTEGER,
+    "max_parallel_models": _POSITIVE_INTEGER,
+    "max_pdf_pages": _POSITIVE_INTEGER,
+    "max_provider_retries": _NON_NEGATIVE_INTEGER,
+    "max_table_columns": _POSITIVE_INTEGER,
+    "max_table_rows": _POSITIVE_INTEGER,
+    "max_table_sheets": _POSITIVE_INTEGER,
+    "max_tokens": _POSITIVE_INTEGER,
+    "max_tool_calls_per_round": _POSITIVE_INTEGER,
+    "max_tool_result_chars": _POSITIVE_INTEGER,
+    "max_tool_rounds": _POSITIVE_INTEGER,
+    "min_panel_size": _POSITIVE_INTEGER,
+    "ocr_timeout_seconds": _POSITIVE_NUMBER,
+    "orchestrator_candidate_limit": _POSITIVE_INTEGER,
+    "retry_backoff_seconds": _NON_NEGATIVE_NUMBER,
+    "retry_jitter_seconds": _NON_NEGATIVE_NUMBER,
+    "selection_trace_limit": _POSITIVE_INTEGER,
+    "temperature": _NumericConstraint(integer=False, minimum=0, maximum=2),
+    "thinking_budget": _NON_NEGATIVE_INTEGER,
+    "timeout": _POSITIVE_NUMBER,
+    "timeout_seconds": _POSITIVE_NUMBER,
+    "top_p": _NumericConstraint(integer=False, minimum=0, maximum=1),
+}
 
 
 def validate_request_constraints(
@@ -148,12 +186,8 @@ def validate_request_constraints(
         if not isinstance(constraints[key], bool):
             raise CrupierRouteValidationError(f"Constraint {key!r} must be a boolean.")
 
-    for key in sorted(POSITIVE_INTEGER_CONSTRAINTS.intersection(constraints)):
-        value = constraints[key]
-        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-            raise CrupierRouteValidationError(
-                f"Constraint {key!r} must be an integer greater than zero."
-            )
+    for key in sorted(NUMERIC_CONSTRAINTS.keys() & constraints.keys()):
+        constraints[key] = _validate_numeric_constraint(key, constraints[key])
 
     if constraints.get("requires_tools") and not has_tools:
         raise CrupierRouteValidationError(
@@ -172,6 +206,30 @@ def validate_request_constraints(
     if constraints.get("strict_constraints"):
         raise CrupierRouteValidationError(message)
     return [message]
+
+
+def _validate_numeric_constraint(key: str, value: Any) -> int | float:
+    spec = NUMERIC_CONSTRAINTS[key]
+    if isinstance(value, bool) or not isinstance(value, int if spec.integer else int | float):
+        expected = "an integer" if spec.integer else "a number"
+        raise CrupierRouteValidationError(f"Constraint {key!r} must be {expected}.")
+
+    normalized = value if spec.integer else float(value)
+    if not spec.integer and not math.isfinite(normalized):
+        raise CrupierRouteValidationError(f"Constraint {key!r} must be finite.")
+    below_minimum = (
+        normalized < spec.minimum
+        if spec.minimum_inclusive
+        else normalized <= spec.minimum
+    )
+    if below_minimum or spec.maximum is not None and normalized > spec.maximum:
+        interval_start = "[" if spec.minimum_inclusive else "("
+        interval_end = "]" if spec.maximum is not None else ")"
+        maximum = str(spec.maximum) if spec.maximum is not None else "infinity"
+        raise CrupierRouteValidationError(
+            f"Constraint {key!r} must be within {interval_start}{spec.minimum}, {maximum}{interval_end}."
+        )
+    return normalized
 
 
 def request_allows_parallel(config: CrupierConfig, request: RequestEnvelope) -> bool:

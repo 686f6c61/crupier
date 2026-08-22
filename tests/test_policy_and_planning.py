@@ -461,6 +461,70 @@ def test_route_planner_builds_orchestrator_context(tmp_path):
     assert context.metadata["configured_orchestrator_fallback_model"] is None
 
 
+@pytest.mark.parametrize(
+    ("constraint", "outside_range"),
+    [
+        ("approval_ttl_seconds", 0),
+        ("cascade_min_output_chars", -1),
+        ("max_calls", 0),
+        ("max_cell_chars", 0),
+        ("max_cost_usd", -0.01),
+        ("max_depth", -1),
+        ("max_document_tables", 0),
+        ("max_file_bytes", 0),
+        ("max_file_context_chars", 0),
+        ("max_latency_ms", 0),
+        ("max_native_file_bytes", 0),
+        ("max_output_tokens", 0),
+        ("max_panel_size", 0),
+        ("max_parallel_models", 0),
+        ("max_pdf_pages", 0),
+        ("max_provider_retries", -1),
+        ("max_table_columns", 0),
+        ("max_table_rows", 0),
+        ("max_table_sheets", 0),
+        ("max_tokens", 0),
+        ("max_tool_calls_per_round", 0),
+        ("max_tool_result_chars", 0),
+        ("max_tool_rounds", 0),
+        ("min_panel_size", 0),
+        ("ocr_timeout_seconds", 0),
+        ("orchestrator_candidate_limit", 0),
+        ("retry_backoff_seconds", -0.01),
+        ("retry_jitter_seconds", -0.01),
+        ("selection_trace_limit", 0),
+        ("temperature", 2.01),
+        ("thinking_budget", -1),
+        ("timeout", 0),
+        ("timeout_seconds", 0),
+        ("top_p", 1.01),
+    ],
+)
+def test_supported_numeric_constraints_reject_invalid_types_at_boundary(
+    tmp_path, constraint, outside_range
+):
+    client = Crupier(make_config(tmp_path, allow=["openai:gpt-5.4-mini"]))
+
+    for invalid in ("1", True, outside_range):
+        with pytest.raises(CrupierRouteValidationError, match=constraint):
+            client.prepare("Route this", constraints={constraint: invalid})
+
+
+def test_selection_trace_limit_is_normalized_once(tmp_path):
+    client = Crupier(
+        make_config(
+            tmp_path,
+            allow=["openai:gpt-5.5", "anthropic:claude-opus-4-8"],
+        )
+    )
+
+    prepared = client.prepare("Compare models", constraints={"selection_trace_limit": 1})
+
+    assert prepared.request.constraints["selection_trace_limit"] == 1
+    assert type(prepared.request.constraints["selection_trace_limit"]) is int
+    assert len(prepared.plan.selection_scores) == 1
+
+
 def test_deterministic_orchestrator_matches_route_planner_facade(tmp_path):
     config = make_config(tmp_path, allow=["openai:gpt-5.5", "anthropic:claude-opus-4-8"])
     request = RequestEnvelope(task="Compare architectures", mode="research")

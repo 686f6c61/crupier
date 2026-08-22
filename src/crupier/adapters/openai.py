@@ -51,7 +51,7 @@ class OpenAIAdapter:
             native_payloads = native_file_payloads(
                 request.files,
                 allowed_kinds={"image", "pdf"},
-                max_bytes=int(request.constraints.get("max_native_file_bytes", 20_000_000)),
+                max_bytes=request.constraints.get("max_native_file_bytes", 20_000_000),
             )
             content: list[dict[str, Any]] = [{"type": "input_text", "text": input_payload}]
             for item in native_payloads:
@@ -171,7 +171,7 @@ class OpenAIAdapter:
         payload = {
             "model": model,
             "input": 'Return {"ok": true, "probe": "crupier"} using the provided schema.',
-            "max_output_tokens": int(request.constraints.get("max_output_tokens", 128)),
+            "max_output_tokens": request.constraints.get("max_output_tokens", 128),
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -212,7 +212,7 @@ class OpenAIAdapter:
         payload = {
             "model": model,
             "input": "Call the crupier_probe_tool with ok=true.",
-            "max_output_tokens": int(request.constraints.get("max_output_tokens", 128)),
+            "max_output_tokens": request.constraints.get("max_output_tokens", 128),
             "tools": [
                 {
                     "type": "function",
@@ -254,7 +254,7 @@ class OpenAIAdapter:
             payload: dict[str, Any] = {
                 "model": model,
                 "input": 'Reply with exactly: "stream-ok"',
-                "max_output_tokens": int(request.constraints.get("max_output_tokens", 256)),
+                "max_output_tokens": request.constraints.get("max_output_tokens", 256),
                 "stream": True,
             }
             timeout = request_timeout_seconds(request)

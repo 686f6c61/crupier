@@ -366,7 +366,7 @@ class DeterministicOrchestrator:
         if context.deterministic_scores:
             plan.selection_scores = list(context.deterministic_scores)
             return
-        limit = int(context.request.constraints.get("selection_trace_limit", 5))
+        limit = context.request.constraints.get("selection_trace_limit", 5)
         plan.selection_scores = [
             score.to_dict() for score in self.selector.score_all(context.request, context.candidates)[:limit]
         ]
@@ -436,13 +436,9 @@ class DeterministicOrchestrator:
             return self._latency_estimate([card]) if card is not None else 15000
 
         if request is not None and request.tools:
-            try:
-                max_rounds = max(
-                    1,
-                    int(request.constraints.get("max_tool_rounds", self.config.routing.max_tool_rounds)),
-                )
-            except (TypeError, ValueError):
-                max_rounds = self.config.routing.max_tool_rounds
+            max_rounds = request.constraints.get(
+                "max_tool_rounds", self.config.routing.max_tool_rounds
+            )
             tool_model = plan.models[0] if plan.models else None
             tool_total = estimate(tool_model) * (max_rounds + 1)
             if plan.strategy == "critique_repair":
@@ -494,9 +490,8 @@ class DeterministicOrchestrator:
 
     @staticmethod
     def _panel_size(request: RequestEnvelope, candidates: list[CapabilityCard]) -> int:
-        try:
-            requested = int(request.constraints.get("max_panel_size", 3))
-        except (TypeError, ValueError):
+        requested = request.constraints.get("max_panel_size", 3)
+        if isinstance(requested, bool) or not isinstance(requested, int):
             requested = 3
         return max(1, min(requested, len(candidates)))
 
@@ -512,10 +507,9 @@ class DeterministicOrchestrator:
 
     def _max_depth(self, request: RequestEnvelope) -> int:
         value = request.constraints.get("max_depth", self.config.routing.max_depth)
-        try:
-            return max(0, int(value))
-        except (TypeError, ValueError):
-            return max(0, int(self.config.routing.max_depth))
+        if isinstance(value, bool) or not isinstance(value, int):
+            return self.config.routing.max_depth
+        return value
 
 
 class ModelOrchestrator:
@@ -742,7 +736,9 @@ class ModelOrchestrator:
             ],
             planning_keys,
         )
-        payload["max_calls"] = int(context.request.constraints.get("max_calls", self.config.routing.max_calls))
+        payload["max_calls"] = context.request.constraints.get(
+            "max_calls", self.config.routing.max_calls
+        )
         required_strategy = self._profile_strategy(context)
         sensitive_strategies = self._sensitive_allowed_strategies(context)
         if required_strategy:
@@ -777,14 +773,11 @@ class ModelOrchestrator:
         return payload
 
     def _planning_candidates(self, context: PlanningContext) -> list[CapabilityCard]:
-        try:
-            requested_limit = int(
-                context.request.constraints.get(
-                    "orchestrator_candidate_limit",
-                    self.config.orchestrator.candidate_limit,
-                )
-            )
-        except (TypeError, ValueError):
+        requested_limit = context.request.constraints.get(
+            "orchestrator_candidate_limit",
+            self.config.orchestrator.candidate_limit,
+        )
+        if isinstance(requested_limit, bool) or not isinstance(requested_limit, int):
             requested_limit = self.config.orchestrator.candidate_limit
         limit = max(2, min(32, requested_limit, len(context.candidates)))
         ranked = self.fallback.selector.rank(context.request, context.candidates)
@@ -813,7 +806,7 @@ class ModelOrchestrator:
         return RoutePlan.from_dict(data)
 
     def _validate_model_plan(self, plan: RoutePlan, context: PlanningContext) -> None:
-        max_calls = int(context.request.constraints.get("max_calls", self.config.routing.max_calls))
+        max_calls = context.request.constraints.get("max_calls", self.config.routing.max_calls)
         validate_route_plan_shape(plan, max_calls=max_calls)
         expected_strategy = self._profile_strategy(context)
         strict_validation = bool(self.config.orchestrator.require_validated_plan)
