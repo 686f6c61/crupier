@@ -2653,6 +2653,16 @@ def _print_experiment_report(report: Any) -> None:
     print(f"status: {report.status}")
     print(f"observations: {report.observations}")
     print(f"sampled: {report.sampled}")
+    for cohort_name in ("primary", "candidate"):
+        cohort = report.metrics[cohort_name]
+        print(
+            f"{cohort_name}: count={cohort['count']} errors={cohort['errors']} "
+            f"error_rate={cohort['error_rate']} avg_cost_usd={cohort['avg_cost_usd']} "
+            f"avg_latency_ms={cohort['avg_latency_ms']} "
+            f"p95_latency_ms={cohort['p95_latency_ms']} "
+            f"avg_quality={cohort['avg_quality']}"
+        )
+    print(f"paired_count: {report.metrics['paired_count']}")
     print(f"promotion_eligible: {report.promotion.eligible}")
     for reason in report.promotion.reasons:
         print(f"gate: {reason}")
