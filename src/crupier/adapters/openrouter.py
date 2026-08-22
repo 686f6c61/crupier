@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any, NoReturn
 
-from crupier.config import OPENROUTER_DEFAULT_HOST, ProviderSettings, validate_provider_endpoint
+from crupier.config import (
+    OPENROUTER_DEFAULT_HOST,
+    ProviderSettings,
+    validate_provider_endpoint,
+)
 from crupier.errors import (
     CrupierProviderAuthError,
     CrupierProviderRateLimitError,

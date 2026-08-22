@@ -18,7 +18,6 @@ from uuid import uuid4
 
 from .errors import CrupierError
 
-
 _PRIVATE_IO_LOCK = RLock()
 
 

@@ -19,7 +19,12 @@ from uuid import uuid4
 from .errors import CrupierError
 from .models import ModelRef
 from .redaction import redact_text
-from .state import ArtifactDiagnostic, ensure_private_directory, private_append_text, private_write_text
+from .state import (
+    ArtifactDiagnostic,
+    ensure_private_directory,
+    private_append_text,
+    private_write_text,
+)
 
 VERDICTS = {"accept", "reject", "needs_work", "unknown"}
 

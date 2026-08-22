@@ -444,7 +444,7 @@ def task_summary_for_storage(task: str, *, store_prompt: bool, salt: str = "") -
 
     if store_prompt:
         return _redact(_summarize(task))
-    digest = hashlib.sha256(f"{_TRACE_SUMMARY_SALT}:{salt}\0{task}".encode("utf-8")).hexdigest()[:16]
+    digest = hashlib.sha256(f"{_TRACE_SUMMARY_SALT}:{salt}\0{task}".encode()).hexdigest()[:16]
     return f"[prompt omitted; chars={len(task)}; sha256={digest}]"
 
 

@@ -8,7 +8,11 @@ import re
 from pathlib import Path
 from typing import Any, NoReturn
 
-from crupier.config import NAN_DEFAULT_HOST, ProviderSettings, validate_provider_endpoint
+from crupier.config import (
+    NAN_DEFAULT_HOST,
+    ProviderSettings,
+    validate_provider_endpoint,
+)
 from crupier.errors import (
     CrupierModelUnsupportedError,
     CrupierProviderAuthError,

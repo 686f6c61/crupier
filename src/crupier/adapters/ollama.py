@@ -7,7 +7,11 @@ import urllib.error
 import urllib.request
 from typing import Any, NoReturn
 
-from crupier.config import OLLAMA_CLOUD_HOST, ProviderSettings, validate_provider_endpoint
+from crupier.config import (
+    OLLAMA_CLOUD_HOST,
+    ProviderSettings,
+    validate_provider_endpoint,
+)
 from crupier.errors import (
     CrupierModelUnsupportedError,
     CrupierProviderAuthError,

@@ -7,7 +7,11 @@ from dataclasses import replace
 from typing import Any, NoReturn
 from urllib.parse import urlparse
 
-from crupier.config import INFERENCE_DEFAULT_HOST, ProviderSettings, validate_provider_endpoint
+from crupier.config import (
+    INFERENCE_DEFAULT_HOST,
+    ProviderSettings,
+    validate_provider_endpoint,
+)
 from crupier.errors import (
     CrupierProviderAuthError,
     CrupierProviderRateLimitError,

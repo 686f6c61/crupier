@@ -4,15 +4,15 @@ from __future__ import annotations
 
 import json
 import re
-from hmac import compare_digest
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from email import policy
 from email.parser import BytesParser
+from hmac import compare_digest
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from ipaddress import ip_address
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -34,7 +34,6 @@ from .errors import (
     CrupierToolApprovalRequired,
     CrupierUpdateRequiresConfirmation,
 )
-
 
 _OPENAI_HTTP_ALLOWED_FIELDS = {
     "/v1/responses": frozenset(
