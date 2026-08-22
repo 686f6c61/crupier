@@ -16,11 +16,17 @@ from crupier import Crupier
 from crupier.cli import main
 from crupier.config import CrupierConfig, write_default_project
 from crupier.errors import CrupierProviderUnavailableError
-from crupier.models import PlanningContext, RequestEnvelope
+from crupier.models import OperationResult, PlanningContext, RequestEnvelope
 from crupier.orchestrator import ModelOrchestrator
 from crupier.project_audit import _canary_error
 from crupier.redaction import redact_text, redact_value
-from crupier.trace_store import _jsonable
+from crupier.trace_store import (
+    TraceStore,
+    _jsonable,
+    _request_record,
+    _result_record,
+    _trace_record as serialize_trace_record,
+)
 
 
 def make_config(tmp_path):
@@ -421,6 +427,107 @@ def test_trace_store_jsonable_handles_exotic_types():
         "custom": {"items": ["one", "{'two'}"]},
     }
     json.dumps(converted)
+
+
+def test_trace_store_skips_results_without_trace(tmp_path):
+    store = TraceStore(tmp_path / "traces")
+    result = OperationResult(operation="embedding", model="openai:test")
+
+    assert store.write(
+        project="trace-test",
+        request=RequestEnvelope(task="no trace"),
+        result=result,
+        dry_run=True,
+        trace_level=False,
+    ) is None
+
+
+def test_trace_store_purge_ignores_corrupt_files_and_unlink_failures(tmp_path, monkeypatch):
+    root = tmp_path / "traces"
+    root.mkdir()
+    corrupt = root / "corrupt.json"
+    corrupt.write_text("{broken", encoding="utf-8")
+    store = TraceStore(root, ttl_days=7)
+    assert corrupt.exists()
+
+    expired = root / "expired.json"
+    expired.write_text(json.dumps(_trace_record("expired", days_ago=8)), encoding="utf-8")
+    real_unlink = Path.unlink
+
+    def fail_expired_unlink(path, *args, **kwargs):
+        if path == expired:
+            raise OSError("read-only filesystem")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_expired_unlink)
+    assert store.purge() == 0
+    assert expired.exists()
+
+
+def test_trace_list_reports_schema_that_breaks_route_model_extraction(tmp_path):
+    root = tmp_path / "traces"
+    root.mkdir()
+    path = root / "invalid-route-step.json"
+    path.write_text(
+        json.dumps(
+            {
+                "trace_id": "invalid-route-step",
+                "request": {"summary": "invalid"},
+                "result": {"route": {"strategy": "single", "steps": [None]}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = TraceStore(root).list()
+
+    assert result == []
+    assert result.diagnostics[0].error_type == "invalid_schema"
+    assert result.diagnostics[0].path == path
+
+
+def test_trace_records_file_context_and_non_binary_operation_data():
+    request = RequestEnvelope(
+        task="extract",
+        metadata={
+            "extracted_file_context": {
+                "files": [{"name": "contract.txt"}],
+                "warnings": ["truncated"],
+                "max_chars": 100,
+            }
+        },
+    )
+    request_data = _request_record(request, store_prompt=False)
+    result_data = _result_record(
+        OperationResult(operation="embedding", model="openai:test", data={"vectors": [[1.0]]}),
+        store_response=True,
+        store_prompt=False,
+    )
+
+    assert request_data["file_context"]["max_chars"] == 100
+    assert result_data["data"] == {"vectors": [[1.0]]}
+
+
+def test_trace_record_sanitizes_debug_provider_payloads():
+    class FakeTrace:
+        def to_dict(self, *, summary):
+            assert summary is False
+            return {
+                "route_plan": None,
+                "provider_calls": [{"provider": "openai", "detail": "private text"}],
+            }
+
+    payload = serialize_trace_record(
+        FakeTrace(),
+        request=RequestEnvelope(task="private task"),
+        store_prompt=False,
+        store_response=False,
+        salt="trace-test",
+        trace_level="debug",
+    )
+
+    assert payload["provider_calls"][0]["detail"] == "[content omitted]"
+    assert "private task" not in payload["request_summary"]
 
 
 def test_cli_trace_commands(tmp_path, capsys):

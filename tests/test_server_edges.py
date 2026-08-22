@@ -1,7 +1,10 @@
 import http.client
 import json
 import threading
+from email.message import Message
 from http import HTTPStatus
+from io import BytesIO
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -29,6 +32,7 @@ from crupier.server import (
     _audio_content_type,
     _coerce_form_value,
     _error_contract,
+    _host_matches_bind,
     _is_loopback_bind_host,
     _openai_error_payload,
     _OpenAICompatibleHandler,
@@ -570,3 +574,131 @@ def test_request_id_is_stable_per_handler_instance():
 
     assert first.startswith("req_")
     assert handler._request_id() == first
+
+
+def test_server_rejects_empty_token_and_live_mode_without_authentication(tmp_path):
+    client = make_crupier(tmp_path)
+
+    with pytest.raises(CrupierConfigError, match="cannot be empty"):
+        build_openai_compatible_server(crupier=client, port=0, dry_run=True, bearer_token="  ")
+    with pytest.raises(CrupierConfigError, match="Live server execution"):
+        build_openai_compatible_server(crupier=client, port=0, dry_run=False)
+
+
+def test_server_rejects_bad_host_and_failing_custom_authenticator():
+    handler = object.__new__(_OpenAICompatibleHandler)
+    handler.headers = Message()
+    handler.headers["host"] = "attacker.example"
+    handler.bind_host = "127.0.0.1"
+    handler.browser_origin = None
+    errors = []
+    handler._write_error = lambda status, message, **kwargs: errors.append(
+        (status, message, kwargs)
+    )
+
+    assert handler._validate_request_context(authenticate=False) is False
+    assert errors[-1][0] == HTTPStatus.BAD_REQUEST
+    assert errors[-1][2]["code"] == "host_not_allowed"
+
+    handler.headers.replace_header("host", "localhost")
+    handler.headers["authorization"] = "Bearer token"
+    handler.expected_bearer_token = None
+    handler.request_authenticator = lambda token: (_ for _ in ()).throw(RuntimeError(token))
+    assert handler._validate_request_context(authenticate=True) is False
+    assert errors[-1][0] == HTTPStatus.UNAUTHORIZED
+
+
+def test_options_returns_without_writing_when_request_context_is_invalid():
+    handler = object.__new__(_OpenAICompatibleHandler)
+    handler._validate_request_context = lambda **kwargs: False
+    handler.send_response = lambda status: pytest.fail(f"unexpected response {status}")
+
+    handler.do_OPTIONS()
+
+
+def test_multipart_parser_rejects_invalid_and_malformed_parts(monkeypatch):
+    handler = object.__new__(_OpenAICompatibleHandler)
+    handler.headers = Message()
+    handler.headers["content-type"] = "application/json"
+    with pytest.raises(ValueError, match="requires multipart"):
+        handler._read_multipart()
+
+    handler.headers.replace_header("content-type", "multipart/form-data")
+    handler.headers["content-length"] = "0"
+    handler.rfile = BytesIO()
+    handler.request_body_limit = 100
+
+    class FakeParser:
+        def __init__(self, *, policy):
+            del policy
+
+        def parsebytes(self, raw):
+            del raw
+            return SimpleNamespace(is_multipart=lambda: False)
+
+    monkeypatch.setattr(server_module, "BytesParser", FakeParser)
+    with pytest.raises(ValueError, match="Invalid multipart"):
+        handler._read_multipart()
+
+    class Part:
+        def __init__(self, *, name, payload):
+            self.name = name
+            self.payload = payload
+
+        def get_param(self, name, *, header):
+            del name, header
+            return self.name
+
+        def get_filename(self):
+            return None
+
+        def get_payload(self, *, decode):
+            del decode
+            return self.payload
+
+        def get_content_charset(self):
+            return "utf-8"
+
+    parts = [
+        Part(name=None, payload=b"ignored"),
+        Part(name="empty", payload=None),
+        Part(name="invalid", payload="not-bytes"),
+    ]
+
+    class MultipartParser(FakeParser):
+        def parsebytes(self, raw):
+            del raw
+            return SimpleNamespace(is_multipart=lambda: True, iter_parts=lambda: iter(parts))
+
+    monkeypatch.setattr(server_module, "BytesParser", MultipartParser)
+    with pytest.raises(ValueError, match="invalid body"):
+        handler._read_multipart()
+
+    parts[:] = [Part(name="text", payload=b"\xff")]
+    with pytest.raises(ValueError, match="not valid text"):
+        handler._read_multipart()
+
+
+def test_server_rejects_duplicate_content_length_and_covers_logging_helpers():
+    handler = object.__new__(_OpenAICompatibleHandler)
+    handler.headers = Message()
+    handler.headers["content-length"] = "1"
+    handler.headers["content-length"] = "1"
+    handler.close_connection = False
+    with pytest.raises(ValueError, match="Multiple Content-Length"):
+        handler._read_body()
+    assert handler.close_connection is True
+
+    handler.access_log_enabled = False
+    assert handler.log_request(200) is None
+    assert handler.log_message("ignored %s", "message") is None
+
+
+def test_host_matching_covers_malformed_wildcard_and_specific_binds():
+    assert _host_matches_bind("", "127.0.0.1") is False
+    assert _host_matches_bind("bad host", "127.0.0.1") is False
+    assert _host_matches_bind("/", "127.0.0.1") is False
+    assert _host_matches_bind("example.test", "0.0.0.0") is True
+    assert _host_matches_bind("example.test", "::") is True
+    assert _host_matches_bind("example.test", "example.test") is True
+    assert _host_matches_bind("other.test", "example.test") is False

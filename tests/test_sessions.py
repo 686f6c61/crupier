@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -235,3 +236,96 @@ def test_session_approval_is_bound_and_records_the_frozen_turn(tmp_path):
     assert session.messages[0]["content"]["task"] == "Apply the reviewed session change"
     assert session.route_history[0].reason == "initial_route"
     assert client.approvals.get(pending.value.approval_id).status == "consumed"
+
+
+def test_session_close_is_idempotent_and_approved_turn_limit_is_enforced(tmp_path):
+    client = make_client(tmp_path)
+    session = client.session(max_turns=1, persist=True)
+    session.turns = 1
+
+    with pytest.raises(CrupierExecutionLimitError, match="max_turns"):
+        session.execute_approved("approval-token")
+
+    assert session.close().status == "closed"
+    assert session.close().status == "closed"
+
+
+def test_session_approved_execution_can_hide_trace(tmp_path):
+    client = make_client(tmp_path)
+    session = client.session()
+    with pytest.raises(CrupierApprovalRequired) as pending:
+        session.deal(
+            "Approve without returning a trace",
+            constraints={"requires_human_approval": True},
+            dry_run=False,
+        )
+    granted = client.approvals.grant(pending.value.approval_id, reviewer="ana")
+
+    result = session.execute_approved(granted.token or "", trace=False)
+
+    assert result.trace is None
+    assert session.turns == 1
+
+
+def test_session_rejects_results_without_a_route(tmp_path):
+    session = make_client(tmp_path).session()
+    result = SimpleNamespace(route=None, trace=None)
+
+    with pytest.raises(CrupierError, match="without a route"):
+        session._record_turn(
+            task="missing route",
+            input=None,
+            result=result,
+            signature={},
+            reason="initial_route",
+            dry_run=True,
+        )
+
+
+def test_session_replan_reasons_cover_residual_changes_and_context_pressure(tmp_path, monkeypatch):
+    session = make_client(tmp_path).session(stickiness="none")
+    session.deal("First", dry_run=True)
+    baseline = dict(session._previous_signature or {})
+
+    assert session._replan_reason(baseline) == "stickiness_disabled"
+    session.stickiness = "compatible"
+    for key, value, expected in (
+        ("mode", "structured", "mode_changed"),
+        ("risk_level", "high", "risk_changed"),
+        ("budget", {"max_cost_usd": 0.01}, "budget_changed"),
+    ):
+        changed = dict(baseline)
+        changed[key] = value
+        assert session._replan_reason(changed) == expected
+
+    monkeypatch.setattr(session, "_context_pressure", lambda: True)
+    assert session._replan_reason(baseline) == "context_pressure"
+
+
+def test_session_context_pressure_handles_missing_or_unknown_windows(tmp_path, monkeypatch):
+    session = make_client(tmp_path).session()
+    assert session._context_pressure() is False
+    session.deal("First", dry_run=True)
+
+    monkeypatch.setattr(
+        session.client.registry,
+        "get",
+        lambda model: (_ for _ in ()).throw(CrupierError(model)),
+    )
+    assert session._context_pressure() is False
+    monkeypatch.setattr(
+        session.client.registry,
+        "get",
+        lambda model: SimpleNamespace(context_window=None),
+    )
+    assert session._context_pressure() is False
+
+
+def test_session_rejects_non_list_compactor_output(tmp_path):
+    session = make_client(tmp_path).session(
+        max_history_chars=1_000,
+        compactor=lambda messages: {"messages": messages},
+    )
+
+    with pytest.raises(CrupierError, match="must return a list"):
+        session.deal("Large", input="z" * 2_000, dry_run=False)
