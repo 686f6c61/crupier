@@ -71,13 +71,12 @@ def test_scoring_and_policy_parsers_handle_invalid_values() -> None:
     defaults = config_module._scoring_settings_from_dict("invalid")
     parsed = config_module._scoring_settings_from_dict(
         {
-            "quality_weight": {"frontier": "12", "bad": object()},
+            "quality_weight": {"frontier": "12"},
             "skill_fit_cap": "invalid",
         }
     )
     assert defaults == ScoringSettings()
     assert parsed.quality_weight["frontier"] == 12.0
-    assert "bad" not in parsed.quality_weight
     assert parsed.skill_fit_cap == ScoringSettings().skill_fit_cap
 
     with pytest.raises(CrupierConfigError, match="policy must be a table"):
@@ -105,6 +104,17 @@ def test_scoring_and_policy_parsers_handle_invalid_values() -> None:
     assert rule.models == ["openai:gpt-5.5"]
     assert rule.capabilities == ["tools"]
     assert rule.options == {"owner": "platform"}
+
+
+@pytest.mark.parametrize("value", ["mucho", [1], None])
+def test_scoring_weight_rejects_non_numeric_value(value) -> None:
+    with pytest.raises(CrupierConfigError, match=r"scoring\.cost_weight\.low"):
+        CrupierConfig.from_dict({"scoring": {"cost_weight": {"low": value}}})
+
+
+def test_scoring_weight_rejects_boolean_instead_of_coercing_it() -> None:
+    with pytest.raises(CrupierConfigError, match=r"scoring\.cost_weight\.low.*True"):
+        CrupierConfig.from_dict({"scoring": {"cost_weight": {"low": True}}})
 
 
 def test_numeric_validators_cover_bool_type_range_and_non_finite_values() -> None:

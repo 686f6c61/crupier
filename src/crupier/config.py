@@ -501,7 +501,7 @@ def _scoring_settings_from_dict(data: dict[str, Any]) -> ScoringSettings:
         value = data.get(key)
         default_value = getattr(defaults, key)
         if isinstance(value, dict):
-            settings[key] = _float_map(value, default_value)
+            settings[key] = _float_map(value, default_value, name=f"scoring.{key}")
     for field_name in ScoringSettings.__dataclass_fields__:
         if field_name in known_maps or field_name not in data:
             continue
@@ -634,13 +634,17 @@ def _string_list(value: Any) -> list[str]:
     return [str(value)]
 
 
-def _float_map(value: dict[str, Any], default: dict[str, float]) -> dict[str, float]:
+def _float_map(
+    value: dict[str, Any],
+    default: dict[str, float],
+    *,
+    name: str,
+) -> dict[str, float]:
     merged = dict(default)
     for key, raw in value.items():
-        try:
-            merged[str(key)] = float(raw)
-        except (TypeError, ValueError):
-            continue
+        item_name = f"{name}.{key} (value {raw!r})"
+        _require_finite_number(item_name, raw)
+        merged[str(key)] = float(raw)
     return merged
 
 
