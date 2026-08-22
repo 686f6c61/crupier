@@ -1,5 +1,6 @@
 import http.client
 import json
+import socket
 import threading
 from pathlib import Path
 from uuid import uuid4
@@ -238,6 +239,38 @@ def request_multipart(address, path, *, fields, files):
     return response.status, headers, data
 
 
+def request_chunked(address, path, chunks):
+    body = b"".join(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n" for chunk in chunks) + b"0\r\n\r\n"
+    raw_request = (
+        f"POST {path} HTTP/1.1\r\n"
+        f"Host: {address[0]}:{address[1]}\r\n"
+        "Content-Type: application/json\r\n"
+        "Authorization: Bearer test-server-token\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode() + body
+    connection = socket.create_connection(address, timeout=5)
+    connection.sendall(raw_request)
+    response = http.client.HTTPResponse(connection)
+    response.begin()
+    data = json.loads(response.read())
+    status = response.status
+    connection.close()
+    return status, data
+
+
+def request_without_content_length(address, path):
+    conn = http.client.HTTPConnection(address[0], address[1], timeout=5)
+    conn.putrequest("POST", path)
+    conn.putheader("Content-Type", "application/json")
+    conn.putheader("Authorization", "Bearer test-server-token")
+    conn.endheaders()
+    response = conn.getresponse()
+    data = json.loads(response.read())
+    conn.close()
+    return response.status, data
+
+
 def sse_payloads(text):
     payloads = []
     for line in text.splitlines():
@@ -294,6 +327,39 @@ def test_live_server_rejects_missing_or_invalid_bearer_before_body_processing(tm
             )
             assert status == 401
             assert data["error"]["code"] == "invalid_api_key"
+        assert adapter.calls == []
+
+    with_server(tmp_path, run, adapter=adapter)
+
+
+def test_chunked_request_body_is_rejected_instead_of_ignored(tmp_path):
+    def run(address):
+        status, data = request_chunked(
+            address,
+            "/v1/responses",
+            [b'{"model":"gpt-5.4-mini",', b'"input":"must not execute"}'],
+        )
+        assert status == 400
+        assert data["error"]["code"] == "invalid_request"
+
+    with_server(tmp_path, run)
+
+
+def test_missing_content_length_on_post_is_rejected(tmp_path):
+    def run(address):
+        status, data = request_without_content_length(address, "/v1/responses")
+        assert status == 411
+        assert data["error"]["code"] == "length_required"
+
+    with_server(tmp_path, run)
+
+
+def test_chunked_rejection_happens_before_provider_execution(tmp_path):
+    adapter = FakeAdapter()
+
+    def run(address):
+        status, _ = request_chunked(address, "/v1/responses", [b'{"input":"ignored"}'])
+        assert status == 400
         assert adapter.calls == []
 
     with_server(tmp_path, run, adapter=adapter)

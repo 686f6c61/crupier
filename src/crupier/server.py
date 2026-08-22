@@ -272,6 +272,14 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
                 error_type="invalid_request_error",
                 code="request_too_large",
             )
+        except _LengthRequired as exc:
+            self.close_connection = True
+            self._write_error(
+                HTTPStatus.LENGTH_REQUIRED,
+                str(exc),
+                error_type="invalid_request_error",
+                code="length_required",
+            )
         except ValueError as exc:
             self._write_error(
                 HTTPStatus.BAD_REQUEST,
@@ -480,7 +488,17 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
         return payload
 
     def _read_body(self) -> bytes:
-        raw_length = self.headers.get("content-length", "0") or "0"
+        transfer_encoding = self.headers.get("transfer-encoding")
+        if transfer_encoding and transfer_encoding.strip().lower() != "identity":
+            self.close_connection = True
+            raise ValueError("Transfer-Encoding request bodies are not supported; send Content-Length.")
+        content_lengths = self.headers.get_all("content-length", [])
+        if not content_lengths:
+            raise _LengthRequired("POST requests require a Content-Length header.")
+        if len(content_lengths) != 1:
+            self.close_connection = True
+            raise ValueError("Multiple Content-Length headers are not allowed.")
+        raw_length = content_lengths[0]
         try:
             length = int(raw_length)
         except ValueError as exc:
@@ -581,6 +599,10 @@ class _OpenAICompatibleHandler(BaseHTTPRequestHandler):
 
 
 class _RequestBodyTooLarge(Exception):
+    pass
+
+
+class _LengthRequired(Exception):
     pass
 
 
