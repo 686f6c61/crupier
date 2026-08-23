@@ -119,6 +119,12 @@ def _offline_preview() -> None:
     print_route("live_operations_validation", result, extra={"validation": "offline-preview"})
 
 
+def _error_fields(exc: BaseException) -> dict[str, str]:
+    """Keep provider error text bounded so one bad body cannot bloat the report."""
+
+    return {"error_type": type(exc).__name__, "error": str(exc)[:1000]}
+
+
 def _run_case(name: str, client: Crupier) -> dict[str, Any]:
     try:
         return CASE_RUNNERS[name](client)
@@ -126,8 +132,7 @@ def _run_case(name: str, client: Crupier) -> dict[str, Any]:
         return {
             "id": name,
             "status": "fail",
-            "error_type": type(exc.cause).__name__,
-            "error": str(exc.cause)[:1000],
+            **_error_fields(exc.cause),
             "failed_step": exc.failed_step,
             "endpoints": exc.observations,
         }
@@ -135,8 +140,7 @@ def _run_case(name: str, client: Crupier) -> dict[str, Any]:
         return {
             "id": name,
             "status": "fail",
-            "error_type": exc.__class__.__name__,
-            "error": str(exc)[:1000],
+            **_error_fields(exc),
         }
 
 
@@ -706,16 +710,11 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "rejected": sorted(name for name in INTERNAL_CONTROLS if f"'{name}'" in message),
         }
     except PartialCaseFailure:
+        # The failing step and prior observations already travel on the exception.
         raise
     except Exception as exc:
-        observations.setdefault(
-            current_step,
-            {
-                "status": "fail",
-                "error_type": type(exc).__name__,
-                "error": str(exc)[:1000],
-            },
-        )
+        # setdefault: if the parse failed after the endpoint was stored, keep that evidence.
+        observations.setdefault(current_step, {"status": "fail", **_error_fields(exc)})
         raise PartialCaseFailure(current_step, observations, exc) from exc
     finally:
         server.shutdown()

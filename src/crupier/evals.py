@@ -86,8 +86,10 @@ class EvalCase:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvalCase:
+        # Un dict en el JSON no es un catálogo; tragarlo como [] haría pasar
+        # requires_tools en vacío, que es el fallo que este campo cierra.
         raw_tools = data.get("tools") or []
-        if raw_tools and not isinstance(raw_tools, list):
+        if not isinstance(raw_tools, list):
             raise TypeError(f"Eval case {data.get('id')!r} tools must be a list.")
         return cls(
             id=str(data["id"]),
@@ -625,8 +627,8 @@ def evaluate_expectations(plan: RoutePlan, expect: dict[str, Any]) -> list[str]:
     if not expect:
         return failed
 
-    unknown = sorted(set(expect) - EXPECTATION_KEYS)
-    failed.extend(f"unknown expectation key {key!r}" for key in unknown)
+    for key in sorted(set(expect) - EXPECTATION_KEYS):
+        failed.append(f"unknown expectation key {key!r}")
 
     if "strategy" in expect and plan.strategy != expect["strategy"]:
         failed.append(f"strategy expected {expect['strategy']!r}, got {plan.strategy!r}")

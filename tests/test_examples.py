@@ -150,8 +150,8 @@ def test_routing_eval_dataset_only_uses_supported_expectations():
     assert sorted(used - EXPECTATION_KEYS) == []
 
 
-def test_operations_harness_keeps_partial_http_observations():
-    """Si un endpoint HTTP revienta, el informe debe conservar lo ya observado."""
+def test_http_case_keeps_health_when_a_later_endpoint_is_not_json(monkeypatch):
+    """El wrap de `_http_case` tiene que dispararse: un stub de CASE_RUNNERS no lo cubre."""
 
     examples_dir = Path(__file__).resolve().parents[1] / "examples"
     sys.path.insert(0, str(examples_dir))
@@ -160,25 +160,36 @@ def test_operations_harness_keeps_partial_http_observations():
     finally:
         sys.path.remove(str(examples_dir))
 
-    def boom(_client):
-        raise harness.PartialCaseFailure(
-            "embeddings",
-            {"health": {"status": 200, "ok": True}, "models": {"status": 200, "count": 3}},
-            json.JSONDecodeError("Expecting value", "", 0),
-        )
+    class DummyServer:
+        server_address = ("127.0.0.1", 9)
 
-    original = harness.CASE_RUNNERS["http"]
-    harness.CASE_RUNNERS["http"] = boom
-    try:
-        payload = harness._run_case("http", object())
-    finally:
-        harness.CASE_RUNNERS["http"] = original
+        def serve_forever(self) -> None:
+            return None
+
+        def shutdown(self) -> None:
+            return None
+
+        def server_close(self) -> None:
+            return None
+
+    def fake_http(_base_url, path, **_kwargs):
+        if path == "/health":
+            return 200, {"x-request-id": "rid"}, json.dumps({"ok": True}).encode()
+        return 200, {}, b"not-json{"
+
+    monkeypatch.setattr(harness, "_require_model", lambda _client, _kind: "openai:gpt-5.4-mini")
+    monkeypatch.setattr(harness, "_unauthenticated_server_verdict", lambda _client: "CrupierConfigError")
+    monkeypatch.setattr(harness, "build_openai_compatible_server", lambda **_kwargs: DummyServer())
+    monkeypatch.setattr(harness, "_http_request", fake_http)
+
+    payload = harness._run_case("http", object())
 
     assert payload["status"] == "fail"
-    assert payload["failed_step"] == "embeddings"
+    assert payload["failed_step"] == "models"
     assert payload["error_type"] == "JSONDecodeError"
-    assert payload["endpoints"]["health"] == {"status": 200, "ok": True}
-    assert payload["endpoints"]["models"]["count"] == 3
+    assert payload["endpoints"]["unauthenticated_server"] == "CrupierConfigError"
+    assert payload["endpoints"]["health"]["status"] == 200
+    assert payload["endpoints"]["models"]["status"] == "fail"
 
 
 def _example_secret() -> str:
