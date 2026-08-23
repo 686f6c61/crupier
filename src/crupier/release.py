@@ -54,6 +54,7 @@ _NON_FINAL_RELEASE_PATTERNS = [
 ]
 _PYPI_PROJECT_JSON_URL = "https://pypi.org/pypi/{project}/json"
 _EXPECTED_EXAMPLE_FILES = {
+    "examples/README.md",
     "examples/_example_support.py",
     "examples/agentic_pr_review.py",
     "examples/approval_workflow.py",
