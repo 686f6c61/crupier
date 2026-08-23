@@ -13,9 +13,9 @@ def main() -> None:
         crupier = offline_client(
             project="contract-session",
             profile="agentic",
-            # Dos modelos estables y seleccionables: un modelo preview quedaría
-            # siempre excluido por stable_models_only y no aportaría nada a la
-            # decisión de la sesión. Ese filtro se demuestra en fail_closed_safety.py.
+            # Two stable, selectable models: a preview model would always be excluded
+            # by stable_models_only and would add nothing to the session decision.
+            # That filter is demonstrated in fail_closed_safety.py.
             allow=["openai:gpt-5.4-mini", "anthropic:claude-sonnet-4-6"],
             root=temporary,
         )

@@ -31,16 +31,16 @@ from crupier import CrupierConfigError, CrupierResult, HumanFeedbackStore
 from crupier.config import CrupierConfig
 from crupier.redaction import redact_text, redact_value
 
-# Credencial sintética compuesta en tiempo de ejecución: así el fichero no
-# contiene ningún literal con formato de clave real que un escáner de secretos
-# (el del propio `crupier release check`, por ejemplo) pueda marcar.
+# Synthetic credential assembled at runtime, so the file holds no literal shaped
+# like a real key that a secret scanner (the one in `crupier release check`, for
+# instance) could flag.
 EXAMPLE_SECRET = "s" + "k-" + "proj-" + "EXAMPLE" + "0" * 24
 
 CUSTOM_HOST = "https://models.internal.example/v1"
 INSECURE_HOST = "http://models.internal.example/v1"
 
-# Regla declarativa bien formada: el contraste con la malformada demuestra que la
-# misma tabla que falla cerrada cuando es inválida sigue filtrando cuando es válida.
+# Well-formed declarative rule: the contrast with the malformed ones shows that the
+# same table that fails closed when it is invalid still filters when it is valid.
 NO_LOCAL_DAEMON_RULE = {
     "name": "no_local_daemon_for_customer_data",
     "effect": "deny",
@@ -149,12 +149,12 @@ def main() -> None:
         allow=[
             "openai:gpt-5.4-mini",
             "anthropic:claude-sonnet-4-6",
-            # Excluido por stable_models_only: los modelos preview están apagados.
+            # Excluded by stable_models_only: preview models are turned off.
             "google:gemini-3.1-pro-preview",
-            # Excluido por openrouter_byok: OpenRouter es BYOK opcional y no está
-            # habilitado, así que ni siquiera llega a evaluarse contra las reglas.
+            # Excluded by openrouter_byok: OpenRouter is optional BYOK and is not
+            # enabled, so it is never even evaluated against the policy rules.
             "openrouter:openai/gpt-5.5",
-            # Excluido por la regla declarativa NO_LOCAL_DAEMON_RULE.
+            # Excluded by the declarative NO_LOCAL_DAEMON_RULE.
             "ollama:gpt-oss:120b",
         ],
         policy_rules=[NO_LOCAL_DAEMON_RULE],
@@ -215,16 +215,15 @@ def _endpoint_verdict(
     *,
     expect: str | None = None,
 ) -> str:
-    """Indica si Crupier aceptaría enviar credenciales a ese endpoint.
+    """Report whether Crupier would send credentials to that endpoint.
 
-    ``expect`` es el fragmento que debe aparecer en el mensaje cuando el contrato
-    rechaza la configuración. Sin esa comprobación el veredicto mentiría en las
-    dos direcciones: ``CrupierConfig.from_dict`` reconvierte cualquier
-    ``TypeError`` o ``ValueError`` en ``CrupierConfigError``, así que un fallo del
-    propio ejemplo se leería como «la frontera aguantó»; y
-    ``validate_provider_endpoint`` solo corre para proveedores habilitados, así
-    que un proveedor apagado por error devolvería «accepted» sin que nadie
-    hubiera validado nada.
+    ``expect`` is the fragment the message must contain when the contract rejects
+    the configuration. Without that check the verdict would lie in both
+    directions: ``CrupierConfig.from_dict`` turns any ``TypeError`` or
+    ``ValueError`` into ``CrupierConfigError``, so a bug in this example would
+    read as "the boundary held"; and ``validate_provider_endpoint`` only runs for
+    enabled providers, so a provider left disabled by mistake would return
+    "accepted" without anything having been validated.
     """
 
     try:
@@ -240,10 +239,10 @@ def _endpoint_verdict(
 
 
 def _policy_verdict(policy: Any, *, expect: str | None = None, expected_rules: int = 0) -> str:
-    """Indica si una tabla `[policy]` es aceptada o falla cerrada.
+    """Report whether a `[policy]` table is accepted or fails closed.
 
-    ``expected_rules`` da evidencia positiva al camino aceptado: comprueba que la
-    regla se ha parseado de verdad y no que simplemente no saltó ninguna excepción.
+    ``expected_rules`` gives the accepted path positive evidence: it checks that the
+    rule really parsed, not merely that no exception was raised.
     """
 
     try:
@@ -267,7 +266,7 @@ def _single_provider_config(
     *,
     policy: Any = None,
 ) -> CrupierConfig:
-    """Construye la configuración mínima necesaria para validar un contrato."""
+    """Build the smallest configuration needed to validate one contract."""
 
     data: dict[str, Any] = {
         "project": {"name": "fail-closed-safety", "default_profile": "fast"},
@@ -281,7 +280,7 @@ def _single_provider_config(
 
 
 def _rejection_reason(exc: CrupierConfigError, expect: str | None) -> str:
-    """Reduce el rechazo a una línea redactada y comprueba que es el esperado."""
+    """Reduce the rejection to one redacted line and check it is the expected one."""
 
     message = redact_text(" ".join(str(exc).split()))
     if expect is not None and expect not in message:
@@ -296,7 +295,7 @@ def _rejection_reason(exc: CrupierConfigError, expect: str | None) -> str:
 
 
 def _format_exclusions(result: CrupierResult) -> str:
-    """Enumera cada modelo descartado con su motivo, sin exponer nada más."""
+    """List every discarded model with its reason, and nothing else."""
 
     trace = result.trace
     if trace is None:

@@ -81,8 +81,8 @@ def main() -> None:
     for name, result in results:
         print_route(name, result, extra={"dry_run": True})
 
-    # La columna «planned» del chat no aplica a operaciones: el planificador de
-    # operaciones no registra llamadas en la traza, por eso siempre vale 0.
+    # The chat "planned" column does not apply to operations: the operation planner
+    # records no calls in the trace, which is why it always reads 0.
     print(
         "planned_provider_calls_note=operations plan one primary step per request; "
         "the trace records no staged calls, so planned stays 0 while real proves the dry run"

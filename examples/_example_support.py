@@ -52,9 +52,9 @@ def offline_client(
                 "anthropic": {"enabled": True, "env_key": "ANTHROPIC_API_KEY"},
                 "google": {"enabled": True, "env_key": "GOOGLE_API_KEY"},
                 "ollama": {"enabled": True, "host": "https://ollama.com/api", "env_key": "OLLAMA_API_KEY"},
-                # OpenRouter es BYOK opcional y viene deshabilitado igual que en el
-                # crupier.toml por defecto: cualquier modelo suyo en la allowlist se
-                # excluye con el filtro openrouter_byok en vez de enrutarse.
+                # OpenRouter is optional BYOK and ships disabled, exactly as in the
+                # default crupier.toml: any of its models in the allowlist is excluded
+                # by the openrouter_byok filter instead of being routed to.
                 "openrouter": {
                     "enabled": False,
                     "mode": "byok",

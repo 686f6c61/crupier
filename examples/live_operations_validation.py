@@ -32,11 +32,11 @@ from crupier import Crupier, CrupierConfigError, ModelRef, OperationResult
 from crupier.compat.openai import OpenAI
 from crupier.server import build_openai_compatible_server
 
-# Controles internos del SDK que el cuerpo OpenAI del servidor HTTP rechaza.
+# Internal SDK controls that the server's OpenAI request body rejects.
 INTERNAL_CONTROLS = ("constraints", "dry_run", "metadata", "mode", "trace")
 
-# Un bearer ausente y uno inválido producen el mismo error tipado: el servidor no
-# revela si el token existía.
+# A missing bearer and an invalid one produce the same typed error: the server does
+# not reveal whether the token existed.
 UNAUTHENTICATED_ERROR = {"status": 401, "type": "authentication_error", "code": "invalid_api_key"}
 
 CASE_NAMES = (
@@ -408,8 +408,8 @@ def _http_case(client: Crupier) -> dict[str, Any]:
         "transcription": _require_model(client, "transcription"),
         "image_generation": _require_model(client, "image_generation"),
     }
-    # 0.6.0 exige autenticación para ejecución real: construir el servidor sin
-    # token ni authenticator falla cerrado antes de escuchar en ningún puerto.
+    # 0.6.0 requires authentication for live execution: building the server with no
+    # token and no authenticator fails closed before it listens on any port.
     observations: dict[str, Any] = {
         "unauthenticated_server": _unauthenticated_server_verdict(client),
     }
@@ -426,8 +426,8 @@ def _http_case(client: Crupier) -> dict[str, Any]:
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
     try:
-        # /health es la sonda pública del servidor: es el único endpoint que no
-        # exige bearer, por eso esta petición va sin credencial.
+        # /health is the server's public probe: it is the only endpoint that does not
+        # require a bearer, which is why this request carries no credential.
         status, headers, body = _http_request(base_url, "/health")
         health = json.loads(body)
         observations["health"] = {
@@ -619,9 +619,9 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "request_id": bool(headers.get("x-request-id")),
         }
 
-        # Modelo inexistente a propósito: si la respuesta es 401 y no un error de
-        # modelo desconocido, queda probado que la autenticación va antes que el
-        # enrutado y que una petición sin credencial no gasta tokens.
+        # Nonexistent model on purpose: a 401 instead of an unknown-model error proves
+        # that authentication runs before routing, so a request without a credential
+        # spends no tokens.
         status, _, body = _http_request(
             base_url,
             "/v1/chat/completions",
@@ -655,8 +655,8 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "code": error.get("code"),
         }
 
-        # Los controles internos de Crupier son de SDK, no de red: inyectarlos en
-        # el cuerpo OpenAI se rechaza con un error tipado y sin ejecutar la ruta.
+        # Crupier's internal controls belong to the SDK, not to the wire: injecting
+        # them into the OpenAI body is rejected with a typed error and no route runs.
         status, _, body = _http_request(
             base_url,
             "/v1/chat/completions",
@@ -736,12 +736,11 @@ def _http_case(client: Crupier) -> dict[str, Any]:
 
 
 def _unauthenticated_server_verdict(client: Crupier) -> str:
-    """Indica si un servidor de ejecución real sin autenticación llega a construirse.
+    """Report whether a live server with no authentication can be built at all.
 
-    El `finally` no es decorativo: si el contrato se rompiera, el servidor sí se
-    construiría y `TCPServer.__init__` ya habría hecho bind y listen, de modo que
-    la comprobación dejaría un socket de ejecución real sin autenticación
-    escuchando durante el resto de la validación.
+    The `finally` is not decorative: if the contract broke, the server would be built
+    and `TCPServer.__init__` would already have bound and listened, so this very check
+    would leave a live, unauthenticated socket listening for the rest of the run.
     """
 
     server = None
