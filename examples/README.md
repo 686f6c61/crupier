@@ -1,4 +1,4 @@
-# Crupier 0.5.0 examples
+# Crupier 0.6.0 examples
 
 These examples are integration blueprints, not provider benchmarks. The default path is offline: it builds the real capability registry, policy filters, scoring terms, route plan, cost estimate, and decision trace without spending tokens or requiring API keys.
 
@@ -57,7 +57,9 @@ python examples/eval_feedback_loop.py
 
 ## Real validation
 
-The validation harnesses are the examples that call configured providers. They load your project `crupier.toml`, use its allowlist and environment variables, sanitize their JSON observations, and fail with a non-zero exit code when a check fails.
+The validation harnesses are the examples that call configured providers. They load your project `crupier.toml`, use its allowlist and environment variables, and fail with a non-zero exit code when a check fails.
+
+Sanitization applies to the recorded provider calls: each one is reduced to an allowlist of route metadata (role, provider, model, attempt, status, latency, and the operation or multimodal counters of that case) and never carries prompts, headers, or credentials. It does not apply to the answers under test. `live_routing_validation.py` stores an `output_preview` of up to 1000 characters plus any structured `output_json`, and `live_operations_validation.py` stores transcription text, because that content is the evidence a real check needs. Treat the generated report as local evidence, keep it inside `.crupier/`, and never commit or publish it.
 
 ```bash
 python examples/live_routing_validation.py --real --project . --write-report
@@ -75,7 +77,7 @@ python examples/live_operations_validation.py --real --project . --case embeddin
 
 ## Eval datasets
 
-- `routing-eval.json` checks expected strategies, roles, model counts, and provider constraints.
+- `routing-eval.json` checks expected strategies, roles, and model counts; its local-only case also pins which providers a route may and may not use.
 - `model-compare-eval.json` compares route variants over repeatable project cases.
 
 These datasets are intentionally small enough to inspect in code review. Replace their tasks and expectations with representative production cases before applying eval or feedback scores to a registry.
