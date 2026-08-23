@@ -27,7 +27,7 @@ from typing import Any
 
 from _example_support import offline_client, print_route
 
-from crupier import CrupierConfigError, HumanFeedbackStore
+from crupier import CrupierConfigError, CrupierResult, HumanFeedbackStore
 from crupier.config import CrupierConfig
 from crupier.redaction import redact_text, redact_value
 
@@ -67,6 +67,7 @@ def main() -> None:
         "canonical_key_on_custom_host": _endpoint_verdict(
             "openai",
             {"enabled": True, "env_key": "OPENAI_API_KEY", "host": CUSTOM_HOST},
+            expect="is not an official endpoint",
         ),
         "custom_host_with_explicit_optin": _endpoint_verdict(
             "openai",
@@ -85,6 +86,7 @@ def main() -> None:
                 "host": INSECURE_HOST,
                 "allow_custom_host": True,
             },
+            expect="must use HTTPS outside loopback",
         ),
         "generic_endpoint_reusing_canonical_key": _endpoint_verdict(
             "inference",
@@ -94,6 +96,7 @@ def main() -> None:
                 "env_key": "OPENAI_API_KEY",
                 "host": CUSTOM_HOST,
             },
+            expect="cannot reuse the canonical credential",
         ),
         "generic_endpoint_with_own_key": _endpoint_verdict(
             "inference",
@@ -107,12 +110,22 @@ def main() -> None:
     }
 
     policy_boundary = {
-        "policy_table_of_wrong_type": _policy_verdict("deny-everything"),
-        "rule_that_is_not_a_table": _policy_verdict({"rules": ["deny"]}),
-        "rule_with_unsupported_effect": _policy_verdict(
-            {"rules": [{"name": "allow_all", "effect": "allow"}]}
+        "policy_table_of_wrong_type": _policy_verdict(
+            "deny-everything",
+            expect="policy must be a table/object",
         ),
-        "well_formed_deny_rule": _policy_verdict({"rules": [NO_LOCAL_DAEMON_RULE]}),
+        "rule_that_is_not_a_table": _policy_verdict(
+            {"rules": ["deny"]},
+            expect="must be a table/object, not str",
+        ),
+        "rule_with_unsupported_effect": _policy_verdict(
+            {"rules": [{"name": "allow_all", "effect": "allow"}]},
+            expect="unsupported effect",
+        ),
+        "well_formed_deny_rule": _policy_verdict(
+            {"rules": [NO_LOCAL_DAEMON_RULE]},
+            expected_rules=1,
+        ),
     }
 
     try:
@@ -153,6 +166,8 @@ def main() -> None:
         dry_run=True,
         trace="summary",
     )
+    if result.route is None:
+        raise RuntimeError("fail_closed_safety did not produce a route plan")
 
     with TemporaryDirectory(prefix="crupier-fail-closed-") as root:
         store = HumanFeedbackStore(root)
@@ -160,9 +175,9 @@ def main() -> None:
             project="fail-closed-safety",
             rating=3,
             verdict="needs_work",
-            models=result.route.models if result.route else [],
+            models=result.route.models,
             mode="fast",
-            strategy=result.route.strategy if result.route else None,
+            strategy=result.route.strategy,
             tags=["dry_run_source", "credential_pasted_by_mistake"],
             note=f"Reviewer pasted OPENAI_API_KEY={EXAMPLE_SECRET} into the review note.",
         )
@@ -174,40 +189,75 @@ def main() -> None:
         extra={
             **credential_boundary,
             **policy_boundary,
+            "excluded_models": _format_exclusions(result),
             "redacted_tool_error": redacted_tool_error,
             "redacted_trace_observation": redacted_observation,
             "redacted_feedback_note": stored_note,
             "feedback_persistence": "temporary",
             "secret_printed_in_clear": any(
                 EXAMPLE_SECRET in str(value)
-                for value in (redacted_tool_error, redacted_observation, stored_note)
+                for value in (
+                    *credential_boundary.values(),
+                    *policy_boundary.values(),
+                    redacted_tool_error,
+                    redacted_observation,
+                    stored_note,
+                )
             ),
         },
     )
     crupier.close()
 
 
-def _endpoint_verdict(provider: str, settings: dict[str, Any]) -> str:
-    """Indica si Crupier aceptaría enviar credenciales a ese endpoint."""
+def _endpoint_verdict(
+    provider: str,
+    settings: dict[str, Any],
+    *,
+    expect: str | None = None,
+) -> str:
+    """Indica si Crupier aceptaría enviar credenciales a ese endpoint.
+
+    ``expect`` es el fragmento que debe aparecer en el mensaje cuando el contrato
+    rechaza la configuración. Sin esa comprobación el veredicto mentiría en las
+    dos direcciones: ``CrupierConfig.from_dict`` reconvierte cualquier
+    ``TypeError`` o ``ValueError`` en ``CrupierConfigError``, así que un fallo del
+    propio ejemplo se leería como «la frontera aguantó»; y
+    ``validate_provider_endpoint`` solo corre para proveedores habilitados, así
+    que un proveedor apagado por error devolvería «accepted» sin que nadie
+    hubiera validado nada.
+    """
 
     try:
-        _single_provider_config(provider, settings)
+        config = _single_provider_config(provider, settings)
     except CrupierConfigError as exc:
-        return f"rejected:{_first_sentence(exc)}"
+        return f"rejected:{_rejection_reason(exc, expect)}"
+    if not config.providers[provider].enabled:
+        raise RuntimeError(
+            f"Provider {provider!r} ended up disabled, so the credential boundary "
+            "never ran and this verdict would prove nothing"
+        )
     return "accepted"
 
 
-def _policy_verdict(policy: Any) -> str:
-    """Indica si una tabla `[policy]` es aceptada o falla cerrada."""
+def _policy_verdict(policy: Any, *, expect: str | None = None, expected_rules: int = 0) -> str:
+    """Indica si una tabla `[policy]` es aceptada o falla cerrada.
+
+    ``expected_rules`` da evidencia positiva al camino aceptado: comprueba que la
+    regla se ha parseado de verdad y no que simplemente no saltó ninguna excepción.
+    """
 
     try:
-        _single_provider_config(
+        config = _single_provider_config(
             "openai",
             {"enabled": True, "env_key": "OPENAI_API_KEY"},
             policy=policy,
         )
     except CrupierConfigError as exc:
-        return f"rejected:{_first_sentence(exc)}"
+        return f"rejected:{_rejection_reason(exc, expect)}"
+    if len(config.policy.rules) != expected_rules:
+        raise RuntimeError(
+            f"Expected {expected_rules} parsed policy rule(s), got {len(config.policy.rules)}"
+        )
     return "accepted"
 
 
@@ -230,14 +280,30 @@ def _single_provider_config(
     return CrupierConfig.from_dict(data)
 
 
-def _first_sentence(exc: Exception) -> str:
-    """Reduce el mensaje a una línea para que la evidencia siga siendo legible."""
+def _rejection_reason(exc: CrupierConfigError, expect: str | None) -> str:
+    """Reduce el rechazo a una línea redactada y comprueba que es el esperado."""
 
-    message = " ".join(str(exc).split())
+    message = redact_text(" ".join(str(exc).split()))
+    if expect is not None and expect not in message:
+        raise RuntimeError(
+            f"Expected the configuration to be rejected because it {expect!r}, "
+            f"but it failed for another reason: {message}"
+        )
     head, separator, _ = message.partition(". ")
     if not separator:
         return head
     return f"{head}."
+
+
+def _format_exclusions(result: CrupierResult) -> str:
+    """Enumera cada modelo descartado con su motivo, sin exponer nada más."""
+
+    trace = result.trace
+    if trace is None:
+        return "trace=disabled"
+    return ";".join(
+        f"{item.get('model')}:{item.get('reason')}" for item in trace.excluded_models
+    ) or "none"
 
 
 if __name__ == "__main__":
