@@ -3107,13 +3107,22 @@ def _iter_source_files(
     candidates = [root / Path(path) for path in paths] if paths else [root]
     yielded = 0
     for candidate in candidates:
-        if not candidate.exists():
+        try:
+            candidate_exists = candidate.exists()
+            candidate_is_file = candidate.is_file()
+        except OSError:
             continue
-        iterable = [candidate] if candidate.is_file() else candidate.rglob("*")
+        if not candidate_exists:
+            continue
+        iterable = [candidate] if candidate_is_file else candidate.rglob("*")
         for path in iterable:
             if yielded >= max_files:
                 return
-            if not path.is_file() or path.suffix not in SOURCE_SUFFIXES:
+            try:
+                is_file = path.is_file()
+            except OSError:
+                continue
+            if not is_file or path.suffix not in SOURCE_SUFFIXES:
                 continue
             try:
                 relative_parts = path.resolve().relative_to(root).parts
