@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import crupier.approvals as approvals_module
 from crupier.approvals import ApprovalManager, plan_hash, request_fingerprint
 from crupier.errors import CrupierError
 from crupier.models import (
@@ -316,3 +317,12 @@ def test_reviewer_attestation_and_file_identity_validation(tmp_path):
         "date": date(2026, 8, 2),
     }
     assert manager.create(serializable).status == "pending"
+
+
+def test_approval_json_helpers_support_to_dict_and_missing_expiry():
+    class Serializable:
+        def to_dict(self):
+            return {"at": date(2026, 8, 23)}
+
+    assert approvals_module._jsonable(Serializable()) == {"at": "2026-08-23"}
+    assert approvals_module._parse(None) == datetime.max.replace(tzinfo=UTC)

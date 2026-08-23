@@ -7,6 +7,7 @@ from crupier import Crupier
 from crupier.adapters import AdapterResponse, EmbeddingResponse, OperationResponse
 from crupier.config import CrupierConfig
 from crupier.errors import (
+    CrupierBudgetExceededError,
     CrupierModelUnsupportedError,
     CrupierPolicyError,
     CrupierRouteValidationError,
@@ -220,6 +221,24 @@ def test_classifier_failure_can_fall_back_to_deterministic_result(tmp_path):
     )
 
     assert result == "image_generation"
+
+
+def test_classifier_budget_error_is_not_downgraded_to_fallback(tmp_path):
+    config = make_config(tmp_path, allow=["nan:rerank", "nan:flux-2-klein"])
+    config.orchestrator.mode = "model"
+    config.orchestrator.model = "openai:planner"
+    client = Crupier(
+        config,
+        adapters={
+            "nan": OperationAdapter(),
+            "openai": ChatClassifier("", error=CrupierBudgetExceededError("budget exhausted")),
+        },
+    )
+
+    with pytest.raises(CrupierBudgetExceededError, match="budget exhausted"):
+        client.operations._classify_operation(
+            RequestEnvelope(task="create an image"), input=None, files=[], dry_run=False
+        )
 
 
 def test_classifier_invalid_response_records_failure_and_error_mode_raises(tmp_path):

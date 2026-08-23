@@ -8,11 +8,24 @@ from crupier.models import (
     FileRoutingPlan,
     OperationResult,
     PlanningContext,
+    PreparedDeal,
     RequestEnvelope,
     RoutePlan,
     RouteStep,
     UpdateReport,
 )
+
+
+def test_prepared_deal_serializes_request_plan_and_trace():
+    request = RequestEnvelope(task="serialize")
+    plan = RoutePlan(strategy="single", steps=[RouteStep(role="primary", model="openai:test")])
+    trace = DecisionTrace(trace_id="trc_serialized", request_summary="serialize", route_plan=plan)
+
+    payload = PreparedDeal(request=request, plan=plan, trace=trace, dry_run=True).to_dict()
+
+    assert payload["request"]["task"] == "serialize"
+    assert payload["plan"]["strategy"] == "single"
+    assert payload["trace"]["trace_id"] == "trc_serialized"
 
 
 def test_model_ref_parse_keeps_ollama_tag_colons():

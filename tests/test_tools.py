@@ -4,6 +4,8 @@ from datetime import UTC, date, datetime
 import pytest
 from _synthetic_secrets import SYNTHETIC_BEARER_TOKEN, SYNTHETIC_OPENAI_API_KEY
 
+import crupier.tools as tools_module
+
 from crupier.errors import (
     CrupierModelUnsupportedError,
     CrupierRouteValidationError,
@@ -370,6 +372,16 @@ def test_tool_execution_serializes_provider_objects_and_omits_none():
     assert legacy["result"] == {"at": "2026-07-15T12:00:00+00:00", "items": [1, 2]}
     assert fallback["result"].startswith("<object object at ")
     assert "error" not in fallback
+
+
+def test_tool_execution_can_include_safe_error_detail_and_truncate_at_boundary():
+    payload = ToolExecution(
+        "a", "lookup", {}, "failed", error="failed", error_detail="safe detail"
+    ).to_dict(include_error_detail=True)
+
+    assert payload["error_detail"] == "safe detail"
+    assert tools_module._truncate("exact", 5) == "exact"
+    assert tools_module._truncate("too long", 6) == "too..."
 
 
 def test_idempotency_key_is_stable_across_argument_order():

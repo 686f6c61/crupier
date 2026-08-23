@@ -61,6 +61,7 @@ def test_registry_helpers_cover_noop_change_and_retained_discovery() -> None:
         ("ollama", "nomic-embed-text", "embedding", 768),
         ("ollama", "mxbai-embed-large", "embedding", 1024),
         ("custom", "universal-embed-v1", "embedding", None),
+        ("openai", "text-embedding-3-large", "embedding", 3072),
     ],
 )
 def test_discovered_embedding_cards_are_specialized(
@@ -178,6 +179,13 @@ def test_registry_index_and_previous_discovery_fallbacks(tmp_path: Path) -> None
     registry.save_card(_card("old", source="discovered"))
     registry.save_card(_card("other"))
     assert registry._previous_discovered_keys(["custom"]) == {"custom:old"}
+
+    cards = {
+        "other:ignored": CapabilityCard(ModelRef.parse("other:ignored"), "test"),
+        "custom:kept": _card("kept", source="discovered"),
+    }
+    registry._load_local_cards = lambda: cards  # type: ignore[method-assign]
+    assert registry._previous_discovered_keys(["custom"]) == {"custom:kept"}
 
 
 def test_seed_update_covers_modified_unchanged_and_deprecated_cards(tmp_path: Path, monkeypatch) -> None:

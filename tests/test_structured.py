@@ -1,5 +1,6 @@
 import pytest
 
+import crupier.structured as structured_module
 from crupier.errors import CrupierStructuredOutputError
 from crupier.models import RequestEnvelope
 from crupier.structured import (
@@ -44,6 +45,9 @@ def test_schema_from_request_supports_direct_and_response_format_schemas():
         RequestEnvelope(task="x", response_schema={"type": "json_schema", "json_schema": direct})
     ) == direct
     assert schema_from_request(RequestEnvelope(task="x")) is None
+    assert structured_module._schema_from_response_format(
+        {"type": "json_schema", "json_schema": "invalid"}
+    ) is None
 
 
 def test_schema_from_request_prefers_constraint_and_supports_model_classes():

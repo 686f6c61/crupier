@@ -1,5 +1,8 @@
+import pytest
+
+import crupier.model_profiles as model_profiles_module
 from crupier.config import CrupierConfig
-from crupier.model_profiles import classify_task_signal_weights
+from crupier.model_profiles import apply_decision_profile, classify_task_signal_weights
 from crupier.models import CapabilityCard, ModelRef, RequestEnvelope
 from crupier.selector import ModelSelector
 
@@ -171,3 +174,55 @@ def test_selector_weights_stronger_task_signals_more_than_weak_mode_hint():
     assert term.value > config.scoring.task_signal_weight
     assert "research=1" in term.reason
     assert "fast=0.7" in term.reason
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_kind", "expected_input", "expected_output"),
+    [
+        ("text-embedding-3-large", "embedding", ["text"], ["embedding"]),
+        ("gpt-image-1", "image", ["text", "image"], ["image"]),
+        ("gpt-audio-mini", "audio", ["text", "audio"], ["text", "audio"]),
+        ("gpt-4o-transcribe", "transcription", ["audio"], ["text"]),
+        ("tts-1", "tts", ["text"], ["audio"]),
+        ("totally-unknown-model", "chat", ["text"], ["text"]),
+    ],
+)
+def test_model_profiles_infers_kind_for_unknown_model_families(
+    model, expected_kind, expected_input, expected_output
+):
+    card = apply_decision_profile(
+        CapabilityCard(
+            model_ref=ModelRef(provider="openai", model=model, source="discovered"),
+            last_updated="test",
+        )
+    )
+
+    assert card.model_kind == expected_kind
+    assert card.modalities_input == expected_input
+    assert card.modalities_output == expected_output
+
+
+def test_model_profile_residual_branches_have_observable_effects():
+    assert model_profiles_module._keyword_matches("anything", "") is False
+
+    thinking = apply_decision_profile(
+        CapabilityCard(ModelRef.parse("google:unknown-thinking-model"), "test"),
+        provider_metadata={"thinking": True},
+    )
+    codex = apply_decision_profile(CapabilityCard(ModelRef.parse("openai:gpt-codex-custom"), "test"))
+    specialized = apply_decision_profile(CapabilityCard(ModelRef.parse("openai:gpt-audio-mini"), "test"))
+    latest = apply_decision_profile(CapabilityCard(ModelRef.parse("custom:model-latest"), "test"))
+    snapshot = apply_decision_profile(CapabilityCard(ModelRef.parse("custom:model-2026"), "test"))
+    qwen = apply_decision_profile(CapabilityCard(ModelRef.parse("ollama:qwen3-coder-custom"), "test"))
+    minimax = apply_decision_profile(CapabilityCard(ModelRef.parse("ollama:minimax-m3-custom"), "test"))
+
+    assert "reasoning" in thinking.strengths
+    assert {"coding", "agentic", "tool_use"} <= set(codex.strengths)
+    assert specialized.modalities_input == ["text", "audio"]
+    assert specialized.modalities_output == ["text", "audio"]
+    assert latest.routing_hints["lifecycle"] == "latest_alias"
+    assert snapshot.routing_hints["lifecycle"] == "snapshot"
+    assert model_profiles_module._base_lifecycle(latest) == "latest_alias"
+    assert model_profiles_module._base_lifecycle(snapshot) == "snapshot"
+    assert qwen.skill_scores["coding"] == 8.8
+    assert minimax.skill_scores["multimodal"] == 8.0

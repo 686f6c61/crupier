@@ -12,6 +12,8 @@ from crupier.models import (
     ModelRef,
     PlanningContext,
     RequestEnvelope,
+    RoutePlan,
+    RouteStep,
 )
 from crupier.orchestrator import (
     DeterministicOrchestrator,
@@ -192,6 +194,13 @@ def test_deterministic_limits_and_risk_helpers(tmp_path):
     assert router._risk_level(RequestEnvelope(task="x", mode="fast"), "single") == "low"
     assert router._risk_level(RequestEnvelope(task="x"), "single") == "medium"
 
+    fallback_without_model = RoutePlan(strategy="fallback", steps=[])
+    assert router._plan_latency_estimate(fallback_without_model, context().candidates) == 0
+    unknown = RoutePlan(
+        strategy="custom", steps=[RouteStep(role="primary", model="openai:a")]
+    )
+    assert router._plan_latency_estimate(unknown, context().candidates) == 5000
+
 
 def test_panel_and_fusion_prefer_provider_diversity(tmp_path):
     config = make_config(tmp_path)
@@ -245,6 +254,9 @@ def test_orchestrated_request_is_not_treated_as_a_required_final_strategy(tmp_pa
     assert planner._profile_strategy(ctx) is None
     assert payload["required_strategy"] is None
     assert "single" in payload["allowed_strategies"]
+
+    explicit = context(RequestEnvelope(task="nested task", strategy="panel"))
+    assert planner._profile_strategy(explicit) == "panel"
 
 
 def test_model_orchestrator_error_mode_reports_missing_adapter(tmp_path):
