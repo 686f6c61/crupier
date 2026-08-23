@@ -53,6 +53,16 @@ _NON_FINAL_RELEASE_PATTERNS = [
     re.compile(r"Development Status :: [34]\b"),
 ]
 _PYPI_PROJECT_JSON_URL = "https://pypi.org/pypi/{project}/json"
+# Marcadores de versión en documentación que viaja al sdist o se publica con el paquete.
+# El chequeo solo se aplica si el fichero existe y el marcador está presente, para no
+# fallar en proyectos sintéticos de test que no copian el onboarding real.
+_PACKAGED_DOC_VERSION_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("examples/README.md", re.compile(r"^# Crupier (\d+\.\d+\.\d+) examples\s*$", re.MULTILINE)),
+    ("README.md", re.compile(r"Current package source version: `(\d+\.\d+\.\d+)`")),
+    ("README.md", re.compile(r"^## What Is Implemented In (\d+\.\d+\.\d+)\s*$", re.MULTILINE)),
+    ("CONTRIBUTING.md", re.compile(r"Publish `(\d+\.\d+\.\d+)` from a GitHub Release")),
+    (".github/ISSUE_TEMPLATE/bug_report.yml", re.compile(r'placeholder:\s*"(\d+\.\d+\.\d+)"')),
+)
 _EXPECTED_EXAMPLE_FILES = {
     "examples/README.md",
     "examples/_example_support.py",
@@ -207,6 +217,7 @@ def run_release_checks(root: str | Path, *, build: bool = True) -> ReleaseCheckR
         _pyproject_check(pyproject_path, project),
         _project_urls_check(project),
         _version_sync_check(root_path, version),
+        _packaged_docs_version_check(root_path, version),
         _public_version_check(version),
         _public_release_language_check(root_path),
         _public_model_examples_check(root_path),
@@ -520,6 +531,58 @@ def _version_sync_check(root: Path, pyproject_version: str | None) -> ReleaseChe
     )
 
 
+def _packaged_docs_version_check(root: Path, version: str | None) -> ReleaseCheck:
+    """Exige que el onboarding empaquetado anuncie la misma versión que el manifiesto.
+
+    Desde que ``examples/README.md`` entra en el sdist, un titular 0.6.0 con
+    paquete 0.5.0 publicaría documentación de una versión que no existe.
+    """
+
+    mismatches: list[dict[str, Any]] = []
+    inspected: list[str] = []
+    for relpath, pattern in _PACKAGED_DOC_VERSION_MARKERS:
+        path = root / relpath
+        if not path.exists():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        matches = list(pattern.finditer(text))
+        if not matches:
+            continue
+        inspected.append(relpath)
+        for match in matches:
+            found = match.group(1)
+            if found == version:
+                continue
+            mismatches.append(
+                {
+                    "path": relpath,
+                    "line": text.count("\n", 0, match.start()) + 1,
+                    "found": found,
+                    "expected": version,
+                    "match": match.group(0).strip(),
+                }
+            )
+    ok = not mismatches
+    return ReleaseCheck(
+        id="packaged_docs_version",
+        status="pass" if ok else "fail",
+        severity="high",
+        summary="Packaged onboarding documents advertise the same version as the package."
+        if ok
+        else "Packaged onboarding documents advertise a different version than the package.",
+        evidence={
+            "version": version,
+            "inspected": inspected,
+            "mismatches": mismatches,
+        },
+        actions=[
+            "Keep examples/README.md, README.md, CONTRIBUTING.md, and the bug-report version placeholder in sync with [project].version before building distributions."
+        ]
+        if not ok
+        else [],
+    )
+
+
 def _public_version_check(version: str | None) -> ReleaseCheck:
     ok = bool(version and _FINAL_PUBLIC_VERSION_RE.fullmatch(version))
     return ReleaseCheck(
@@ -541,6 +604,7 @@ def _public_release_language_check(root: Path) -> ReleaseCheck:
         root / "pyproject.toml",
         root / "README.md",
         root / "CHANGELOG.md",
+        root / "examples" / "README.md",
     ]
     matches: list[dict[str, Any]] = []
     for path in public_paths:

@@ -2,6 +2,24 @@
 
 All notable changes to Crupier will be documented here.
 
+## 0.6.0 - 2026-08-23
+
+- Blocked canonical provider credentials from unofficial hosts unless the project sets `allow_custom_host = true` and uses HTTPS (HTTP only on loopback). Generic inference hosts may only use their own configured env key.
+- Rejected client-controlled local filesystem paths in the OpenAI-compatible HTTP JSON surface; multipart bytes remain the supported upload path.
+- Stopped metadata-only traces from persisting task text, including truncated `request.summary` / `trace.request_summary` fields. Replay still requires explicit `--store-prompt`.
+- Added a central secret redactor covering OpenAI, Anthropic, Google, Ollama, OpenRouter, NaN, AWS, and bearer-shaped values across traces, feedback, evals, experiments, operations, and tool error text sent back to models.
+- Made malformed policy rules fail closed with `CrupierConfigError` instead of degrading to an empty allow-all policy.
+- Required a bearer token for live `crupier serve` execution, required authentication for non-loopback binds, and rejected internal Crupier controls (`dry_run`, `trace`, `constraints`, `metadata`, `mode`) in OpenAI request bodies.
+- Restricted POSIX permissions on sensitive local artifacts (`.crupier/state.sqlite3`, traces, feedback) and reported corrupt traces/feedback instead of dropping them silently.
+- Expanded `crupier init` `.gitignore` coverage for `.crupier/state.sqlite3`, registry snapshots, audits, and backlog files.
+- Validated numeric request constraints at the public boundary and typed Ollama transport failures into the shared adapter error contract.
+- Unified permanent HTTP error classification across adapters and pinned PyPI publish GitHub Actions to SHAs.
+- Hardened GitHub Actions: job timeouts, CI concurrency that does not cancel the weekly dependency audit, checkout without persisted credentials, and shorter artifact retention.
+- Packaged every public example (`routing_tradeoffs`, `specialized_operations`, `eval_feedback_loop`, `fail_closed_safety`, and `examples/README.md`) and added an offline fail-closed onboarding example for unofficial hosts, malformed policy, and secret redaction.
+- Failed `crupier release check` when packaged onboarding documents advertise a version other than `[project].version`, so an examples index titled `0.6.0` cannot ship inside a `0.5.0` sdist.
+- Raised test coverage through dedicated module tests and CI dependency-audit jobs; the suite is the release gate alongside ruff, mypy, and `crupier release check`.
+- Bumped the package to `0.6.0` and aligned README, CONTRIBUTING, the bug-report placeholder, and the examples index with that version; publishing remains gated on full local, package, and real-provider verification.
+
 ## 0.5.0 - 2026-08-02
 
 - Added an explicit request-constraint contract with boolean validation, visible warnings for unknown controls, opt-in strict rejection through `strict_constraints=True`, and drift coverage for controls such as `orchestrator_candidate_limit`.

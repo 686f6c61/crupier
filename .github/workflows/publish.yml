@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Package version to publish, for example 0.2.0."
+        description: "Package version to publish, for example 0.6.0."
         required: true
         type: string
       confirm_publish:
@@ -19,9 +19,13 @@ concurrency:
   group: pypi-publish-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     environment:
       name: pypi
       url: https://pypi.org/project/crupier/
@@ -114,5 +118,6 @@ jobs:
           name: crupier-distributions
           path: dist/*
           if-no-files-found: error
+          retention-days: 14
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1

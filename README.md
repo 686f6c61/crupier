@@ -9,7 +9,7 @@ It is designed for two situations:
 
 Crupier is a BYOK orchestration layer: it runs with your own provider accounts across OpenAI, Anthropic Claude, Google Gemini, Ollama Cloud, configurable OpenAI-compatible inference servers, optional OpenRouter BYOK, or your own integration boundary. It keeps prompts/responses out of persistent logs by default and routes each request toward the best available model or model family for the task, quality target, latency, cost budget, and project policy.
 
-Current package source version: `0.5.0`.
+Current package source version: `0.6.0`.
 
 ## What It Does
 
@@ -404,6 +404,8 @@ host = "http://localhost:11434"
 env_key = "OLLAMA_API_KEY"
 ```
 
+Canonical providers (OpenAI, Anthropic, OpenRouter, Ollama Cloud, NaN) refuse unofficial hosts while using the default API-key env var. To point those adapters at a custom endpoint you must set `allow_custom_host = true` and use HTTPS, or HTTP on loopback. A configurable inference server uses only `INFERENCE_API_KEY`; it will not fall back to `OPENAI_API_KEY`.
+
 ## Discover And Allow Models
 
 Crupier discovers the models your account can see at that moment:
@@ -449,7 +451,7 @@ crupier models show ollama:glm-5.2
 
 Every capability card carries a decision profile with `routing_status`, `lifecycle`, `production_default`, `requires_opt_in`, task skills, modality support, and source evidence. Expensive or narrow models can remain visible without being selected by default. For example, OpenAI `o3`, `o3-pro`, and `o4-mini` are treated as explicit opt-in models rather than Crupier production-default choices.
 
-For `0.5.0`, Crupier treats the provider catalog and the automatic routing set as different things. Provider discovery may produce hundreds of cards, but the production-default set stays intentionally small and source-backed: current OpenAI GPT defaults, current Claude Opus/Sonnet defaults, current Gemini Flash/Pro defaults, and selected Ollama Cloud defaults such as `ollama:glm-5.2` and `ollama:gpt-oss:120b`. Models from a configurable inference server remain selectable by the project owner through `[models].allow`, but are classified as `unknown`, `opt_in`, `specialized`, `legacy`, `deprecated`, or `shutdown` until project probes and eval evidence justify promotion.
+For `0.6.0`, Crupier treats the provider catalog and the automatic routing set as different things. Provider discovery may produce hundreds of cards, but the production-default set stays intentionally small and source-backed: current OpenAI GPT defaults, current Claude Opus/Sonnet defaults, current Gemini Flash/Pro defaults, and selected Ollama Cloud defaults such as `ollama:glm-5.2` and `ollama:gpt-oss:120b`. Models from a configurable inference server remain selectable by the project owner through `[models].allow`, but are classified as `unknown`, `opt_in`, `specialized`, `legacy`, `deprecated`, or `shutdown` until project probes and eval evidence justify promotion.
 
 Refresh reports now separate added, removed, stale, pricing, and profile/capability changes so maintainers can review what changed before updating an allowlist.
 
@@ -1044,10 +1046,7 @@ export OPENAI_BASE_URL="http://127.0.0.1:8787/v1"
 
 `crupier serve` binds to `127.0.0.1` and uses dry-run mode by default. Live execution (`--no-dry-run`) requires a bearer token from `CRUPIER_SERVER_TOKEN` (or the variable selected with `--auth-token-env`), and clients must send it as `Authorization: Bearer ...`. Non-loopback binds such as `0.0.0.0` require both `--allow-remote` and configured authentication. Browser requests are rejected unless their exact origin was opted in with `--cors-origin http://localhost:3000`; JSON endpoints also require `application/json` and upload endpoints require `multipart/form-data`.
 
-El servidor solo acepta en el cuerpo parámetros pertenecientes al contrato
-OpenAI de cada endpoint. Los controles internos `dry_run`, `trace`,
-`constraints`, `crupier`, `metadata` y `mode` se rechazan con `400`; el modo,
-los límites de coste y la persistencia siguen siendo decisiones del operador.
+The server only accepts OpenAI-contract fields in each endpoint body. Internal Crupier controls (`dry_run`, `trace`, `constraints`, `crupier`, `metadata`, `mode`) return `400`; mode, cost limits, and persistence stay operator decisions. JSON bodies cannot name local filesystem paths (including `..` and symlink escapes); send file bytes through the multipart endpoints.
 
 Implemented endpoints:
 
@@ -1141,12 +1140,7 @@ crupier trace show trc_...
 crupier trace delete trc_...
 ```
 
-`logging.ttl_days` limita la retención local de trazas, feedback e historial de
-evaluaciones. Crupier elimina los artefactos caducados al abrir el proyecto y
-antes de escribir; `crupier purge` permite ejecutar el mismo barrido de forma
-explícita. La redacción de secretos está siempre activa y
-`logging.redact_secrets = false` se rechaza para evitar una falsa expectativa
-de configuración.
+`logging.ttl_days` bounds local retention of traces, feedback, and eval history. Crupier deletes expired artifacts when a project opens and before writes; `crupier purge` runs the same sweep on demand. Secret redaction is always on; `logging.redact_secrets = false` is rejected so config cannot imply that secrets would be stored in the clear.
 
 Metadata-only traces are inspectable but not replayable. They keep route
 metrics (model, strategy, cost, latency) and a non-content fingerprint of
@@ -1281,10 +1275,10 @@ Final public release order:
 5. Rerun `crupier release check --strict-public --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference`.
 6. Confirm Dependabot security updates are enabled and unpaused.
 7. Protect `main` with required CI, no force pushes, and pull-request review before accepting public changes.
-8. Publish a final GitHub Release from the current `main` tip tagged `v0.5.0` or `0.5.0`; the publish workflow rejects draft/non-final releases, non-main targets, commits that do not match `origin/main`, and tags that do not match the package version.
+8. Publish a final GitHub Release from the current `main` tip tagged `v0.6.0` or `0.6.0`; the publish workflow rejects draft/non-final releases, non-main targets, commits that do not match `origin/main`, and tags that do not match the package version.
 
 Manual workflow dispatch is only for retrying an intentional release operation.
-It must run from `main`, requires the `version` input to equal `0.5.0`, and
+It must run from `main`, requires the `version` input to equal `0.6.0`, and
 requires `confirm_publish=true` before any distribution is built or uploaded.
 The publish workflow verifies that the configured PyPI project is available for
 first uploads or already owned for maintenance releases, then requires the
@@ -1296,7 +1290,7 @@ permissions and links the `pypi` environment to the package page.
 
 For development and pull request expectations, see [CONTRIBUTING.md](https://github.com/686f6c61/crupier/blob/main/CONTRIBUTING.md).
 
-## What Is Implemented In 0.5.0
+## What Is Implemented In 0.6.0
 
 Implemented now:
 
@@ -1321,15 +1315,16 @@ Implemented now:
 - model-powered operation classification with deterministic fallback and shared end-to-end budgets
 - eval runner, compare reports, human review packets, human decision templates, and feedback application
 - adoption audit, doctor, package, handoff, code comments, SARIF, and signoff workflows
-- opt-in metadata traces with redaction and replay only when prompt/input storage is explicitly enabled
-- OpenAI-like Python client, optional autopatch, and local HTTP server for chat, embeddings, reranking, images, speech, and transcription
+- opt-in metadata traces with redaction, no task-text persistence unless `--store-prompt` is set, and replay only when prompt/input storage is explicitly enabled
+- OpenAI-like Python client, optional autopatch, and local HTTP server for chat, embeddings, reranking, images, speech, and transcription, with bearer auth for live execution and no local-path reads from JSON bodies
+- fail-closed policy parsing, central secret redaction, and isolation of canonical API keys from unofficial hosts
 - declarative policy rules and local-by-default `.crupier/profiles/` routing presets
 - provider retries with jitter, circuit breakers, and route-time degraded-provider exclusion
 - typed errors and `py.typed`
 - release gate with build, artifact, install smoke, PyPI name, project URL, provider readiness, CI, security, and dependency checks
 - validated request constraints with visible unknown-key warnings, strict mode, tool requirements, human-approval gates, and per-request parallel execution control
 
-Planned after `0.5.0`:
+Planned after `0.6.0`:
 
 - production-calibrated model orchestrator evals
 - larger production eval datasets

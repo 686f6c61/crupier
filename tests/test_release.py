@@ -330,6 +330,7 @@ def test_release_check_reports_ready_with_license_warning(tmp_path):
     assert report.version == "0.1.0"
     assert checks["pyproject_metadata"] == "pass"
     assert checks["version_sync"] == "pass"
+    assert checks["packaged_docs_version"] == "pass"
     assert checks["public_version"] == "pass"
     assert checks["public_repository_surface"] == "pass"
     assert checks["repository_gitignore"] == "pass"
@@ -1952,6 +1953,42 @@ def test_release_check_detects_version_mismatch(tmp_path):
 
     assert report.ok is False
     assert checks["version_sync"].status == "fail"
+
+
+def test_release_check_fails_when_examples_readme_advertises_another_version(tmp_path):
+    """El índice de examples viaja en el sdist; un titular distinto del manifiesto debe fallar."""
+
+    write_release_project(tmp_path)
+    (tmp_path / "examples").mkdir()
+    (tmp_path / "examples" / "README.md").write_text("# Crupier 0.6.0 examples\n", encoding="utf-8")
+
+    report = run_release_checks(tmp_path, build=False)
+    checks = {check.id: check for check in report.checks}
+
+    assert report.ok is False
+    assert checks["packaged_docs_version"].status == "fail"
+    assert checks["packaged_docs_version"].evidence["mismatches"] == [
+        {
+            "path": "examples/README.md",
+            "line": 1,
+            "found": "0.6.0",
+            "expected": "0.1.0",
+            "match": "# Crupier 0.6.0 examples",
+        }
+    ]
+
+
+def test_release_check_passes_when_examples_readme_matches_package_version(tmp_path):
+    write_release_project(tmp_path)
+    (tmp_path / "examples").mkdir()
+    (tmp_path / "examples" / "README.md").write_text("# Crupier 0.1.0 examples\n", encoding="utf-8")
+
+    report = run_release_checks(tmp_path, build=False)
+    checks = {check.id: check for check in report.checks}
+
+    assert checks["packaged_docs_version"].status == "pass"
+    assert checks["packaged_docs_version"].evidence["inspected"] == ["examples/README.md"]
+    assert checks["packaged_docs_version"].evidence["mismatches"] == []
 
 
 def test_release_check_rejects_nonfinal_versions(tmp_path):
