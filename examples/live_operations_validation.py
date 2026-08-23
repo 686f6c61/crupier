@@ -35,6 +35,10 @@ from crupier.server import build_openai_compatible_server
 # Controles internos del SDK que el cuerpo OpenAI del servidor HTTP rechaza.
 INTERNAL_CONTROLS = ("constraints", "dry_run", "metadata", "mode", "trace")
 
+# Un bearer ausente y uno inválido producen el mismo error tipado: el servidor no
+# revela si el token existía.
+UNAUTHENTICATED_ERROR = {"status": 401, "type": "authentication_error", "code": "invalid_api_key"}
+
 CASE_NAMES = (
     "classifier",
     "embeddings",
@@ -406,7 +410,9 @@ def _http_case(client: Crupier) -> dict[str, Any]:
     }
     # 0.6.0 exige autenticación para ejecución real: construir el servidor sin
     # token ni authenticator falla cerrado antes de escuchar en ningún puerto.
-    unauthenticated_server_error = _unauthenticated_server_error(client)
+    observations: dict[str, Any] = {
+        "unauthenticated_server": _unauthenticated_server_verdict(client),
+    }
     token = f"crupier-validation-{uuid4().hex}"
     server = build_openai_compatible_server(
         crupier=client,
@@ -419,10 +425,9 @@ def _http_case(client: Crupier) -> dict[str, Any]:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
-    observations: dict[str, Any] = {
-        "unauthenticated_server": unauthenticated_server_error,
-    }
     try:
+        # /health es la sonda pública del servidor: es el único endpoint que no
+        # exige bearer, por eso esta petición va sin credencial.
         status, headers, body = _http_request(base_url, "/health")
         health = json.loads(body)
         observations["health"] = {
@@ -712,16 +717,8 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "request_id": True,
         },
         "unauthenticated_server": observations["unauthenticated_server"] == "CrupierConfigError",
-        "missing_bearer": observations["missing_bearer"] == {
-            "status": 401,
-            "type": "authentication_error",
-            "code": "invalid_api_key",
-        },
-        "invalid_bearer": observations["invalid_bearer"] == {
-            "status": 401,
-            "type": "authentication_error",
-            "code": "invalid_api_key",
-        },
+        "missing_bearer": observations["missing_bearer"] == UNAUTHENTICATED_ERROR,
+        "invalid_bearer": observations["invalid_bearer"] == UNAUTHENTICATED_ERROR,
         "internal_controls": observations["internal_controls"]["status"] == 400
         and observations["internal_controls"]["type"] == "invalid_request_error"
         and observations["internal_controls"]["rejected"] == sorted(INTERNAL_CONTROLS),
@@ -735,8 +732,8 @@ def _http_case(client: Crupier) -> dict[str, Any]:
     }
 
 
-def _unauthenticated_server_error(client: Crupier) -> str:
-    """Devuelve el error tipado al construir un servidor real sin autenticación."""
+def _unauthenticated_server_verdict(client: Crupier) -> str:
+    """Indica si un servidor de ejecución real sin autenticación llega a construirse."""
 
     try:
         build_openai_compatible_server(
@@ -745,8 +742,7 @@ def _unauthenticated_server_error(client: Crupier) -> str:
             port=0,
             dry_run=False,
         )
-    except CrupierConfigError as exc:
-        del exc
+    except CrupierConfigError:
         return "CrupierConfigError"
     return "accepted"
 

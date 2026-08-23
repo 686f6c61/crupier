@@ -52,9 +52,9 @@ NO_LOCAL_DAEMON_RULE = {
 def lookup_invoice(invoice_id: str) -> dict[str, str]:
     """Example tool whose failure leaks a credential into the error message.
 
-    Crupier ejecuta las herramientas detrás de un límite que aplica
-    ``redact_text`` al detalle del error antes de devolverlo al modelo o de
-    escribirlo en la traza, que es justo lo que reproduce este ejemplo.
+    Crupier runs tools behind a boundary that applies ``redact_text`` to the
+    error detail before it reaches the model or the trace, which is exactly what
+    this example reproduces.
     """
 
     raise RuntimeError(
@@ -235,7 +235,9 @@ def _first_sentence(exc: Exception) -> str:
 
     message = " ".join(str(exc).split())
     head, separator, _ = message.partition(". ")
-    return head + separator.strip()
+    if not separator:
+        return head
+    return f"{head}."
 
 
 if __name__ == "__main__":
