@@ -315,11 +315,13 @@ print(response.choices[0].message.content)`,
   },
   server: {
     filename: "terminal.sh",
-    code: `crupier serve --port 8787 --no-dry-run
+    code: `export CRUPIER_SERVER_TOKEN
+crupier serve --port 8787 --no-dry-run
 
 export OPENAI_BASE_URL="http://127.0.0.1:8787/v1"
 
 curl "$OPENAI_BASE_URL/responses" \\
+  -H "Authorization: Bearer $CRUPIER_SERVER_TOKEN" \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-5.4-mini",
@@ -331,6 +333,7 @@ curl "$OPENAI_BASE_URL/responses" \\
     code: `crupier init
 crupier models discover --provider openai
 crupier capabilities readiness --strict
+crupier release check --skip-build
 
 crupier route \\
   "Compare two implementation plans" \\

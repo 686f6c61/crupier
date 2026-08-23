@@ -31,7 +31,7 @@ REQUIRED_FILES = (
 )
 PUBLIC_MODEL_PROVIDERS = {"anthropic", "google", "ollama", "openai"}
 ALLOWED_EXTERNAL_SCRIPTS = {"https://analytics.686f6c61.dev/script.js"}
-SITE_VERSION = "0.5.0"
+SITE_VERSION = "0.6.0"
 
 
 class SiteParser(HTMLParser):
@@ -222,9 +222,17 @@ def validate() -> list[str]:
 
     if f"Crupier {SITE_VERSION}" not in html:
         fail(errors, f"site does not expose release version {SITE_VERSION}")
-    for required_text in ("Una petición", "Patrones de ejecución completos", "Qué todavía no"):
+    for required_text in (
+        "Una petición",
+        "Patrones de ejecución completos",
+        "Qué todavía no",
+        "Fail-closed",
+        "allow_custom_host",
+    ):
         if required_text not in html:
             fail(errors, f"missing required product statement: {required_text}")
+    if "Authorization: Bearer $CRUPIER_SERVER_TOKEN" not in js:
+        fail(errors, "HTTP sample must show the live-server bearer contract")
 
     combined = "\n".join((html, css, js))
     if re.search(r"(?:linear|radial|conic)-gradient\s*\(", css, flags=re.IGNORECASE):

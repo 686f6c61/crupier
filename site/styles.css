@@ -804,6 +804,10 @@ h3 {
   background: var(--coral);
 }
 
+.control-lane:nth-child(4)::before {
+  background: var(--yellow);
+}
+
 .control-number {
   grid-column: 1;
   grid-row: 1;

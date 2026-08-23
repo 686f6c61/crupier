@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="Crupier 0.5.0 es el SDK Python BYOK para seleccionar y ejecutar rutas multi-modelo, operar shadow y canary, mantener sesiones y auditar aprobaciones.">
+    <meta name="description" content="Crupier 0.6.0 es el SDK Python BYOK para routing multi-modelo, shadow y canary, sesiones y un plano de control fail-closed.">
     <meta name="author" content="686f6c61">
     <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1">
     <meta name="theme-color" content="#f2f1eb">
@@ -13,7 +13,7 @@
     <meta property="og:site_name" content="Crupier">
     <meta property="og:url" content="https://crupier.686f6c61.dev/">
     <meta property="og:title" content="Crupier · Una petición. La ruta correcta.">
-    <meta property="og:description" content="Orquestación y control de flota para Python: routing multi-modelo, shadow y canary, sesiones con replan y aprobaciones auditables.">
+    <meta property="og:description" content="Orquestación y control de flota para Python: routing multi-modelo, shadow y canary, sesiones y fail-closed ante hosts, políticas y secretos.">
     <meta property="og:image" content="https://crupier.686f6c61.dev/og-crupier.png">
     <meta property="og:image:secure_url" content="https://crupier.686f6c61.dev/og-crupier.png">
     <meta property="og:image:type" content="image/png">
@@ -24,7 +24,7 @@
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:creator" content="@686f6c61">
     <meta name="twitter:title" content="Crupier · Una petición. La ruta correcta.">
-    <meta name="twitter:description" content="SDK Python BYOK para seleccionar, ejecutar y operar rutas multi-modelo en producción.">
+    <meta name="twitter:description" content="SDK Python BYOK para seleccionar, ejecutar y operar rutas multi-modelo con un plano de control fail-closed.">
     <meta name="twitter:image" content="https://crupier.686f6c61.dev/og-crupier.png">
     <meta name="twitter:image:alt" content="Crupier conecta una petición con una ruta multi-modelo validada.">
 
@@ -40,14 +40,14 @@
         "@context": "https://schema.org",
         "@type": "SoftwareSourceCode",
         "name": "Crupier",
-        "description": "SDK Python BYOK para seleccionar, ejecutar y operar rutas multi-modelo con shadow, canary, sesiones y aprobaciones auditables.",
+        "description": "SDK Python BYOK para seleccionar, ejecutar y operar rutas multi-modelo con shadow, canary, sesiones y un plano de control fail-closed.",
         "url": "https://crupier.686f6c61.dev/",
         "image": "https://crupier.686f6c61.dev/og-crupier.png",
         "codeRepository": "https://github.com/686f6c61/crupier",
         "downloadUrl": "https://pypi.org/project/crupier/",
         "programmingLanguage": "Python",
         "runtimePlatform": "Python 3.11+",
-        "version": "0.5.0",
+        "version": "0.6.0",
         "license": "https://opensource.org/licenses/MIT",
         "author": {
           "@type": "Person",
@@ -68,7 +68,7 @@
 
     <header class="site-header">
       <a class="brand" href="#top">
-        <span>Crupier</span><mark>0.5.0</mark>
+        <span>Crupier</span><mark>0.6.0</mark>
       </a>
       <nav class="site-nav" aria-label="Navegación principal">
         <a href="#runtime">Runtime</a>
@@ -86,7 +86,7 @@
           <p class="eyebrow">BYOK · Python · multi-provider</p>
           <h1 id="hero-title">Una petición.<br><mark>La ruta correcta.</mark></h1>
           <p class="hero-lede">
-            Crupier clasifica la tarea, filtra por capacidades y política, y deja que un LLM proponga el patrón de ejecución y los modelos. Después valida el plan, ejecuta cada rol y permite comparar, aprobar y evolucionar la ruta con evidencia.
+            Crupier clasifica la tarea, filtra por capacidades y política, y deja que un LLM proponga el patrón de ejecución y los modelos. Después valida el plan, ejecuta cada rol y permite comparar, aprobar y evolucionar la ruta con evidencia. Lo que no está permitido no degrada: falla cerrado.
           </p>
           <div class="install-line" role="group" aria-label="Comando de instalación">
             <code>pip install crupier</code>
@@ -98,7 +98,7 @@
       <section class="route-lab" aria-labelledby="route-lab-title">
         <div class="route-lab-head page-shell">
           <div>
-            <p class="eyebrow">Traza real · 2026-07-15</p>
+            <p class="eyebrow">Rutas de ejemplo · 0.6.0</p>
             <h2 id="route-lab-title">El reparto cambia con la tarea</h2>
           </div>
           <div class="route-tabs" role="tablist" aria-label="Seleccionar tipo de ruta">
@@ -133,16 +133,16 @@
         <div class="page-shell section-heading inverted">
           <p class="eyebrow">Request lifecycle</p>
           <h2 id="runtime-title">El LLM propone. La política decide si puede.</h2>
-          <p>Cada fase deja evidencia. Ningún modelo se salta la allowlist, las capacidades requeridas o el presupuesto del proyecto.</p>
+          <p>Cada fase deja evidencia. Ningún modelo se salta la allowlist, las capacidades requeridas o el presupuesto. Una política malformada no se convierte en allow-all; aborta.</p>
         </div>
         <ol class="runtime-flow page-shell">
           <li><span>01</span><strong>Clasificar</strong><small>task signals + operación</small></li>
-          <li><span>02</span><strong>Filtrar</strong><small>policy + capabilities</small></li>
+          <li><span>02</span><strong>Filtrar</strong><small>fail-closed + capabilities</small></li>
           <li><span>03</span><strong>Puntuar</strong><small>calidad + coste + latencia</small></li>
           <li><span>04</span><strong>Orquestar</strong><small>LLM + candidate cards</small></li>
           <li><span>05</span><strong>Validar</strong><small>schema + route shape</small></li>
           <li><span>06</span><strong>Ejecutar</strong><small>roles + tools + fallback</small></li>
-          <li><span>07</span><strong>Trazar</strong><small>calls + budget + errors</small></li>
+          <li><span>07</span><strong>Trazar</strong><small>calls + redact + errors</small></li>
         </ol>
       </section>
 
@@ -234,7 +234,7 @@
           <div class="section-heading">
             <p class="eyebrow">Production control plane</p>
             <h2 id="control-title">Cambia modelos.<br>Sin operar a ciegas.</h2>
-            <p>La decisión no termina cuando sale una respuesta. Crupier conserva el contexto operativo para comparar candidatos, replanificar conversaciones y congelar rutas que necesitan revisión humana.</p>
+            <p>La decisión no termina cuando sale una respuesta. Crupier conserva el contexto operativo para comparar candidatos, replanificar conversaciones, congelar rutas que necesitan revisión humana y fallar cerrado cuando un host, una política o un secreto no deberían seguir.</p>
           </div>
 
           <div class="control-lanes">
@@ -265,6 +265,15 @@
               </div>
               <code>freeze → review → execute</code>
             </article>
+            <article class="control-lane">
+              <span class="control-number">04</span>
+              <div>
+                <p class="eyebrow">Fail-closed</p>
+                <h3>Hosts, política y secretos</h3>
+                <p>Las claves canónicas no salen a un host ajeno salvo <code>allow_custom_host</code>. Una regla de política malformada aborta. Los secretos se redactan. El servidor HTTP exige bearer en ejecución real y rechaza controles internos en el cuerpo OpenAI.</p>
+              </div>
+              <code>deny → redact → require auth</code>
+            </article>
           </div>
         </div>
       </section>
@@ -279,7 +288,7 @@
               <li><span class="contract-label">Native</span><span class="contract-copy"><code>deal</code>, <code>session</code>, embeddings, audio e imagen.</span></li>
               <li><span class="contract-label">Control</span><span class="contract-copy">Experimentos, aprobaciones y rutas persistidas.</span></li>
               <li><span class="contract-label">Drop-in</span><span class="contract-copy">Cliente Python compatible con OpenAI.</span></li>
-              <li><span class="contract-label">HTTP</span><span class="contract-copy">Responses, Chat, embeddings, rerank, audio e imágenes.</span></li>
+              <li><span class="contract-label">HTTP</span><span class="contract-copy">Bearer en ejecución real; Responses, Chat, embeddings, rerank, audio e imágenes.</span></li>
               <li><span class="contract-label">CLI</span><span class="contract-copy">Discovery, probes, evals, approvals, experiments y releases.</span></li>
             </ul>
           </div>
@@ -320,6 +329,9 @@
               <th scope="row">Routing multi-modelo</th><td><span class="state live">Ejecutable</span></td><td>Patrones validados, presupuesto compartido, retry, circuit breaker, fallback y quorum.</td>
             </tr>
             <tr class="boundary-row">
+              <th scope="row">Fail-closed</th><td><span class="state live">Ejecutable</span></td><td>Hosts no oficiales, política inválida, redacción central, bearer en <code>serve</code> y rechazo de paths locales en JSON.</td>
+            </tr>
+            <tr class="boundary-row">
               <th scope="row">Shadow y canary</th><td><span class="state live">Ejecutable</span></td><td>Cohortes sticky, ejecución paralela o asíncrona, métricas sin outputs por defecto y promoción reversible.</td>
             </tr>
             <tr class="boundary-row">
@@ -346,7 +358,7 @@
 
       <section class="final-cta" aria-labelledby="cta-title">
         <div class="page-shell">
-          <p class="eyebrow">Crupier 0.5.0</p>
+          <p class="eyebrow">Crupier 0.6.0</p>
           <h2 id="cta-title">Tu aplicación pide.<br><mark>Crupier reparte.</mark></h2>
           <div class="cta-actions">
             <a class="primary-action" href="https://github.com/686f6c61/crupier">Ver el código</a>
