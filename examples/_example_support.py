@@ -35,8 +35,14 @@ def offline_client(
     profile: str = "agentic",
     root: str | Path | None = None,
     experiments: dict[str, Any] | None = None,
+    policy_rules: list[dict[str, Any]] | None = None,
 ) -> Crupier:
-    """Build a dry-run friendly client without requiring provider keys."""
+    """Build a dry-run friendly client without requiring provider keys.
+
+    ``policy_rules`` mirrors the ``[[policy.rules]]`` tables of a real
+    ``crupier.toml``. A malformed rule raises ``CrupierConfigError`` instead of
+    degrading to an allow-all policy.
+    """
 
     config = CrupierConfig.from_dict(
         {
@@ -46,6 +52,15 @@ def offline_client(
                 "anthropic": {"enabled": True, "env_key": "ANTHROPIC_API_KEY"},
                 "google": {"enabled": True, "env_key": "GOOGLE_API_KEY"},
                 "ollama": {"enabled": True, "host": "https://ollama.com/api", "env_key": "OLLAMA_API_KEY"},
+                # OpenRouter es BYOK opcional y viene deshabilitado igual que en el
+                # crupier.toml por defecto: cualquier modelo suyo en la allowlist se
+                # excluye con el filtro openrouter_byok en vez de enrutarse.
+                "openrouter": {
+                    "enabled": False,
+                    "mode": "byok",
+                    "host": "https://openrouter.ai/api/v1",
+                    "env_key": "OPENROUTER_API_KEY",
+                },
                 "nan": {"enabled": True, "env_key": "NAN_API_KEY"},
             },
             "models": {"allow": allow},
@@ -66,6 +81,7 @@ def offline_client(
                 "redact_secrets": True,
             },
             "experiments": dict(experiments or {}),
+            "policy": {"rules": list(policy_rules or [])},
         }
     )
     if root is not None:
