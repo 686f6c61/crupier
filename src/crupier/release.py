@@ -59,14 +59,17 @@ _EXPECTED_EXAMPLE_FILES = {
     "examples/approval_workflow.py",
     "examples/customer_support_triage.py",
     "examples/drop_in_agent_boundary.py",
+    "examples/eval_feedback_loop.py",
     "examples/live_operations_validation.py",
     "examples/live_routing_validation.py",
     "examples/model-compare-eval.json",
     "examples/multimodal_claim_review.py",
     "examples/routing-eval.json",
+    "examples/routing_tradeoffs.py",
     "examples/sdk_dry_run.py",
     "examples/session_contract_review.py",
     "examples/shadow_canary_rollout.py",
+    "examples/specialized_operations.py",
     "examples/workflow_operations_hub.py",
 }
 _RELEASE_SOURCE_IGNORED_NAMES = {

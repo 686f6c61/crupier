@@ -18,6 +18,7 @@ from _synthetic_secrets import SYNTHETIC_GOOGLE_API_KEY
 import crupier.release as release_module
 from crupier.cli import main
 from crupier.release import (
+    _EXPECTED_EXAMPLE_FILES,
     ReleaseCheck,
     ReleaseCheckReport,
     _artifact_content_check,
@@ -1655,6 +1656,17 @@ def test_runtime_safety_defaults_check_enforces_server_exposure_defaults():
     assert check.evidence["server_cors_origin_default"] is None
 
 
+def _add_expected_examples(archive, source):
+    """Empaqueta en *archive* todos los ficheros públicos de ejemplo que exige el release.
+
+    La lista se deriva de `_EXPECTED_EXAMPLE_FILES` para que añadir un ejemplo nuevo
+    al contrato de release no obligue a repetirlo en cada archivo sintético.
+    """
+
+    for name in sorted(_EXPECTED_EXAMPLE_FILES):
+        archive.add(source, arcname=f"demo-0.1.0/{name}")
+
+
 def _write_metadata_artifacts(tmp_path, metadata_text):
     wheel = tmp_path / "demo-0.1.0-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
@@ -1747,20 +1759,7 @@ def test_artifact_content_check_requires_typed_marker_and_blocks_local_artifacts
         archive.add(source, arcname="demo-0.1.0/src/crupier/py.typed")
         archive.add(source, arcname="demo-0.1.0/.env.example")
         archive.add(source, arcname="demo-0.1.0/CONTRIBUTING.md")
-        archive.add(source, arcname="demo-0.1.0/examples/_example_support.py")
-        archive.add(source, arcname="demo-0.1.0/examples/agentic_pr_review.py")
-        archive.add(source, arcname="demo-0.1.0/examples/approval_workflow.py")
-        archive.add(source, arcname="demo-0.1.0/examples/customer_support_triage.py")
-        archive.add(source, arcname="demo-0.1.0/examples/drop_in_agent_boundary.py")
-        archive.add(source, arcname="demo-0.1.0/examples/live_operations_validation.py")
-        archive.add(source, arcname="demo-0.1.0/examples/live_routing_validation.py")
-        archive.add(source, arcname="demo-0.1.0/examples/model-compare-eval.json")
-        archive.add(source, arcname="demo-0.1.0/examples/multimodal_claim_review.py")
-        archive.add(source, arcname="demo-0.1.0/examples/routing-eval.json")
-        archive.add(source, arcname="demo-0.1.0/examples/sdk_dry_run.py")
-        archive.add(source, arcname="demo-0.1.0/examples/session_contract_review.py")
-        archive.add(source, arcname="demo-0.1.0/examples/shadow_canary_rollout.py")
-        archive.add(source, arcname="demo-0.1.0/examples/workflow_operations_hub.py")
+        _add_expected_examples(archive, source)
 
     clean_check, clean_payload = _artifact_content_check([sdist, clean])
 
@@ -1789,20 +1788,7 @@ def test_artifact_content_check_requires_typed_marker_and_blocks_local_artifacts
         archive.add(source, arcname="demo-0.1.0/src/crupier/py.typed")
         archive.add(source, arcname="demo-0.1.0/.env.example")
         archive.add(source, arcname="demo-0.1.0/CONTRIBUTING.md")
-        archive.add(source, arcname="demo-0.1.0/examples/_example_support.py")
-        archive.add(source, arcname="demo-0.1.0/examples/agentic_pr_review.py")
-        archive.add(source, arcname="demo-0.1.0/examples/approval_workflow.py")
-        archive.add(source, arcname="demo-0.1.0/examples/customer_support_triage.py")
-        archive.add(source, arcname="demo-0.1.0/examples/drop_in_agent_boundary.py")
-        archive.add(source, arcname="demo-0.1.0/examples/live_operations_validation.py")
-        archive.add(source, arcname="demo-0.1.0/examples/live_routing_validation.py")
-        archive.add(source, arcname="demo-0.1.0/examples/model-compare-eval.json")
-        archive.add(source, arcname="demo-0.1.0/examples/multimodal_claim_review.py")
-        archive.add(source, arcname="demo-0.1.0/examples/routing-eval.json")
-        archive.add(source, arcname="demo-0.1.0/examples/sdk_dry_run.py")
-        archive.add(source, arcname="demo-0.1.0/examples/session_contract_review.py")
-        archive.add(source, arcname="demo-0.1.0/examples/shadow_canary_rollout.py")
-        archive.add(source, arcname="demo-0.1.0/examples/workflow_operations_hub.py")
+        _add_expected_examples(archive, source)
         archive.add(source, arcname="demo-0.1.0/docs/crupier-roadmap.md")
 
     docs_check, docs_payload = _artifact_content_check([internal_docs])
@@ -1816,20 +1802,7 @@ def test_artifact_content_check_requires_typed_marker_and_blocks_local_artifacts
         archive.add(source, arcname="demo-0.1.0/src/crupier/py.typed")
         archive.add(source, arcname="demo-0.1.0/.env.example")
         archive.add(source, arcname="demo-0.1.0/CONTRIBUTING.md")
-        archive.add(source, arcname="demo-0.1.0/examples/_example_support.py")
-        archive.add(source, arcname="demo-0.1.0/examples/agentic_pr_review.py")
-        archive.add(source, arcname="demo-0.1.0/examples/approval_workflow.py")
-        archive.add(source, arcname="demo-0.1.0/examples/customer_support_triage.py")
-        archive.add(source, arcname="demo-0.1.0/examples/drop_in_agent_boundary.py")
-        archive.add(source, arcname="demo-0.1.0/examples/live_operations_validation.py")
-        archive.add(source, arcname="demo-0.1.0/examples/live_routing_validation.py")
-        archive.add(source, arcname="demo-0.1.0/examples/model-compare-eval.json")
-        archive.add(source, arcname="demo-0.1.0/examples/multimodal_claim_review.py")
-        archive.add(source, arcname="demo-0.1.0/examples/routing-eval.json")
-        archive.add(source, arcname="demo-0.1.0/examples/sdk_dry_run.py")
-        archive.add(source, arcname="demo-0.1.0/examples/session_contract_review.py")
-        archive.add(source, arcname="demo-0.1.0/examples/shadow_canary_rollout.py")
-        archive.add(source, arcname="demo-0.1.0/examples/workflow_operations_hub.py")
+        _add_expected_examples(archive, source)
         archive.add(source, arcname="demo-0.1.0/tests/test_release.py")
 
     tests_check, tests_payload = _artifact_content_check([packaged_tests])
