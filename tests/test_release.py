@@ -1656,11 +1656,22 @@ def test_runtime_safety_defaults_check_enforces_server_exposure_defaults():
     assert check.evidence["server_cors_origin_default"] is None
 
 
+def test_expected_example_files_exist_in_the_repository():
+    """El contrato de release solo puede exigir ejemplos que existan de verdad."""
+
+    root = Path(__file__).resolve().parents[1]
+    missing = sorted(name for name in _EXPECTED_EXAMPLE_FILES if not (root / name).is_file())
+
+    assert missing == []
+
+
 def _add_expected_examples(archive, source):
     """Empaqueta en *archive* todos los ficheros públicos de ejemplo que exige el release.
 
     La lista se deriva de `_EXPECTED_EXAMPLE_FILES` para que añadir un ejemplo nuevo
-    al contrato de release no obligue a repetirlo en cada archivo sintético.
+    al contrato de release no obligue a repetirlo en cada archivo sintético; el prefijo
+    `demo-0.1.0/` es el mismo que usan las entradas vecinas de cada archivo sintético.
+    Que la constante no liste ficheros inexistentes lo cubre el test de arriba.
     """
 
     for name in sorted(_EXPECTED_EXAMPLE_FILES):
