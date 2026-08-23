@@ -69,6 +69,25 @@
       }
     },
     {
+      "id": "local_only_incident_summary",
+      "task": "Summarize an internal incident log that contains employee names before it is shared with the security team.",
+      "input": {
+        "records": 120,
+        "contains_personal_data": true
+      },
+      "mode": "private",
+      "constraints": {
+        "allowed_providers": ["ollama"],
+        "max_cost_usd": 0.05
+      },
+      "expect": {
+        "strategy": "local_first",
+        "providers_include": ["ollama"],
+        "providers_exclude": ["openai", "anthropic", "google", "openrouter"],
+        "roles_include": ["primary"]
+      }
+    },
+    {
       "id": "cheap_help_center_cleanup",
       "task": "Summarize and normalize 200 short help-center article titles before a knowledge-base cleanup.",
       "mode": "cheap",
