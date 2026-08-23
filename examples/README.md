@@ -63,7 +63,7 @@ python examples/fail_closed_safety.py
 
 The validation harnesses are the examples that call configured providers. They load your project `crupier.toml`, use its allowlist and environment variables, and fail with a non-zero exit code when a check fails.
 
-Sanitization applies to the recorded provider calls: each one is reduced to an allowlist of route metadata (role, provider, model, attempt, status, latency, and the operation or multimodal counters of that case) and never carries prompts, headers, or credentials. It does not apply to the answers under test. `live_routing_validation.py` stores an `output_preview` of up to 1000 characters plus any structured `output_json`, and `live_operations_validation.py` stores transcription text, because that content is the evidence a real check needs. Treat the generated report as local evidence, keep it inside `.crupier/`, and never commit or publish it.
+Sanitization applies to the recorded provider calls: each one is reduced to an allowlist of route metadata and never carries prompts, headers, or credentials. It does not apply to the rest of the report. `live_routing_validation.py` stores an `output_preview` of up to 1000 characters plus any structured `output_json`, and `live_operations_validation.py` stores transcription text, because that content is the evidence a real check needs; route plans, input plans, and trace errors are also stored verbatim. The whole report is printed to stdout as well as written by `--write-report`, so treat it as local evidence, keep it out of CI logs, and never commit or publish it.
 
 ```bash
 python examples/live_routing_validation.py --real --project . --write-report
@@ -77,7 +77,7 @@ python examples/live_routing_validation.py --real --project . --case tools --cas
 python examples/live_operations_validation.py --real --project . --case embeddings --case rerank
 ```
 
-`live_routing_validation.py` covers single, cascade, fusion, critique/repair, iterative tools, delegation, native image input, and PDF extraction. `live_operations_validation.py` covers operation classification, embeddings, reranking, audio, image generation, the OpenAI-compatible Python surface, and the optional HTTP server. Its `http` case also proves the 0.6.0 server contract: building a live server without authentication fails closed, missing or invalid bearer tokens return a typed `401`, and Crupier's internal controls (`dry_run`, `trace`, `constraints`, `metadata`, `mode`) are rejected with a `400` when injected into an OpenAI request body. Those controls remain available on the Python surface, which the `compat` case exercises.
+`live_routing_validation.py` covers single, cascade, fusion, critique/repair, iterative tools, delegation, native image input, and PDF extraction. `live_operations_validation.py` covers operation classification, embeddings, reranking, audio, image generation, the OpenAI-compatible Python surface, and the optional HTTP server. Its `http` case also proves the 0.6.0 server contract: building a live server without authentication fails closed, missing or invalid bearer tokens return a typed `401`, and Crupier's internal controls (`dry_run`, `trace`, `constraints`, `metadata`, `mode`) are rejected with a `400` when injected into an OpenAI request body. Those controls remain available on the Python surface, where the `compat` case passes `trace` as a keyword argument.
 
 ## Eval datasets
 

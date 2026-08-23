@@ -128,8 +128,12 @@ python examples/multimodal_claim_review.py
 python examples/drop_in_agent_boundary.py
 python examples/workflow_operations_hub.py
 python examples/approval_workflow.py
+python examples/routing_tradeoffs.py
 python examples/session_contract_review.py
 python examples/shadow_canary_rollout.py
+python examples/specialized_operations.py
+python examples/eval_feedback_loop.py
+python examples/fail_closed_safety.py
 ```
 
 When you are ready to call providers:
@@ -923,7 +927,7 @@ python examples/live_operations_validation.py \
   --real --project . --write-report
 ```
 
-The project used for this command must allow at least one executable chat, embedding, reranking, transcription, TTS, and image-generation model. Those capabilities may come from built-in providers or a configured OpenAI-compatible inference server. Use `--case classifier`, `--case audio`, or repeat `--case` to narrow a run. The sanitized report is written to the ignored local path `.crupier/evals/live-operations-validation.json`; it records models, dimensions, byte counts, endpoint evidence, calls, budgets, and errors, but not vectors, audio, images, credentials, or raw provider responses.
+The project used for this command must allow at least one executable chat, embedding, reranking, transcription, TTS, and image-generation model. Those capabilities may come from built-in providers or a configured OpenAI-compatible inference server. Use `--case classifier`, `--case audio`, or repeat `--case` to narrow a run. The sanitized report is written to the ignored local path `.crupier/evals/live-operations-validation.json`; it records models, dimensions, byte counts, endpoint evidence, calls, budgets, and errors, but not vectors, audio, images, or credentials. It does record the transcription text, because that answer is the evidence the audio case asserts, and the same report is printed to stdout, so treat it as local evidence and never publish it.
 
 The suite sends these exact controlled requests:
 
