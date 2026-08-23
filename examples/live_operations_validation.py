@@ -28,9 +28,12 @@ from uuid import uuid4
 
 from _example_support import offline_client, print_route
 
-from crupier import Crupier, ModelRef, OperationResult
+from crupier import Crupier, CrupierConfigError, ModelRef, OperationResult
 from crupier.compat.openai import OpenAI
 from crupier.server import build_openai_compatible_server
+
+# Controles internos del SDK que el cuerpo OpenAI del servidor HTTP rechaza.
+INTERNAL_CONTROLS = ("constraints", "dry_run", "metadata", "mode", "trace")
 
 CASE_NAMES = (
     "classifier",
@@ -401,17 +404,24 @@ def _http_case(client: Crupier) -> dict[str, Any]:
         "transcription": _require_model(client, "transcription"),
         "image_generation": _require_model(client, "image_generation"),
     }
+    # 0.6.0 exige autenticación para ejecución real: construir el servidor sin
+    # token ni authenticator falla cerrado antes de escuchar en ningún puerto.
+    unauthenticated_server_error = _unauthenticated_server_error(client)
+    token = f"crupier-validation-{uuid4().hex}"
     server = build_openai_compatible_server(
         crupier=client,
         host="127.0.0.1",
         port=0,
         dry_run=False,
         max_request_bytes=2_000_000,
+        bearer_token=token,
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
-    observations: dict[str, Any] = {}
+    observations: dict[str, Any] = {
+        "unauthenticated_server": unauthenticated_server_error,
+    }
     try:
         status, headers, body = _http_request(base_url, "/health")
         health = json.loads(body)
@@ -421,7 +431,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "request_id": bool(headers.get("x-request-id")),
         }
 
-        status, _, body = _http_request(base_url, "/v1/models")
+        status, _, body = _http_request(base_url, "/v1/models", bearer=token)
         listed = json.loads(body)
         observations["models"] = {"status": status, "count": len(listed.get("data", []))}
 
@@ -433,8 +443,8 @@ def _http_case(client: Crupier) -> dict[str, Any]:
                 "instructions": "Reply with exactly HTTP-RESPONSES-OK and nothing else.",
                 "input": "Validate the endpoint.",
                 "max_output_tokens": 40,
-                "trace": "debug",
             },
+            bearer=token,
         )
         response = json.loads(body)
         observations["responses"] = {
@@ -454,8 +464,8 @@ def _http_case(client: Crupier) -> dict[str, Any]:
                 "max_tokens": 40,
                 "stream": True,
                 "stream_options": {"include_usage": True},
-                "trace": "debug",
             },
+            bearer=token,
         )
         stream_text, done = _chat_sse_text(body)
         observations["chat_stream"] = {
@@ -470,11 +480,15 @@ def _http_case(client: Crupier) -> dict[str, Any]:
         embedding_payload: dict[str, Any] = {
             "model": models["embedding"],
             "input": ["HTTP embedding"],
-            "trace": "debug",
         }
         if requested_dimensions is not None:
             embedding_payload["dimensions"] = requested_dimensions
-        status, _, body = _http_request(base_url, "/v1/embeddings", payload=embedding_payload)
+        status, _, body = _http_request(
+            base_url,
+            "/v1/embeddings",
+            payload=embedding_payload,
+            bearer=token,
+        )
         embedding = json.loads(body)
         vectors = embedding.get("data", [])
         observations["embeddings"] = {
@@ -492,8 +506,8 @@ def _http_case(client: Crupier) -> dict[str, Any]:
                 "query": "exact token ZEBRA-991",
                 "documents": ["no match", "contains ZEBRA-991 exactly", "unrelated"],
                 "top_n": 3,
-                "trace": "debug",
             },
+            bearer=token,
         )
         rerank = json.loads(body)
         observations["rerank"] = {
@@ -510,8 +524,8 @@ def _http_case(client: Crupier) -> dict[str, Any]:
                 "input": "The secret phrase is blue ocean seven.",
                 "voice": "ef_dora",
                 "response_format": "wav",
-                "trace": "debug",
             },
+            bearer=token,
         )
         observations["speech"] = {
             "status": status,
@@ -525,7 +539,6 @@ def _http_case(client: Crupier) -> dict[str, Any]:
                 "model": models["transcription"],
                 "language": "en",
                 "response_format": "json",
-                "trace": "debug",
             },
             [("file", "validation.wav", "audio/wav", speech)],
         )
@@ -534,6 +547,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "/v1/audio/transcriptions",
             data=multipart,
             content_type=content_type,
+            bearer=token,
         )
         transcription = json.loads(body)
         observations["transcription"] = {
@@ -550,8 +564,8 @@ def _http_case(client: Crupier) -> dict[str, Any]:
                 "n": 1,
                 "size": "256x256",
                 "response_format": "b64_json",
-                "trace": "debug",
             },
+            bearer=token,
         )
         generated = json.loads(body)
         generated_bytes, generated_reference = _image_result_evidence(generated.get("data"))
@@ -568,7 +582,6 @@ def _http_case(client: Crupier) -> dict[str, Any]:
                 "n": "1",
                 "size": "256x256",
                 "response_format": "b64_json",
-                "trace": "debug",
             },
             [("image", "red.png", "image/png", _solid_png((255, 0, 0), width=256, height=256))],
         )
@@ -577,6 +590,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "/v1/images/edits",
             data=multipart,
             content_type=content_type,
+            bearer=token,
         )
         edited = json.loads(body)
         edited_bytes, edited_reference = _image_result_evidence(edited.get("data"))
@@ -590,6 +604,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             base_url,
             "/v1/chat/completions",
             payload={"model": models["chat"]},
+            bearer=token,
         )
         error = json.loads(body).get("error", {})
         observations["typed_error"] = {
@@ -597,6 +612,65 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "type": error.get("type"),
             "code": error.get("code"),
             "request_id": bool(headers.get("x-request-id")),
+        }
+
+        status, _, body = _http_request(
+            base_url,
+            "/v1/chat/completions",
+            payload={
+                "model": models["chat"],
+                "messages": [{"role": "user", "content": "Unauthenticated request."}],
+                "max_tokens": 16,
+            },
+        )
+        error = json.loads(body).get("error", {})
+        observations["missing_bearer"] = {
+            "status": status,
+            "type": error.get("type"),
+            "code": error.get("code"),
+        }
+
+        status, _, body = _http_request(
+            base_url,
+            "/v1/chat/completions",
+            payload={
+                "model": models["chat"],
+                "messages": [{"role": "user", "content": "Wrong credential."}],
+                "max_tokens": 16,
+            },
+            bearer=f"{token}-invalid",
+        )
+        error = json.loads(body).get("error", {})
+        observations["invalid_bearer"] = {
+            "status": status,
+            "type": error.get("type"),
+            "code": error.get("code"),
+        }
+
+        # Los controles internos de Crupier son de SDK, no de red: inyectarlos en
+        # el cuerpo OpenAI se rechaza con un error tipado y sin ejecutar la ruta.
+        status, _, body = _http_request(
+            base_url,
+            "/v1/chat/completions",
+            payload={
+                "model": models["chat"],
+                "messages": [{"role": "user", "content": "Injected internal controls."}],
+                "max_tokens": 16,
+                "dry_run": True,
+                "trace": "debug",
+                "constraints": {"max_cost_usd": 0.01},
+                "metadata": {"session_id": "injected"},
+                "mode": "fast",
+            },
+            bearer=token,
+        )
+        error = json.loads(body).get("error", {})
+        message = str(error.get("message", ""))
+        observations["internal_controls"] = {
+            "status": status,
+            "type": error.get("type"),
+            "code": error.get("code"),
+            "rejected": sorted(name for name in INTERNAL_CONTROLS if f"'{name}'" in message),
         }
     finally:
         server.shutdown()
@@ -637,6 +711,20 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "code": "invalid_request",
             "request_id": True,
         },
+        "unauthenticated_server": observations["unauthenticated_server"] == "CrupierConfigError",
+        "missing_bearer": observations["missing_bearer"] == {
+            "status": 401,
+            "type": "authentication_error",
+            "code": "invalid_api_key",
+        },
+        "invalid_bearer": observations["invalid_bearer"] == {
+            "status": 401,
+            "type": "authentication_error",
+            "code": "invalid_api_key",
+        },
+        "internal_controls": observations["internal_controls"]["status"] == 400
+        and observations["internal_controls"]["type"] == "invalid_request_error"
+        and observations["internal_controls"]["rejected"] == sorted(INTERNAL_CONTROLS),
     }
     return {
         "id": "http",
@@ -645,6 +733,22 @@ def _http_case(client: Crupier) -> dict[str, Any]:
         "models": models,
         "endpoints": observations,
     }
+
+
+def _unauthenticated_server_error(client: Crupier) -> str:
+    """Devuelve el error tipado al construir un servidor real sin autenticación."""
+
+    try:
+        build_openai_compatible_server(
+            crupier=client,
+            host="127.0.0.1",
+            port=0,
+            dry_run=False,
+        )
+    except CrupierConfigError as exc:
+        del exc
+        return "CrupierConfigError"
+    return "accepted"
 
 
 def _models_for_kind(client: Crupier, kind: str) -> list[str]:
@@ -778,6 +882,7 @@ def _http_request(
     payload: dict[str, Any] | None = None,
     data: bytes | None = None,
     content_type: str = "application/json",
+    bearer: str | None = None,
 ) -> tuple[int, dict[str, str], bytes]:
     body = data
     if payload is not None:
@@ -789,6 +894,8 @@ def _http_request(
     )
     if body is not None:
         request.add_header("content-type", content_type)
+    if bearer is not None:
+        request.add_header("authorization", f"Bearer {bearer}")
     try:
         with urllib.request.urlopen(request, timeout=180) as response:
             return response.status, dict(response.headers.items()), response.read()

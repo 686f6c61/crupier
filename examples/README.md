@@ -77,7 +77,7 @@ python examples/live_routing_validation.py --real --project . --case tools --cas
 python examples/live_operations_validation.py --real --project . --case embeddings --case rerank
 ```
 
-`live_routing_validation.py` covers single, cascade, fusion, critique/repair, iterative tools, delegation, native image input, and PDF extraction. `live_operations_validation.py` covers operation classification, embeddings, reranking, audio, image generation, the OpenAI-compatible Python surface, and the optional HTTP server.
+`live_routing_validation.py` covers single, cascade, fusion, critique/repair, iterative tools, delegation, native image input, and PDF extraction. `live_operations_validation.py` covers operation classification, embeddings, reranking, audio, image generation, the OpenAI-compatible Python surface, and the optional HTTP server. Its `http` case also proves the 0.6.0 server contract: building a live server without authentication fails closed, missing or invalid bearer tokens return a typed `401`, and Crupier's internal controls (`dry_run`, `trace`, `constraints`, `metadata`, `mode`) are rejected with a `400` when injected into an OpenAI request body. Those controls remain available on the Python surface, which the `compat` case exercises.
 
 ## Eval datasets
 
