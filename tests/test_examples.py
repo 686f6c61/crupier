@@ -1,8 +1,25 @@
+import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
+
+# Claves que `crupier.evals.evaluate_expectations` sabe comprobar. Una clave fuera
+# de este conjunto se ignoraría en silencio y el caso del dataset pasaría en vacío.
+SUPPORTED_EXPECTATIONS = {
+    "max_models",
+    "min_models",
+    "models_exclude",
+    "models_include",
+    "providers_exclude",
+    "providers_include",
+    "risk_level",
+    "roles_exclude",
+    "roles_include",
+    "strategy",
+    "strategy_in",
+}
 
 SHOWCASE_SCRIPTS = {
     "approval_workflow.py",
@@ -81,6 +98,8 @@ def test_examples_demonstrate_enforced_contracts_and_boundaries():
     assert "openrouter_byok" in fail_closed
     assert "policy_rule:no_local_daemon_for_customer_data" in fail_closed
     assert "secret_printed_in_clear=False" in fail_closed
+    assert "OpenRouter is optional BYOK and not enabled" in fail_closed
+    assert _example_secret() not in fail_closed
 
     assert '"provider_calls": 0' not in (examples_dir / "sdk_dry_run.py").read_text(encoding="utf-8")
     assert '"provider_calls": 0' not in (examples_dir / "specialized_operations.py").read_text(
@@ -111,6 +130,50 @@ def test_offline_example_client_loads_real_scoring_profiles():
         client.config.profiles
     )
     assert client.config.profiles["fast"].prefer == ["low_latency"]
+
+
+def test_offline_example_client_declares_openrouter_as_disabled_byok():
+    """El filtro openrouter_byok también salta si el proveedor falta, así que hay que
+    comprobar la declaración: apagado, en modo BYOK y con su propia variable."""
+
+    examples_dir = Path(__file__).resolve().parents[1] / "examples"
+    sys.path.insert(0, str(examples_dir))
+    try:
+        from _example_support import offline_client
+
+        client = offline_client(project="byok-check", allow=["openai:gpt-5.4-mini"])
+    finally:
+        sys.path.remove(str(examples_dir))
+
+    openrouter = client.config.providers["openrouter"]
+
+    assert openrouter.enabled is False
+    assert openrouter.mode == "byok"
+    assert openrouter.env_key == "OPENROUTER_API_KEY"
+
+
+def test_routing_eval_dataset_only_uses_supported_expectations():
+    """Una clave mal escrita en `expect` no rompe nada: el caso pasaría sin comprobar."""
+
+    dataset_path = Path(__file__).resolve().parents[1] / "examples" / "routing-eval.json"
+    dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
+    used = {key for case in dataset["cases"] for key in case.get("expect", {})}
+
+    assert used
+    assert sorted(used - SUPPORTED_EXPECTATIONS) == []
+
+
+def _example_secret() -> str:
+    """Lee la credencial sintética del ejemplo para asertarla contra su propia salida."""
+
+    examples_dir = Path(__file__).resolve().parents[1] / "examples"
+    sys.path.insert(0, str(examples_dir))
+    try:
+        from fail_closed_safety import EXAMPLE_SECRET
+
+        return EXAMPLE_SECRET
+    finally:
+        sys.path.remove(str(examples_dir))
 
 
 def _run_showcase_examples(examples_dir: Path) -> dict[str, str]:

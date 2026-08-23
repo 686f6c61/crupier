@@ -1656,13 +1656,22 @@ def test_runtime_safety_defaults_check_enforces_server_exposure_defaults():
     assert check.evidence["server_cors_origin_default"] is None
 
 
-def test_expected_example_files_exist_in_the_repository():
-    """El contrato de release solo puede exigir ejemplos que existan de verdad."""
+def test_expected_example_files_match_the_examples_directory():
+    """El contrato de release debe describir el directorio real, en los dos sentidos.
 
-    root = Path(__file__).resolve().parents[1]
-    missing = sorted(name for name in _EXPECTED_EXAMPLE_FILES if not (root / name).is_file())
+    Comprobar solo `missing_examples == []` sobre un archivo sintético construido a
+    partir de la propia constante sería tautológico: no detectaría ni una entrada
+    caduca ni un ejemplo nuevo sin registrar.
+    """
 
-    assert missing == []
+    examples = Path(__file__).resolve().parents[1] / "examples"
+    published = {
+        f"examples/{path.name}"
+        for path in examples.iterdir()
+        if path.is_file() and path.suffix in {".json", ".md", ".py"}
+    }
+
+    assert _EXPECTED_EXAMPLE_FILES == published
 
 
 def _add_expected_examples(archive, source):
