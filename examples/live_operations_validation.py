@@ -59,7 +59,7 @@ def main() -> None:
         "--write-report",
         nargs="?",
         const=".crupier/evals/live-operations-validation.json",
-        help="Write the sanitized JSON report",
+        help="Write the JSON evidence report; provider calls are sanitized, the answers under test are not",
     )
     args = parser.parse_args()
     if not args.real:
@@ -619,11 +619,14 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "request_id": bool(headers.get("x-request-id")),
         }
 
+        # Modelo inexistente a propósito: si la respuesta es 401 y no un error de
+        # modelo desconocido, queda probado que la autenticación va antes que el
+        # enrutado y que una petición sin credencial no gasta tokens.
         status, _, body = _http_request(
             base_url,
             "/v1/chat/completions",
             payload={
-                "model": models["chat"],
+                "model": "nonexistent:model",
                 "messages": [{"role": "user", "content": "Unauthenticated request."}],
                 "max_tokens": 16,
             },
@@ -733,17 +736,32 @@ def _http_case(client: Crupier) -> dict[str, Any]:
 
 
 def _unauthenticated_server_verdict(client: Crupier) -> str:
-    """Indica si un servidor de ejecución real sin autenticación llega a construirse."""
+    """Indica si un servidor de ejecución real sin autenticación llega a construirse.
 
+    El `finally` no es decorativo: si el contrato se rompiera, el servidor sí se
+    construiría y `TCPServer.__init__` ya habría hecho bind y listen, de modo que
+    la comprobación dejaría un socket de ejecución real sin autenticación
+    escuchando durante el resto de la validación.
+    """
+
+    server = None
     try:
-        build_openai_compatible_server(
+        server = build_openai_compatible_server(
             crupier=client,
             host="127.0.0.1",
             port=0,
             dry_run=False,
         )
-    except CrupierConfigError:
+    except CrupierConfigError as exc:
+        message = " ".join(str(exc).split())
+        if "authentication" not in message:
+            raise RuntimeError(
+                f"The live server was expected to fail closed on authentication, got: {message}"
+            ) from exc
         return "CrupierConfigError"
+    finally:
+        if server is not None:
+            server.server_close()
     return "accepted"
 
 

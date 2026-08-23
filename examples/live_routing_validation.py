@@ -46,7 +46,7 @@ def main() -> None:
         "--write-report",
         nargs="?",
         const=".crupier/evals/live-routing-validation.json",
-        help="Write the sanitized JSON report",
+        help="Write the JSON evidence report; provider calls are sanitized, the answers under test are not",
     )
     args = parser.parse_args()
     if not args.real:
