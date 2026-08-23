@@ -42,6 +42,7 @@ are not application-only labels.
 | `multimodal_claim_review.py` | Which files go native, how bounded CSV rows execute, and which richer pipelines remain explicit boundaries? |
 | `specialized_operations.py` | How are embeddings, reranking, transcription, speech, and image generation kept away from chat-only models? |
 | `eval_feedback_loop.py` | How do route comparisons and human judgement become project-local model signals? |
+| `fail_closed_safety.py` | What stops a credential, a malformed policy rule, or a pasted secret from reaching a provider or a stored artifact? |
 
 ```bash
 python examples/customer_support_triage.py
@@ -49,9 +50,12 @@ python examples/agentic_pr_review.py
 python examples/multimodal_claim_review.py
 python examples/specialized_operations.py
 python examples/eval_feedback_loop.py
+python examples/fail_closed_safety.py
 ```
 
 `specialized_operations.py` uses OpenAI, Google, and NaN capability cards in `dry_run` mode. It proves operation filtering and selection; it does not claim those providers are configured or healthy for your account. Its routes report `planned_provider_calls=0`: operation planning does not stage dry-run calls in the trace, so `real_provider_calls=0` is the line that proves nothing was sent.
+
+`fail_closed_safety.py` covers the three safety contracts of 0.6.0 that the other examples take for granted: canonical credentials are refused on unofficial hosts unless the project opts in with `allow_custom_host` over HTTPS, a malformed `[policy]` table raises `CrupierConfigError` instead of degrading to an allow-all policy, and secrets are redacted before they reach a trace observation, a stored feedback note, or the tool error text returned to a model. Its closing route shows three fail-closed filters at once: `stable_models_only`, `openrouter_byok`, and a declarative deny rule. The credential it uses is synthetic and only ever printed redacted.
 
 `eval_feedback_loop.py` deliberately shows a cheap route winning deterministic dry-run checks and then receiving negative human feedback for insufficient review depth. Dry-run comparison validates route shape and estimated economics, not answer quality. Its feedback JSONL is created in a temporary directory and removed on exit.
 

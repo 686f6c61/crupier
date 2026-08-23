@@ -10,6 +10,7 @@ SHOWCASE_SCRIPTS = {
     "customer_support_triage.py",
     "drop_in_agent_boundary.py",
     "eval_feedback_loop.py",
+    "fail_closed_safety.py",
     "multimodal_claim_review.py",
     "routing_tradeoffs.py",
     "sdk_dry_run.py",
@@ -69,6 +70,17 @@ def test_examples_demonstrate_enforced_contracts_and_boundaries():
     assert "live_execution_gate=False" in outputs["shadow_canary_rollout.py"]
     assert "report_ok=True" in outputs["eval_feedback_loop.py"]
     assert "failed_checks=none" in outputs["eval_feedback_loop.py"]
+
+    fail_closed = outputs["fail_closed_safety.py"]
+    assert "canonical_key_on_custom_host=rejected" in fail_closed
+    assert "custom_host_with_explicit_optin=accepted" in fail_closed
+    assert "custom_host_without_https=rejected" in fail_closed
+    assert "generic_endpoint_reusing_canonical_key=rejected" in fail_closed
+    assert "rule_with_unsupported_effect=rejected" in fail_closed
+    assert "well_formed_deny_rule=accepted" in fail_closed
+    assert "openrouter_byok" in fail_closed
+    assert "policy_rule:no_local_daemon_for_customer_data" in fail_closed
+    assert "secret_printed_in_clear=False" in fail_closed
 
     assert '"provider_calls": 0' not in (examples_dir / "sdk_dry_run.py").read_text(encoding="utf-8")
     assert '"provider_calls": 0' not in (examples_dir / "specialized_operations.py").read_text(

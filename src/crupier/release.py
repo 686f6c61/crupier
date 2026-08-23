@@ -61,6 +61,7 @@ _EXPECTED_EXAMPLE_FILES = {
     "examples/customer_support_triage.py",
     "examples/drop_in_agent_boundary.py",
     "examples/eval_feedback_loop.py",
+    "examples/fail_closed_safety.py",
     "examples/live_operations_validation.py",
     "examples/live_routing_validation.py",
     "examples/model-compare-eval.json",
