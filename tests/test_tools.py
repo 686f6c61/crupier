@@ -5,7 +5,6 @@ import pytest
 from _synthetic_secrets import SYNTHETIC_BEARER_TOKEN, SYNTHETIC_OPENAI_API_KEY
 
 import crupier.tools as tools_module
-
 from crupier.errors import (
     CrupierModelUnsupportedError,
     CrupierRouteValidationError,

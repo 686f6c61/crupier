@@ -5,7 +5,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-import crupier.cli as cli
+from crupier import cli
 from crupier.config import CrupierConfig, ProviderSettings
 from crupier.errors import CrupierConfigError, CrupierError
 from crupier.models import CapabilityCard, ModelRef
