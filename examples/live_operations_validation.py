@@ -39,6 +39,17 @@ INTERNAL_CONTROLS = ("constraints", "dry_run", "metadata", "mode", "trace")
 # not reveal whether the token existed.
 UNAUTHENTICATED_ERROR = {"status": 401, "type": "authentication_error", "code": "invalid_api_key"}
 
+
+class PartialCaseFailure(Exception):
+    """A live case failed after some endpoint evidence was already recorded."""
+
+    def __init__(self, failed_step: str, observations: dict[str, Any], cause: BaseException) -> None:
+        self.failed_step = failed_step
+        self.observations = observations
+        self.cause = cause
+        super().__init__(f"{failed_step}: {cause}")
+
+
 CASE_NAMES = (
     "classifier",
     "embeddings",
@@ -109,17 +120,17 @@ def _offline_preview() -> None:
 
 
 def _run_case(name: str, client: Crupier) -> dict[str, Any]:
-    runners: dict[str, Callable[[Crupier], dict[str, Any]]] = {
-        "classifier": _classifier_case,
-        "embeddings": _embeddings_case,
-        "rerank": _rerank_case,
-        "audio": _audio_case,
-        "image": _image_case,
-        "compat": _compat_case,
-        "http": _http_case,
-    }
     try:
-        return runners[name](client)
+        return CASE_RUNNERS[name](client)
+    except PartialCaseFailure as exc:
+        return {
+            "id": name,
+            "status": "fail",
+            "error_type": type(exc.cause).__name__,
+            "error": str(exc.cause)[:1000],
+            "failed_step": exc.failed_step,
+            "endpoints": exc.observations,
+        }
     except Exception as exc:  # noqa: BLE001 - the validation report records every case
         return {
             "id": name,
@@ -425,6 +436,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    current_step = "health"
     try:
         # /health is the server's public probe: it is the only endpoint that does not
         # require a bearer, which is why this request carries no credential.
@@ -436,10 +448,12 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "request_id": bool(headers.get("x-request-id")),
         }
 
+        current_step = "models"
         status, _, body = _http_request(base_url, "/v1/models", bearer=token)
         listed = json.loads(body)
         observations["models"] = {"status": status, "count": len(listed.get("data", []))}
 
+        current_step = "responses"
         status, headers, body = _http_request(
             base_url,
             "/v1/responses",
@@ -458,6 +472,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "request_id": bool(headers.get("x-request-id")),
         }
 
+        current_step = "chat_stream"
         status, headers, body = _http_request(
             base_url,
             "/v1/chat/completions",
@@ -480,6 +495,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "content_type": headers.get("content-type"),
         }
 
+        current_step = "embeddings"
         embedding_provider = ModelRef.parse(models["embedding"]).provider
         requested_dimensions = 32 if embedding_provider in {"openai", "google"} else None
         embedding_payload: dict[str, Any] = {
@@ -503,6 +519,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "requested_dimensions": requested_dimensions,
         }
 
+        current_step = "rerank"
         status, _, body = _http_request(
             base_url,
             "/v1/rerank",
@@ -521,6 +538,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "top_document": rerank.get("results", [{}])[0].get("document"),
         }
 
+        current_step = "speech"
         status, headers, speech = _http_request(
             base_url,
             "/v1/audio/speech",
@@ -539,6 +557,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "content_type": headers.get("content-type"),
         }
 
+        current_step = "transcription"
         multipart, content_type = _multipart_body(
             {
                 "model": models["transcription"],
@@ -560,6 +579,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "text": str(transcription.get("text", ""))[:200],
         }
 
+        current_step = "image_generation"
         status, _, body = _http_request(
             base_url,
             "/v1/images/generations",
@@ -580,6 +600,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "reference_type": generated_reference,
         }
 
+        current_step = "image_edit"
         multipart, content_type = _multipart_body(
             {
                 "model": models["image_generation"],
@@ -605,6 +626,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "reference_type": edited_reference,
         }
 
+        current_step = "typed_error"
         status, headers, body = _http_request(
             base_url,
             "/v1/chat/completions",
@@ -622,6 +644,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
         # Nonexistent model on purpose: a 401 instead of an unknown-model error proves
         # that authentication runs before routing, so a request without a credential
         # spends no tokens.
+        current_step = "missing_bearer"
         status, _, body = _http_request(
             base_url,
             "/v1/chat/completions",
@@ -638,6 +661,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "code": error.get("code"),
         }
 
+        current_step = "invalid_bearer"
         status, _, body = _http_request(
             base_url,
             "/v1/chat/completions",
@@ -657,6 +681,7 @@ def _http_case(client: Crupier) -> dict[str, Any]:
 
         # Crupier's internal controls belong to the SDK, not to the wire: injecting
         # them into the OpenAI body is rejected with a typed error and no route runs.
+        current_step = "internal_controls"
         status, _, body = _http_request(
             base_url,
             "/v1/chat/completions",
@@ -680,6 +705,18 @@ def _http_case(client: Crupier) -> dict[str, Any]:
             "code": error.get("code"),
             "rejected": sorted(name for name in INTERNAL_CONTROLS if f"'{name}'" in message),
         }
+    except PartialCaseFailure:
+        raise
+    except Exception as exc:
+        observations.setdefault(
+            current_step,
+            {
+                "status": "fail",
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:1000],
+            },
+        )
+        raise PartialCaseFailure(current_step, observations, exc) from exc
     finally:
         server.shutdown()
         server.server_close()
@@ -733,6 +770,17 @@ def _http_case(client: Crupier) -> dict[str, Any]:
         "models": models,
         "endpoints": observations,
     }
+
+
+CASE_RUNNERS: dict[str, Callable[[Crupier], dict[str, Any]]] = {
+    "classifier": _classifier_case,
+    "embeddings": _embeddings_case,
+    "rerank": _rerank_case,
+    "audio": _audio_case,
+    "image": _image_case,
+    "compat": _compat_case,
+    "http": _http_case,
+}
 
 
 def _unauthenticated_server_verdict(client: Crupier) -> str:

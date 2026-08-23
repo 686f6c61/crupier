@@ -110,10 +110,16 @@ class RouteExecutor:
         latency_ms = int((perf_counter() - started) * 1000)
         trace.latency_ms = latency_ms
         trace.cost = CostEstimate(estimated_usd=plan.estimated_cost.estimated_usd, actual_usd=0.0)
-        trace.final_quality_signals = {
-            "dry_run": True,
-            "note": "No provider calls were made.",
-        }
+        # El cliente ya ha escrito sticky_route_reused y approval_bound_tools;
+        # reasignar el dict los borraba y las sesiones offline mentían reuse=False.
+        signals = dict(trace.final_quality_signals)
+        signals.update(
+            {
+                "dry_run": True,
+                "note": "No provider calls were made.",
+            }
+        )
+        trace.final_quality_signals = signals
 
         output_text = self._dry_run_text(request, plan)
         output_json = None

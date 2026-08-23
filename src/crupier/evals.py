@@ -19,6 +19,24 @@ from .redaction import redact_value
 from .retention import is_expired, prune_jsonl
 from .state import ensure_private_directory, private_append_text, private_write_text
 
+# Claves que evaluate_expectations sabe comprobar. Cualquier otra se reporta
+# como fallo: un typo no debe hacer pasar el caso en vacío.
+EXPECTATION_KEYS = frozenset(
+    {
+        "max_models",
+        "min_models",
+        "models_exclude",
+        "models_include",
+        "providers_exclude",
+        "providers_include",
+        "risk_level",
+        "roles_exclude",
+        "roles_include",
+        "strategy",
+        "strategy_in",
+    }
+)
+
 BUILTIN_ROUTING_EVALS: list[dict[str, Any]] = [
     {
         "id": "fast_uses_single",
@@ -63,10 +81,14 @@ class EvalCase:
     strategy: str | None = None
     constraints: dict[str, Any] = field(default_factory=dict)
     expect: dict[str, Any] = field(default_factory=dict)
+    tools: list[Any] = field(default_factory=list)
     notes: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> EvalCase:
+        raw_tools = data.get("tools") or []
+        if raw_tools and not isinstance(raw_tools, list):
+            raise TypeError(f"Eval case {data.get('id')!r} tools must be a list.")
         return cls(
             id=str(data["id"]),
             task=str(data["task"]),
@@ -75,6 +97,7 @@ class EvalCase:
             strategy=data.get("strategy"),
             constraints=dict(data.get("constraints", {})),
             expect=dict(data.get("expect", {})),
+            tools=list(raw_tools),
             notes=data.get("notes", ""),
         )
 
@@ -333,6 +356,7 @@ class RoutingEvalRunner:
         mode: str | None = None,
         strategy: str | None = None,
         constraints: dict[str, Any] | None = None,
+        tools: list[Any] | None = None,
         variants: list[CompareVariant] | None = None,
         response_schema: Any = None,
         expect_contains: list[str] | None = None,
@@ -356,6 +380,7 @@ class RoutingEvalRunner:
                 response_schema=response_schema,
                 expect_contains=expect_contains or [],
                 dry_run=dry_run,
+                tools=tools,
             )
             for variant in variants
         ]
@@ -404,6 +429,7 @@ class RoutingEvalRunner:
                 mode=case.mode,
                 strategy=case.strategy,
                 constraints=merged_constraints,
+                tools=case.tools or None,
                 variants=variants,
                 expect_contains=expect_contains,
                 dry_run=dry_run,
@@ -476,6 +502,7 @@ class RoutingEvalRunner:
                 mode=case.mode,
                 strategy=case.strategy,
                 constraints=case.constraints,
+                tools=case.tools or None,
                 trace="summary",
                 dry_run=True,
             )
@@ -520,6 +547,7 @@ class RoutingEvalRunner:
         response_schema: Any,
         expect_contains: list[str],
         dry_run: bool,
+        tools: list[Any] | None = None,
     ) -> CompareVariantResult:
         constraints = {**base_constraints, **variant.constraints}
         try:
@@ -529,6 +557,7 @@ class RoutingEvalRunner:
                 mode=variant.mode or base_mode,
                 strategy=variant.strategy or base_strategy,
                 constraints=constraints,
+                tools=tools,
                 response_schema=response_schema,
                 trace="summary",
                 dry_run=dry_run,
@@ -595,6 +624,9 @@ def evaluate_expectations(plan: RoutePlan, expect: dict[str, Any]) -> list[str]:
     failed: list[str] = []
     if not expect:
         return failed
+
+    unknown = sorted(set(expect) - EXPECTATION_KEYS)
+    failed.extend(f"unknown expectation key {key!r}" for key in unknown)
 
     if "strategy" in expect and plan.strategy != expect["strategy"]:
         failed.append(f"strategy expected {expect['strategy']!r}, got {plan.strategy!r}")

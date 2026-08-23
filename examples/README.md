@@ -81,7 +81,7 @@ python examples/live_operations_validation.py --real --project . --case embeddin
 
 ## Eval datasets
 
-- `routing-eval.json` checks expected strategies, roles, and model counts; its local-only case also pins which providers a route may and may not use.
+- `routing-eval.json` checks expected strategies, roles, model counts, and provider constraints. Unknown `expect` keys fail the case. The high-risk review case declares tools so `requires_tools` is a real catalog, not a missing-tools error.
 - `model-compare-eval.json` compares route variants over repeatable project cases.
 
 These datasets are intentionally small enough to inspect in code review. Replace their tasks and expectations with representative production cases before applying eval or feedback scores to a registry.

@@ -76,6 +76,26 @@ def test_session_keeps_compatible_route_and_replans_on_capability_change(tmp_pat
     assert '"clause": "renewal"' in adapter.calls[2]["prompt"]
 
 
+def test_session_keeps_compatible_route_in_dry_run(tmp_path):
+    """Dry-run no puede pisar sticky_route_reused: las sesiones offline también retienen ruta."""
+
+    client = make_client(tmp_path)
+    session = client.session(mode="agentic", sticky=True)
+
+    session.deal("Summarize ticket", input={"id": "T-1"}, dry_run=True)
+    second = session.deal("Draft the reply", dry_run=True, trace="summary")
+    csv_path = tmp_path / "contract.csv"
+    csv_path.write_text("clause,risk\nrenewal,high\n", encoding="utf-8")
+    session.deal("Review the attached table", files=[csv_path], dry_run=True)
+
+    assert second.trace is not None
+    assert second.trace.final_quality_signals["sticky_route_reused"] is True
+    assert session.route_history[1].reason == "compatible_route_retained"
+    assert session.route_history[1].reused is True
+    assert session.route_history[2].reason == "capability_changed"
+    assert session.route_history[2].reused is False
+
+
 def test_persisted_session_resumes_and_detects_concurrent_writers(tmp_path):
     client = make_client(tmp_path)
     session = client.session(mode="agentic", persist=True)

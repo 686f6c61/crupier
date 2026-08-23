@@ -38,6 +38,7 @@ def make_config(tmp_path):
             "routing": {"default_strategy": "orchestrated", "allow_fusion": True, "max_calls": 8},
             "profiles": {
                 "agentic": {"prefer": ["tool_use", "coding"], "strategy": "orchestrated"},
+                "cheap": {"prefer": ["low_cost"], "strategy": "orchestrated"},
                 "fast": {"prefer": ["low_latency"], "strategy": "single"},
                 "private": {"prefer": ["local"], "strategy": "local_first"},
                 "research": {"prefer": ["consensus"], "strategy": "fusion"},
@@ -96,6 +97,35 @@ def test_eval_expectations_report_human_relevant_failures():
     assert "expected at least 2 models, got 1" in failures
 
 
+def test_eval_expectations_fail_on_unknown_keys():
+    plan = RoutePlan(
+        strategy="single",
+        steps=[RouteStep(role="primary", model="openai:gpt-5.5")],
+    )
+
+    failures = evaluate_expectations(plan, {"strategy": "single", "provider_exclude": ["openai"]})
+
+    assert failures == ["unknown expectation key 'provider_exclude'"]
+
+
+def test_eval_case_loads_tools_and_rejects_a_non_list():
+    case = evals_module.EvalCase.from_dict(
+        {
+            "id": "with-tools",
+            "task": "Review",
+            "tools": [{"name": "read_changed_file"}],
+        }
+    )
+
+    assert case.tools == [{"name": "read_changed_file"}]
+    try:
+        evals_module.EvalCase.from_dict({"id": "bad", "task": "x", "tools": {"name": "x"}})
+    except TypeError as exc:
+        assert "tools must be a list" in str(exc)
+    else:
+        raise AssertionError("non-list tools should be rejected")
+
+
 def test_route_plan_shape_accepts_delegate_strategy():
     plan = RoutePlan(
         strategy="delegate",
@@ -117,6 +147,15 @@ def test_builtin_routing_evals_pass_with_seed_config(tmp_path):
     assert report.ok
     assert report.total == 5
     assert report.passed == 5
+
+
+def test_public_routing_eval_dataset_passes_offline(tmp_path):
+    dataset = Path(__file__).resolve().parents[1] / "examples" / "routing-eval.json"
+    report = RoutingEvalRunner(Crupier(make_config(tmp_path))).run(dataset=dataset)
+
+    assert report.ok, [(item.id, item.failed_checks, item.error) for item in report.results if not item.ok]
+    assert report.total == 7
+    assert report.passed == 7
 
 
 def test_eval_runner_loads_dataset_and_writes_report(tmp_path):

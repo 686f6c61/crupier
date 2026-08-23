@@ -31,6 +31,18 @@
         "risk_level": "high",
         "requires_tools": true
       },
+      "tools": [
+        {
+          "name": "read_changed_file",
+          "description": "Read a changed source file from the repository checkout.",
+          "requires_approval": true
+        },
+        {
+          "name": "run_targeted_tests",
+          "description": "Run a focused test command selected by the reviewer.",
+          "requires_approval": true
+        }
+      ],
       "expect": {
         "strategy_in": ["critique_repair", "single"],
         "min_models": 1

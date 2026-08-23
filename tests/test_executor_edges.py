@@ -243,11 +243,14 @@ def test_executor_dry_run_includes_structured_and_file_plan(tmp_path):
         file_plan=file_plan,
     )
 
-    result = executor.execute(request, _plan(), _trace(), dry_run=True)
+    trace = _trace()
+    trace.final_quality_signals["sticky_route_reused"] = True
+    result = executor.execute(request, _plan(), trace, dry_run=True)
 
     assert result.output_json["dry_run"] is True
     assert "pdf->extracted_text_chunks" in result.output_text
     assert result.trace.final_quality_signals["dry_run"] is True
+    assert result.trace.final_quality_signals["sticky_route_reused"] is True
 
 
 def test_executor_unknown_strategy_uses_first_model_and_preserves_requested_raw_output(tmp_path):

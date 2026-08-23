@@ -17,6 +17,9 @@ All notable changes to Crupier will be documented here.
 - Hardened GitHub Actions: job timeouts, CI concurrency that does not cancel the weekly dependency audit, checkout without persisted credentials, and shorter artifact retention.
 - Packaged every public example (`routing_tradeoffs`, `specialized_operations`, `eval_feedback_loop`, `fail_closed_safety`, and `examples/README.md`) and added an offline fail-closed onboarding example for unofficial hosts, malformed policy, and secret redaction.
 - Failed `crupier release check` when packaged onboarding documents advertise a version other than `[project].version`, so an examples index titled `0.6.0` cannot ship inside a `0.5.0` sdist.
+- Preserved dry-run trace signals such as `sticky_route_reused`, so offline sessions report compatible-route reuse instead of rewriting the reason to `route_invalidated_by_policy_or_budget`.
+- Failed routing evals on unknown `expect` keys instead of ignoring typos, and let eval cases declare `tools` so `requires_tools` datasets exercise the same contract as the SDK.
+- Live operations HTTP validation now records the endpoints that already succeeded when a later parse or transport error aborts the case.
 - Raised test coverage through dedicated module tests and CI dependency-audit jobs; the suite is the release gate alongside ruff, mypy, and `crupier release check`.
 - Bumped the package to `0.6.0` and aligned README, CONTRIBUTING, the bug-report placeholder, and the examples index with that version; publishing remains gated on full local, package, and real-provider verification.
 

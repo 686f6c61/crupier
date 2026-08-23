@@ -5,21 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-# Claves que `crupier.evals.evaluate_expectations` sabe comprobar. Una clave fuera
-# de este conjunto se ignoraría en silencio y el caso del dataset pasaría en vacío.
-SUPPORTED_EXPECTATIONS = {
-    "max_models",
-    "min_models",
-    "models_exclude",
-    "models_include",
-    "providers_exclude",
-    "providers_include",
-    "risk_level",
-    "roles_exclude",
-    "roles_include",
-    "strategy",
-    "strategy_in",
-}
+from crupier.evals import EXPECTATION_KEYS
 
 SHOWCASE_SCRIPTS = {
     "approval_workflow.py",
@@ -84,6 +70,7 @@ def test_examples_demonstrate_enforced_contracts_and_boundaries():
     assert "sequential_panel_execution" not in outputs["drop_in_agent_boundary.py"]
     assert "csv_rows_extracted=2" in outputs["multimodal_claim_review.py"]
     assert "last_replanned=True" in outputs["session_contract_review.py"]
+    assert "retained_route=True" in outputs["session_contract_review.py"]
     assert "live_execution_gate=False" in outputs["shadow_canary_rollout.py"]
     assert "report_ok=True" in outputs["eval_feedback_loop.py"]
     assert "failed_checks=none" in outputs["eval_feedback_loop.py"]
@@ -153,14 +140,45 @@ def test_offline_example_client_declares_openrouter_as_disabled_byok():
 
 
 def test_routing_eval_dataset_only_uses_supported_expectations():
-    """Una clave mal escrita en `expect` no rompe nada: el caso pasaría sin comprobar."""
+    """El dataset público no puede arrastrar claves que el runner ahora rechaza."""
 
     dataset_path = Path(__file__).resolve().parents[1] / "examples" / "routing-eval.json"
     dataset = json.loads(dataset_path.read_text(encoding="utf-8"))
     used = {key for case in dataset["cases"] for key in case.get("expect", {})}
 
     assert used
-    assert sorted(used - SUPPORTED_EXPECTATIONS) == []
+    assert sorted(used - EXPECTATION_KEYS) == []
+
+
+def test_operations_harness_keeps_partial_http_observations():
+    """Si un endpoint HTTP revienta, el informe debe conservar lo ya observado."""
+
+    examples_dir = Path(__file__).resolve().parents[1] / "examples"
+    sys.path.insert(0, str(examples_dir))
+    try:
+        import live_operations_validation as harness
+    finally:
+        sys.path.remove(str(examples_dir))
+
+    def boom(_client):
+        raise harness.PartialCaseFailure(
+            "embeddings",
+            {"health": {"status": 200, "ok": True}, "models": {"status": 200, "count": 3}},
+            json.JSONDecodeError("Expecting value", "", 0),
+        )
+
+    original = harness.CASE_RUNNERS["http"]
+    harness.CASE_RUNNERS["http"] = boom
+    try:
+        payload = harness._run_case("http", object())
+    finally:
+        harness.CASE_RUNNERS["http"] = original
+
+    assert payload["status"] == "fail"
+    assert payload["failed_step"] == "embeddings"
+    assert payload["error_type"] == "JSONDecodeError"
+    assert payload["endpoints"]["health"] == {"status": 200, "ok": True}
+    assert payload["endpoints"]["models"]["count"] == 3
 
 
 def _example_secret() -> str:
