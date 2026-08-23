@@ -3,6 +3,11 @@
 The inputs are summarized for planning and no provider is called:
 
     python examples/specialized_operations.py
+
+Unlike the chat examples, every route below reports `planned_provider_calls=0`.
+Operation planning does not stage dry-run calls in the trace, so the planned work
+is the route itself: one `primary` step bound to one operation-capable model.
+`real_provider_calls=0` is the line that proves nothing was sent to a provider.
 """
 
 from __future__ import annotations
@@ -75,6 +80,13 @@ def main() -> None:
 
     for name, result in results:
         print_route(name, result, extra={"dry_run": True})
+
+    # La columna «planned» del chat no aplica a operaciones: el planificador de
+    # operaciones no registra llamadas en la traza, por eso siempre vale 0.
+    print(
+        "planned_provider_calls_note=operations plan one primary step per request; "
+        "the trace records no staged calls, so planned stays 0 while real proves the dry run"
+    )
 
 
 if __name__ == "__main__":

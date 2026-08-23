@@ -51,7 +51,7 @@ python examples/specialized_operations.py
 python examples/eval_feedback_loop.py
 ```
 
-`specialized_operations.py` uses OpenAI, Google, and NaN capability cards in `dry_run` mode. It proves operation filtering and selection; it does not claim those providers are configured or healthy for your account.
+`specialized_operations.py` uses OpenAI, Google, and NaN capability cards in `dry_run` mode. It proves operation filtering and selection; it does not claim those providers are configured or healthy for your account. Its routes report `planned_provider_calls=0`: operation planning does not stage dry-run calls in the trace, so `real_provider_calls=0` is the line that proves nothing was sent.
 
 `eval_feedback_loop.py` deliberately shows a cheap route winning deterministic dry-run checks and then receiving negative human feedback for insufficient review depth. Dry-run comparison validates route shape and estimated economics, not answer quality. Its feedback JSONL is created in a temporary directory and removed on exit.
 
