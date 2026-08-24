@@ -115,18 +115,18 @@ crupier release check --strict-public --verify-project-urls --check-pypi-name --
 crupier release check --strict-public --verify-providers --provider openai --provider anthropic --provider google --provider ollama --provider inference
 ```
 
-Publish `0.6.0` from a GitHub Release tagged `v0.6.0` or `0.6.0` only after
+Publish `0.6.1` from a GitHub Release tagged `v0.6.1` or `0.6.1` only after
 PyPI trusted publishing is configured for this repository and the `pypi`
 environment. The publish workflow checks the release tag against the package
 version before building or uploading distributions. Manual workflow dispatch
-must provide `version=0.6.0` and `confirm_publish=true`; use it only to retry an
+must provide `version=0.6.1` and `confirm_publish=true`; use it only to retry an
 intentional release operation.
 The workflow accepts the existing PyPI project for maintenance releases after
 the first upload has established ownership.
 
 ## Release Discipline
 
-Crupier public releases use final numeric versions such as `0.6.0`. Do not
+Crupier public releases use final numeric versions such as `0.6.1`. Do not
 publish non-final, development, or local build versions unless the release
 policy is intentionally changed.
 

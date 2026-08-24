@@ -1,4 +1,4 @@
-# Crupier 0.6.0 examples
+# Crupier 0.6.1 examples
 
 These examples are integration blueprints, not provider benchmarks. The default path is offline: it builds the real capability registry, policy filters, scoring terms, route plan, cost estimate, and decision trace without spending tokens or requiring API keys.
 

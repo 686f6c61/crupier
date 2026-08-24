@@ -2,6 +2,10 @@
 
 All notable changes to Crupier will be documented here.
 
+## 0.6.1 - 2026-08-24
+
+- Raised the `pypdf` floor to `6.15.0` and the `pytest` floor to `9.0.3` so the weekly minimum-bounds audit no longer installs `PYSEC-2026-3655`/`PYSEC-2026-3656` or `PYSEC-2026-1845`.
+
 ## 0.6.0 - 2026-08-23
 
 - Blocked canonical provider credentials from unofficial hosts unless the project sets `allow_custom_host = true` and uses HTTPS (HTTP only on loopback). Generic inference hosts may only use their own configured env key.

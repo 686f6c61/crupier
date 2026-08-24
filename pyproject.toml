@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crupier"
-version = "0.6.0"
+version = "0.6.1"
 description = "Python orchestration SDK for routing, combining, and auditing AI model calls."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -39,11 +39,11 @@ google = ["google-genai>=2.16.0", "pyasn1>=0.6.4"]
 ollama = []
 openrouter = ["openai>=2.52.0"]
 inference-server = ["openai>=2.52.0"]
-pdf = ["pypdf>=6.14.2"]
+pdf = ["pypdf>=6.15.0"]
 spreadsheets = ["openpyxl>=3.1.5"]
 documents = ["python-docx>=1.2.0"]
 files = [
-  "pypdf>=6.14.2",
+  "pypdf>=6.15.0",
   "openpyxl>=3.1.5",
   "python-docx>=1.2.0",
 ]
@@ -52,7 +52,7 @@ all = [
   "anthropic>=0.120.2",
   "google-genai>=2.16.0",
   "pyasn1>=0.6.4",
-  "pypdf>=6.14.2",
+  "pypdf>=6.15.0",
   "openpyxl>=3.1.5",
   "python-docx>=1.2.0",
 ]
@@ -61,9 +61,9 @@ dev = [
   "anthropic>=0.120.2",
   "google-genai>=2.16.0",
   "pyasn1>=0.6.4",
-  "pypdf>=6.14.2",
+  "pypdf>=6.15.0",
   "setuptools>=83",
-  "pytest>=8",
+  "pytest>=9.0.3",
   "pytest-cov>=6",
   "mypy>=1.18.1",
   "build>=1",
