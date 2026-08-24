@@ -1,7 +1,7 @@
 # Crupier Landing
 
 Static production site for [crupier.686f6c61.dev](https://crupier.686f6c61.dev/).
-This branch presents Crupier `0.6.0`; package source, installation guidance,
+This branch presents Crupier `0.6.1`; package source, installation guidance,
 release notes, and developer documentation live on
 [`main`](https://github.com/686f6c61/crupier/tree/main).
 
@@ -23,7 +23,7 @@ Nginx.
 python3 site/validate.py
 python3 "$HOME/.codex/skills/crear-landing-html/scripts/audit_landing.py" \
   site/index.html --strict
-docker build -f Dockerfile.site -t crupier-landing:0.6.0 .
+docker build -f Dockerfile.site -t crupier-landing:0.6.1 .
 ```
 
 Open `site/index.html` directly for content and layout checks. Validate the

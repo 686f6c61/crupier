@@ -31,7 +31,7 @@ REQUIRED_FILES = (
 )
 PUBLIC_MODEL_PROVIDERS = {"anthropic", "google", "ollama", "openai"}
 ALLOWED_EXTERNAL_SCRIPTS = {"https://analytics.686f6c61.dev/script.js"}
-SITE_VERSION = "0.6.0"
+SITE_VERSION = "0.6.1"
 
 
 class SiteParser(HTMLParser):
